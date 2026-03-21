@@ -185,6 +185,78 @@ type = "elevenlabs"
 
 Default instructions describe available endpoints (TTS, streaming TTS, sound generation, voices, models, subscription).
 
+### Recraft
+
+HTTP client for the Recraft image generation API with automatic Bearer authentication. The base URL already includes `/v1`, so all paths must be specified **without** a `/v1` prefix. Note that Recraft returns WebP images by default, even when `response_format` is set to `"url"`.
+
+**Required fields**: `name`, `type`
+
+**Optional fields**: `url` (default: `https://external.api.recraft.ai/v1`), `instructions`
+
+**Secret**: `{name}-token` in keychain (API key)
+
+```toml
+[[connections]]
+name = "recraft"
+type = "recraft"
+```
+
+**MCP tools exposed**:
+
+| Tool | Description |
+|------|-------------|
+| `{name}_get` | HTTP GET request to the Recraft API. Parameter: `path` (required, e.g. `/users/me`). |
+| `{name}_post` | HTTP POST request with JSON body to the Recraft API. Parameters: `path` (required, e.g. `/images/generations`), `body` (required, JSON string). |
+
+Default instructions describe available endpoints:
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /images/generations` | Generate image from text prompt. Body: `prompt`, `model` (`recraftv4`, `recraftv4_vector`, `recraftv4_pro`, `recraftv4_pro_vector`, `recraftv3`, `recraftv3_vector`), `size`, `style`, `n`, `response_format`. V4 styles: `realistic_image`, `digital_illustration`. V3 styles: `realistic_image`, `digital_illustration`, `vector_illustration`. Sizes: 1024x1024, 1365x1024, 1024x1365, 1536x1024, 1024x1536, 1820x1024, 1024x1820, 1024x2048, 2048x1024, and more. |
+| `GET /users/me` | User info and remaining credits. |
+| `POST /images/vectorize` | Vectorize a raster image (multipart: file). |
+| `POST /images/removeBackground` | Remove image background (multipart: file). |
+| `POST /images/crispUpscale` | Crisp upscale (multipart: file). |
+| `POST /images/creativeUpscale` | Creative upscale with enhancement (multipart: file). |
+| `POST /images/imageToImage` | Image-to-image transformation (multipart: file, prompt, strength). |
+| `POST /images/inpaint` | Inpainting (multipart: file, mask, prompt). |
+| `POST /images/replaceBackground` | Replace image background (multipart: file, prompt). |
+| `POST /styles` | Create a style reference (multipart: files). |
+
+### Ideogram
+
+HTTP client for the Ideogram image generation API with automatic `Api-Key` header authentication.
+
+**Required fields**: `name`, `type`
+
+**Optional fields**: `url` (default: `https://api.ideogram.ai`), `instructions`
+
+**Secret**: `{name}-token` in keychain (API key)
+
+```toml
+[[connections]]
+name = "ideogram"
+type = "ideogram"
+```
+
+**MCP tools exposed**:
+
+| Tool | Description |
+|------|-------------|
+| `{name}_get` | HTTP GET request to the Ideogram API. Parameter: `path` (required). |
+| `{name}_post` | HTTP POST request with JSON body to the Ideogram API. Parameters: `path` (required, e.g. `/v1/ideogram-v3/generate`), `body` (required, JSON string). |
+
+Default instructions describe available endpoints:
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/ideogram-v3/generate` | Generate image from text prompt. Body: `prompt`, `rendering_speed` (`FLASH`, `TURBO`, `DEFAULT`, `QUALITY`), `resolution`, `aspect_ratio`, `style_type` (`AUTO`, `GENERAL`, `REALISTIC`, `DESIGN`, `FICTION`), `magic_prompt`, `num_images`. |
+| `POST /v1/ideogram-v3/remix` | Remix an existing image (multipart: image, prompt). |
+| `POST /v1/ideogram-v3/edit` | Edit an image (multipart: image, mask, prompt). |
+| `POST /v1/ideogram-v3/reframe` | Reframe/extend an image (multipart: image, resolution). |
+| `POST /v1/ideogram-v3/replace-background` | Replace image background (multipart: image, prompt). |
+| `POST /v1/ideogram-v3/describe` | Describe an image (multipart: image). |
+
 ### Brave Search
 
 Web and local search via the Brave Search API. Includes client-side request counting and rate limit tracking.

@@ -346,10 +346,11 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 func (a *App) GetPageData() PageData {
 	data := PageData{
 		Server: ServerInfo{
-			Version:   a.version,
-			Uptime:    time.Since(a.startTime).Round(time.Second).String(),
-			Port:      a.port,
-			BuildTime: a.buildTime,
+			Version:       a.version,
+			Uptime:        time.Since(a.startTime).Round(time.Second).String(),
+			Port:          a.port,
+			BuildTime:     a.buildTime,
+			CanSelfUpdate: selfUpdateURL() != "",
 		},
 		Types: allTypes(),
 	}
@@ -390,10 +391,11 @@ func (a *App) GetPageData() PageData {
 // GetServerInfo returns server metadata for the header.
 func (a *App) GetServerInfo() ServerInfo {
 	return ServerInfo{
-		Version:   a.version,
-		Uptime:    time.Since(a.startTime).Round(time.Second).String(),
-		Port:      a.port,
-		BuildTime: a.buildTime,
+		Version:       a.version,
+		Uptime:        time.Since(a.startTime).Round(time.Second).String(),
+		Port:          a.port,
+		BuildTime:     a.buildTime,
+		CanSelfUpdate: selfUpdateURL() != "",
 	}
 }
 

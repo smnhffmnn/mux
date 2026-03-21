@@ -29,14 +29,16 @@
     </span>
   </div>
   <div class="header-right">
-    {#if updateResult}
-      <span class="update-msg" class:success={updateResult.success} class:error={!updateResult.success}>
-        {updateResult.message}
-      </span>
+    {#if $serverInfo?.canSelfUpdate}
+      {#if updateResult}
+        <span class="update-msg" class:success={updateResult.success} class:error={!updateResult.success}>
+          {updateResult.message}
+        </span>
+      {/if}
+      <button onclick={handleUpdate} disabled={updating}>
+        {updating ? 'Updating...' : 'Check Update'}
+      </button>
     {/if}
-    <button onclick={handleUpdate} disabled={updating}>
-      {updating ? 'Updating...' : 'Check Update'}
-    </button>
   </div>
 </header>
 

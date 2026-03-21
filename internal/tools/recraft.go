@@ -29,6 +29,7 @@ Endpoints:
   Styles (V3 only): realistic_image, digital_illustration, vector_illustration
   Styles (V4): realistic_image, digital_illustration (V4 does NOT support vector_illustration, icon, or logo)
   Sizes: 1024x1024, 1365x1024, 1024x1365, 1536x1024, 1024x1536, 1820x1024, 1024x1820, 1024x2048, 2048x1024, 1434x1024, 1024x1434, 1024x1280, 1280x1024, 1024x1149, 1149x1024
+  Note: response_format "url" returns WebP images (not PNG). Use "b64_json" for base64-encoded PNG.
 
 - GET /users/me — User info and remaining credits
 

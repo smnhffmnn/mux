@@ -24,6 +24,7 @@ export interface ServerInfo {
   uptime: string
   port: number
   buildTime: string
+  canSelfUpdate: boolean
 }
 
 export interface ERPInfo {

@@ -14,10 +14,11 @@ type PageData struct {
 
 // ServerInfo contains version/uptime metadata shown in the header.
 type ServerInfo struct {
-	Version   string `json:"version"`
-	Uptime    string `json:"uptime"`
-	Port      int    `json:"port"`
-	BuildTime string `json:"buildTime"`
+	Version        string `json:"version"`
+	Uptime         string `json:"uptime"`
+	Port           int    `json:"port"`
+	BuildTime      string `json:"buildTime"`
+	CanSelfUpdate  bool   `json:"canSelfUpdate"`
 }
 
 // ERPInfo describes ERP provisioning status.
