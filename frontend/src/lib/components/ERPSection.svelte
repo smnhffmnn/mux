@@ -46,29 +46,29 @@
 
 <div class="section">
   <div class="section-header">
-    <h2>ERP Provisioning</h2>
+    <h2>Provisioning</h2>
   </div>
 
   <div class="erp-card">
     <div class="form-grid">
       <div class="field">
-        <label for="erp-endpoint">Endpoint</label>
-        <input id="erp-endpoint" type="text" placeholder="https://erp.example.com/api/mux" bind:value={endpoint} />
+        <label for="provisioning-endpoint">Endpoint</label>
+        <input id="provisioning-endpoint" type="text" placeholder="https://provisioning.example.com/api/mux/config" bind:value={endpoint} />
       </div>
       <div class="field">
-        <label for="erp-token">Token</label>
-        <input id="erp-token" type="password" placeholder={erp.tokenSet ? '••••• (stored)' : 'Bearer token'} bind:value={token} />
+        <label for="provisioning-token">Token</label>
+        <input id="provisioning-token" type="password" placeholder={erp.tokenSet ? '••••• (stored)' : 'Bearer token'} bind:value={token} />
       </div>
     </div>
 
     <div class="erp-actions">
       <button onclick={handleSetup} disabled={saving}>{saving ? 'Saving...' : 'Save'}</button>
-      <button class="primary" onclick={handleSync} disabled={syncing || !erp.configured}>{syncing ? 'Syncing...' : 'Sync from ERP'}</button>
+      <button class="primary" onclick={handleSync} disabled={syncing || !erp.configured}>{syncing ? 'Syncing...' : 'Sync'}</button>
     </div>
 
     {#if erp.configured}
       <div class="erp-status">
-        <span>{erp.tunnels} tunnels, {erp.connections} connections from ERP</span>
+        <span>{erp.tunnels} tunnels, {erp.connections} connections provisioned</span>
       </div>
     {/if}
 

@@ -8,7 +8,7 @@
   <div class="tunnel-left">
     <span class="dot" class:green={tunnel.connected} class:gray={!tunnel.connected}></span>
     <span class="tunnel-name">{tunnel.name}</span>
-    <span class="badge">{tunnel.source === 'erp' ? 'ERP' : 'LOCAL'}</span>
+    <span class="badge">{tunnel.source === 'erp' ? 'PROVISIONED' : 'LOCAL'}</span>
   </div>
   <div class="tunnel-right">
     <span class="tunnel-detail">{tunnel.tunnelAddress}</span>

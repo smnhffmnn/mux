@@ -50,7 +50,7 @@
       </button>
       <span class="badge">{conn.typeLabel}</span>
       {#if conn.source === 'erp'}
-        <span class="badge erp">ERP</span>
+        <span class="badge erp">PROVISIONED</span>
       {/if}
       {#if conn.tunnel}
         <span class="badge tunnel">🔒 {conn.tunnel}</span>

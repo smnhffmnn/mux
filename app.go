@@ -548,7 +548,7 @@ func (a *App) SetupERP(endpoint, token string) (*ERPInfo, error) {
 	}
 	if token != "" {
 		a.cfg.ERP.Token = token
-		if err := config.SaveSecret("erp-token", token); err != nil {
+		if err := config.SaveSecret("provisioning-token", token); err != nil {
 			log.Printf("[app] Warning: could not save ERP token to keychain: %v", err)
 		}
 	}

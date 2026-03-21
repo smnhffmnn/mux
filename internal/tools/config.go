@@ -107,7 +107,7 @@ func (ct *ConfigTools) secretSetTool() ToolDef {
 		Tool: mcp.NewTool("secret_set",
 			mcp.WithDescription("Store a secret in the OS keychain. Write-only — the value can never be read back. Use '{connection-name}-token' for API keys or '{connection-name}-password' for database passwords."),
 			mcp.WithString("key", mcp.Required(),
-				mcp.Description("Keychain key, e.g. 'my-firecrawl-token', 'production-password', 'erp-token'."),
+				mcp.Description("Keychain key, e.g. 'my-firecrawl-token', 'production-password', 'provisioning-token'."),
 			),
 			mcp.WithString("value", mcp.Required(),
 				mcp.Description("Secret value to store."),
@@ -320,7 +320,7 @@ func (ct *ConfigTools) handleSecretSet(_ context.Context, req mcp.CallToolReques
 	}
 
 	if !config.ValidSecretKey(key) {
-		return mcp.NewToolResultError("invalid key: must match '{name}-password', '{name}-token', 'erp-token', 'tunnel-{name}-private-key', or 'tunnel-{name}-preshared-key'"), nil
+		return mcp.NewToolResultError("invalid key: must match '{name}-password', '{name}-token', 'provisioning-token', 'tunnel-{name}-private-key', or 'tunnel-{name}-preshared-key'"), nil
 	}
 
 	if err := config.SaveSecret(key, value); err != nil {
@@ -339,7 +339,7 @@ func (ct *ConfigTools) updateInMemorySecret(key, value string) {
 		if c := ct.cfg.FindConnection(name); c != nil {
 			c.Password = value
 		}
-	} else if key != "erp-token" && strings.HasSuffix(key, "-token") {
+	} else if key != "provisioning-token" && strings.HasSuffix(key, "-token") {
 		name := strings.TrimSuffix(key, "-token")
 		if c := ct.cfg.FindConnection(name); c != nil {
 			c.Token = value
@@ -357,8 +357,8 @@ func (ct *ConfigTools) handleSecretCheck(_ context.Context, req mcp.CallToolRequ
 	secrets := make(map[string]bool)
 
 	if connFilter == "" {
-		_, err := config.GetSecret("erp-token")
-		secrets["erp-token"] = err == nil
+		_, err := config.GetSecret("provisioning-token")
+		secrets["provisioning-token"] = err == nil
 	}
 
 	for _, c := range ct.cfg.AllConnections() {

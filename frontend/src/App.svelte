@@ -56,7 +56,7 @@
   const navItems = [
     { id: 'connections' as const, label: 'Connections', icon: '⬡' },
     { id: 'tunnels' as const, label: 'Tunnels', icon: '◈' },
-    { id: 'erp' as const, label: 'ERP', icon: '⟐' },
+    { id: 'erp' as const, label: 'Provisioning', icon: '⟐' },
     { id: 'about' as const, label: 'About', icon: '◎' },
   ]
 </script>

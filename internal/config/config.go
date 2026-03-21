@@ -438,8 +438,8 @@ func (cfg *Config) Save() error {
 // --- Keychain ---
 
 func loadKeychain(cfg *Config) {
-	// ERP token
-	if v, err := keyring.Get(ServiceName, "erp-token"); err == nil {
+	// Provisioning token
+	if v, err := keyring.Get(ServiceName, "provisioning-token"); err == nil {
 		cfg.ERP.Token = v
 	}
 
@@ -474,11 +474,11 @@ func loadEnv(cfg *Config) {
 		}
 	}
 
-	// ERP
-	if v := os.Getenv("MUX_ERP_ENDPOINT"); v != "" {
+	// Provisioning
+	if v := os.Getenv("MUX_PROVISIONING_ENDPOINT"); v != "" {
 		cfg.ERP.Endpoint = v
 	}
-	if v := os.Getenv("MUX_ERP_TOKEN"); v != "" {
+	if v := os.Getenv("MUX_PROVISIONING_TOKEN"); v != "" {
 		cfg.ERP.Token = v
 	}
 
@@ -630,7 +630,7 @@ func DeleteSecret(key string) error {
 
 // ValidSecretKey checks that a keychain key matches known mux patterns.
 func ValidSecretKey(key string) bool {
-	if key == "erp-token" {
+	if key == "provisioning-token" {
 		return true
 	}
 	if strings.HasSuffix(key, "-password") ||

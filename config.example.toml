@@ -6,11 +6,11 @@
 [server]
 port = 7700
 
-# ERP Provisioning (optional)
-# Fetches connections and tunnels from a central ERP system.
-# Token is stored in OS keychain (key: "erp-token").
+# Remote Provisioning (optional)
+# Fetches connections and tunnels from a central provisioning server.
+# Token is stored in OS keychain (key: "provisioning-token").
 # [erp]
-# endpoint = "https://erp.example.com/api/mux/config"
+# endpoint = "https://provisioning.example.com/api/mux/config"
 
 # --- Connections ---
 # Define any number of database or proxy connections.
