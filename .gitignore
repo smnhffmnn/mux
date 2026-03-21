@@ -1,0 +1,29 @@
+# Binary
+nmg
+nmg.exe
+
+# Build output
+dist/
+build/bin/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/bindings/
+frontend/package.json.md5
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with secrets (the example is tracked)
+config.toml
+
+# Test
+coverage.out

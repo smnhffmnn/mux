@@ -1,0 +1,98 @@
+# mux (MCP Unified Exchange) Configuration
+# Copy to ~/.mux/config.toml and adjust values.
+# Secrets (passwords, tokens, keys) should be stored in OS keychain via the web UI
+# or set as environment variables — they are NOT stored in this file.
+
+[server]
+port = 7700
+
+# ERP Provisioning (optional)
+# Fetches connections and tunnels from a central ERP system.
+# Token is stored in OS keychain (key: "erp-token").
+# [erp]
+# endpoint = "https://erp.example.com/api/mux/config"
+
+# --- Connections ---
+# Define any number of database or proxy connections.
+# Each connection registers MCP tools as {name}_{tool}.
+
+# PostgreSQL
+[[connections]]
+name = "production"
+type = "postgresql"
+host = "localhost"
+port = 5432
+user = "readonly"
+database = "mydb"
+read_only = true
+# tunnel = "office-vpn"                  # optional: route through WireGuard tunnel
+# instructions = "Production database."  # optional: added to MCP server instructions
+# Password stored in keychain (key: "production-password")
+
+# ClickHouse
+# [[connections]]
+# name = "analytics"
+# type = "clickhouse"
+# host = "localhost"
+# port = 8123                            # 8123/8443 = HTTP, other = native TCP
+# user = "default"
+# database = "default"
+# secure = false                         # TLS for HTTP protocol
+# Password stored in keychain (key: "analytics-password")
+
+# MariaDB
+# [[connections]]
+# name = "local-dev"
+# type = "mariadb"
+# host = "localhost"
+# port = 3306
+# user = "root"
+# database = "myapp"
+# read_only = false                      # false enables {name}_execute tool
+# Password stored in keychain (key: "local-dev-password")
+
+# Proxy: Bearer token (e.g. YouTrack)
+# [[connections]]
+# name = "youtrack"
+# type = "proxy"
+# url = "https://instance.myjetbrains.com/mcp"
+# Token stored in keychain (key: "youtrack-token")
+
+# Proxy: OAuth 2.0 + PKCE (e.g. Sentry)
+# [[connections]]
+# name = "sentry"
+# type = "proxy"
+# url = "https://mcp.sentry.dev/mcp"
+# oauth = true
+# OAuth tokens stored in keychain (key: "sentry-oauth-token")
+
+# --- WireGuard Tunnels ---
+# Connections can reference tunnels by name to route traffic through WireGuard.
+
+# [[tunnels]]
+# name = "office-vpn"
+# peer_public_key = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg="
+# peer_endpoint = "vpn.example.com:51820"
+# allowed_ips = "10.100.0.0/16"
+# tunnel_address = "10.100.0.42/32"
+# dns = "10.100.0.1"                     # optional
+# mtu = 1420                             # optional, default: 1420
+# keepalive = 25                         # optional, default: 25 seconds
+# Private key stored in keychain (key: "tunnel-office-vpn-private-key")
+# Preshared key stored in keychain (key: "tunnel-office-vpn-preshared-key")
+
+# --- Legacy Format ---
+# The old single-section format is still supported and auto-migrated:
+#
+# [mariadb]
+# host = "localhost"
+# ...
+#
+# [clickhouse]
+# host = "localhost"
+# ...
+#
+# [youtrack]
+# url = "https://..."
+#
+# These are automatically converted to [[connections]] entries on save.

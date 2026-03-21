@@ -1,0 +1,83 @@
+version: 2
+
+project_name: mux
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  # Headless builds — cross-compiled, no CGO
+  # These work everywhere: servers, containers, CI, any OS
+  - id: headless
+    binary: mux
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: default
+    formats: ['tar.gz']
+    format_overrides:
+      - goos: windows
+        formats: ['zip']
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE*
+      - config.example.toml
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+
+release:
+  draft: false
+  prerelease: auto
+  name_template: "v{{ .Version }}"
+  header: |
+    ## mux v{{ .Version }}
+
+    Single-binary MCP gateway for databases, upstream MCP servers, and private networks.
+
+    ### Headless builds (all platforms)
+    These binaries work without a GUI. Use with Claude Desktop (stdio) or Claude Code (HTTP).
+
+    ### macOS desktop build (with system tray)
+    For the macOS build with system tray support, build from source:
+    ```
+    go install github.com/smnhffmnn/mux@v{{ .Version }}
+    ```
+
+brews:
+  - ids: [headless]
+    repository:
+      owner: smnhffmnn
+      name: homebrew-tap
+    folder: Formula
+    homepage: "https://github.com/smnhffmnn/mux"
+    description: "MCP Unified Exchange — single-binary MCP gateway for databases, APIs, and tunnels"
+    license: "MIT"
+    install: |
+      bin.install "mux"
+    test: |
+      system "#{bin}/mux", "--version"

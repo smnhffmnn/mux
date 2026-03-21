@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  # GoReleaser creates the release + headless binaries for all platforms
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test -tags notray ./...
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Separate job: macOS native build with system tray (requires CGO)
+  macos-desktop:
+    needs: release
+    strategy:
+      matrix:
+        include:
+          - runner: macos-latest    # Apple Silicon
+            arch: arm64
+          - runner: macos-13        # Intel
+            arch: amd64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build macOS desktop binary
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          go build -ldflags "-s -w -X main.version=${VERSION}" \
+            -o mux-darwin-${{ matrix.arch }}-desktop .
+
+      - name: Create archive
+        run: |
+          tar czf mux_${GITHUB_REF_NAME#v}_darwin_${{ matrix.arch }}_desktop.tar.gz \
+            mux-darwin-${{ matrix.arch }}-desktop config.example.toml
+
+      - name: Upload to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ github.ref_name }} \
+            mux_${GITHUB_REF_NAME#v}_darwin_${{ matrix.arch }}_desktop.tar.gz \
+            --clobber

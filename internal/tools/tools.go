@@ -1,0 +1,171 @@
+package tools
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
+
+	"github.com/smnhffmnn/mux/internal/config"
+)
+
+// Dialer is the interface for custom network dialers (e.g. WireGuard tunnels).
+type Dialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
+}
+
+// ToolDef pairs a tool definition with its handler.
+type ToolDef struct {
+	Tool    mcp.Tool
+	Handler server.ToolHandlerFunc
+}
+
+// RegisterConnection creates and registers tools for a connection on the MCP server.
+// Returns the tool names registered, or an error if the connection could not be opened.
+// The dialer parameter is optional (nil = direct TCP connection).
+func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dialer) ([]string, error) {
+	if !conn.Enabled() {
+		return nil, fmt.Errorf("connection %q not configured", conn.Name)
+	}
+
+	var toolDefs []ToolDef
+	var err error
+
+	switch conn.Type {
+	case "mariadb":
+		var mdb *MariaDB
+		mdb, err = NewMariaDB(conn, dialer)
+		if err == nil {
+			toolDefs = mdb.Tools()
+		}
+	case "clickhouse":
+		var ch *ClickHouse
+		ch, err = NewClickHouse(conn, dialer)
+		if err == nil {
+			toolDefs = ch.Tools()
+		}
+	case "postgresql":
+		var pg *PostgreSQL
+		pg, err = NewPostgreSQL(conn, dialer)
+		if err == nil {
+			toolDefs = pg.Tools()
+		}
+	case "http":
+		var h *HTTP
+		h, err = NewHTTP(conn, dialer)
+		if err == nil {
+			toolDefs = h.Tools()
+		}
+	case "firecrawl":
+		var fc *Firecrawl
+		fc, err = NewFirecrawl(conn, dialer)
+		if err == nil {
+			toolDefs = fc.Tools()
+		}
+	case "brave":
+		var br *Brave
+		br, err = NewBrave(conn, dialer)
+		if err == nil {
+			toolDefs = br.Tools()
+		}
+	case "openai":
+		var oa *OpenAI
+		oa, err = NewOpenAI(conn, dialer)
+		if err == nil {
+			toolDefs = oa.Tools()
+		}
+	case "elevenlabs":
+		var el *ElevenLabs
+		el, err = NewElevenLabs(conn, dialer)
+		if err == nil {
+			toolDefs = el.Tools()
+		}
+	case "microsoft-graph":
+		var mg *MicrosoftGraph
+		mg, err = NewMicrosoftGraph(conn, dialer)
+		if err == nil {
+			toolDefs = mg.Tools()
+		}
+	case "google-tagmanager":
+		var gtm *GoogleTagManager
+		gtm, err = NewGoogleTagManager(conn, dialer)
+		if err == nil {
+			toolDefs = gtm.Tools()
+		}
+	default:
+		if config.IsProxyType(conn.Type) {
+			return nil, fmt.Errorf("proxy connections must be registered via the proxy package")
+		}
+		return nil, fmt.Errorf("unknown connection type %q", conn.Type)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	var names []string
+	for _, t := range toolDefs {
+		// Prefix tool name with connection name
+		prefixedName := conn.Name + "_" + t.Tool.Name
+		t.Tool.Name = prefixedName
+		s.AddTool(t.Tool, t.Handler)
+		log.Printf("[mux] Registered: %s", prefixedName)
+		names = append(names, prefixedName)
+	}
+	return names, nil
+}
+
+// DefaultInstructions returns built-in instructions for connection types that have them.
+// Returns empty string for types without default instructions.
+func DefaultInstructions(connType string) string {
+	switch connType {
+	case "openai":
+		return DefaultOpenAIInstructions
+	case "elevenlabs":
+		return DefaultElevenLabsInstructions
+	default:
+		return ""
+	}
+}
+
+// rowsToJSON converts sql.Rows into a JSON array of objects.
+func rowsToJSON(rows *sql.Rows) (*mcp.CallToolResult, error) {
+	cols, err := rows.Columns()
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("columns error: %v", err)), nil
+	}
+
+	var results []map[string]any
+	for rows.Next() {
+		values := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range values {
+			ptrs[i] = &values[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("scan error: %v", err)), nil
+		}
+
+		row := make(map[string]any)
+		for i, col := range cols {
+			v := values[i]
+			if b, ok := v.([]byte); ok {
+				v = string(b)
+			}
+			row[col] = v
+		}
+		results = append(results, row)
+	}
+
+	if results == nil {
+		results = []map[string]any{}
+	}
+
+	data, _ := json.MarshalIndent(results, "", "  ")
+	return mcp.NewToolResultText(string(data)), nil
+}

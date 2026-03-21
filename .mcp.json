@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mux": {
+      "command": "mux",
+      "args": ["--stdio"]
+    }
+  }
+}
