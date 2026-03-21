@@ -9,47 +9,43 @@ permissions:
   contents: write
 
 jobs:
-  # GoReleaser creates the release + headless binaries (macOS + Windows)
-  release:
+  # Create the GitHub Release first
+  create-release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Build frontend
-        working-directory: frontend
-        run: npm ci && npm run build
-
-      - name: Run tests
-        run: CGO_ENABLED=0 go test ./internal/...
-
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          version: "~> v2"
-          args: release --clean
+      - name: Create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ github.ref_name }} \
+            --title "v${GITHUB_REF_NAME#v}" \
+            --generate-notes
 
-  # macOS native build with system tray (requires CGO)
-  macos-desktop:
-    needs: release
+  # Build on each platform natively
+  build:
+    needs: create-release
     strategy:
       matrix:
         include:
-          - runner: macos-latest    # Apple Silicon
-            arch: arm64
-          - runner: macos-13        # Intel
-            arch: amd64
+          - runner: macos-latest
+            goos: darwin
+            goarch: arm64
+            binary: mux
+            archive: tar.gz
+          - runner: macos-13
+            goos: darwin
+            goarch: amd64
+            binary: mux
+            archive: tar.gz
+          - runner: windows-latest
+            goos: windows
+            goarch: amd64
+            binary: mux.exe
+            archive: zip
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -66,21 +62,93 @@ jobs:
         working-directory: frontend
         run: npm ci && npm run build
 
-      - name: Build macOS desktop binary
+      - name: Build binary
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           go build -ldflags "-s -w -X main.version=${VERSION}" \
-            -o mux-darwin-${{ matrix.arch }}-desktop .
+            -o ${{ matrix.binary }} .
+        shell: bash
 
       - name: Create archive
         run: |
-          tar czf mux_${GITHUB_REF_NAME#v}_darwin_${{ matrix.arch }}_desktop.tar.gz \
-            mux-darwin-${{ matrix.arch }}-desktop config.example.toml
+          VERSION=${GITHUB_REF_NAME#v}
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a mux_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip \
+              ${{ matrix.binary }} LICENSE config.example.toml
+          else
+            tar czf mux_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz \
+              ${{ matrix.binary }} LICENSE config.example.toml
+          fi
+        shell: bash
 
       - name: Upload to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ github.ref_name }} \
-            mux_${GITHUB_REF_NAME#v}_darwin_${{ matrix.arch }}_desktop.tar.gz \
-            --clobber
+          VERSION=${GITHUB_REF_NAME#v}
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            gh release upload ${{ github.ref_name }} \
+              mux_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip --clobber
+          else
+            gh release upload ${{ github.ref_name }} \
+              mux_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz --clobber
+          fi
+        shell: bash
+
+  # Update Homebrew tap
+  homebrew:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Homebrew formula
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+
+          # Download checksums
+          ARM64_URL="https://github.com/smnhffmnn/mux/releases/download/${GITHUB_REF_NAME}/mux_${VERSION}_darwin_arm64.tar.gz"
+          AMD64_URL="https://github.com/smnhffmnn/mux/releases/download/${GITHUB_REF_NAME}/mux_${VERSION}_darwin_amd64.tar.gz"
+
+          curl -sL "$ARM64_URL" -o arm64.tar.gz
+          curl -sL "$AMD64_URL" -o amd64.tar.gz
+
+          ARM64_SHA=$(sha256sum arm64.tar.gz | cut -d' ' -f1)
+          AMD64_SHA=$(sha256sum amd64.tar.gz | cut -d' ' -f1)
+
+          # Clone tap repo and update formula
+          git clone https://x-access-token:${GITHUB_TOKEN}@github.com/smnhffmnn/homebrew-tap.git tap
+          cd tap
+
+          cat > Formula/mux.rb << FORMULA
+          class Mux < Formula
+            desc "Single-binary MCP gateway for databases, APIs, and tunnels"
+            homepage "https://github.com/smnhffmnn/mux"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${ARM64_URL}"
+                sha256 "${ARM64_SHA}"
+              else
+                url "${AMD64_URL}"
+                sha256 "${AMD64_SHA}"
+              end
+            end
+
+            def install
+              bin.install "mux"
+            end
+
+            test do
+              assert_match "mux", shell_output("#{bin}/mux --version", 0)
+            end
+          end
+          FORMULA
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/mux.rb
+          git commit -m "Update mux to ${VERSION}" || true
+          git push
