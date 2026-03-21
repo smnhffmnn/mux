@@ -16,6 +16,8 @@
   <string>1.0.0</string>
   <key>LSMinimumSystemVersion</key>
   <string>10.15.0</string>
+  <key>CFBundleIconFile</key>
+  <string>appicon</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key>

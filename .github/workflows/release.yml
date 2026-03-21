@@ -76,6 +76,44 @@ jobs:
           fi
         shell: bash
 
+      - name: Create macOS .app bundle
+        if: matrix.goos == 'darwin'
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+
+          # Create .app directory structure
+          mkdir -p mux.app/Contents/MacOS
+          mkdir -p mux.app/Contents/Resources
+
+          # Copy binary
+          cp mux mux.app/Contents/MacOS/mux
+
+          # Copy Info.plist with updated version
+          sed "s/1.0.0/${VERSION}/g" build/darwin/Info.plist > mux.app/Contents/Info.plist
+
+          # Generate .icns from appicon.png
+          mkdir -p /tmp/icon.iconset
+          for size in 16 32 128 256 512; do
+            sips -z $size $size build/appicon.png --out /tmp/icon.iconset/icon_${size}x${size}.png 2>/dev/null
+          done
+          sips -z 32 32 build/appicon.png --out /tmp/icon.iconset/icon_16x16@2x.png 2>/dev/null
+          sips -z 64 64 build/appicon.png --out /tmp/icon.iconset/icon_32x32@2x.png 2>/dev/null
+          sips -z 256 256 build/appicon.png --out /tmp/icon.iconset/icon_128x128@2x.png 2>/dev/null
+          sips -z 512 512 build/appicon.png --out /tmp/icon.iconset/icon_256x256@2x.png 2>/dev/null
+          sips -z 1024 1024 build/appicon.png --out /tmp/icon.iconset/icon_512x512@2x.png 2>/dev/null
+          iconutil -c icns /tmp/icon.iconset -o mux.app/Contents/Resources/appicon.icns
+          rm -rf /tmp/icon.iconset
+
+          # Add icon reference to Info.plist
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string appicon" mux.app/Contents/Info.plist 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile appicon" mux.app/Contents/Info.plist
+
+          # Create .app archive
+          tar czf mux_${VERSION}_darwin_${GOARCH}_app.tar.gz mux.app
+        shell: bash
+        env:
+          GOARCH: ${{ matrix.goarch }}
+
       - name: Upload to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -88,6 +126,16 @@ jobs:
             gh release upload ${{ github.ref_name }} \
               mux_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz --clobber
           fi
+        shell: bash
+
+      - name: Upload .app bundle
+        if: matrix.goos == 'darwin'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          gh release upload ${{ github.ref_name }} \
+            mux_${VERSION}_darwin_${{ matrix.goarch }}_app.tar.gz --clobber
         shell: bash
 
   # Update Homebrew tap
