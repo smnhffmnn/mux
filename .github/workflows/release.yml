@@ -143,19 +143,26 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Update Homebrew formula
+      - name: Update Homebrew tap
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
           VERSION=${GITHUB_REF_NAME#v}
 
-          URL="https://github.com/smnhffmnn/mux/releases/download/${GITHUB_REF_NAME}/mux_${VERSION}_darwin_arm64.tar.gz"
-          curl -sL "$URL" -o release.tar.gz
-          SHA=$(sha256sum release.tar.gz | cut -d' ' -f1)
+          # Download and checksum both archives
+          FORMULA_URL="https://github.com/smnhffmnn/mux/releases/download/${GITHUB_REF_NAME}/mux_${VERSION}_darwin_arm64.tar.gz"
+          CASK_URL="https://github.com/smnhffmnn/mux/releases/download/${GITHUB_REF_NAME}/mux_${VERSION}_darwin_arm64_app.tar.gz"
 
-          git clone https://x-access-token:${GITHUB_TOKEN}@github.com/smnhffmnn/homebrew-tap.git tap
+          curl -sL "$FORMULA_URL" -o formula.tar.gz
+          curl -sL "$CASK_URL" -o cask.tar.gz
+
+          FORMULA_SHA=$(sha256sum formula.tar.gz | cut -d' ' -f1)
+          CASK_SHA=$(sha256sum cask.tar.gz | cut -d' ' -f1)
+
+          git clone https://x-access-token:${TAP_TOKEN}@github.com/smnhffmnn/homebrew-tap.git tap
           cd tap
 
+          # Update Formula
           cat > Formula/mux.rb << FORMULA
           class Mux < Formula
             desc "Single-binary MCP gateway for databases, APIs, and tunnels"
@@ -166,8 +173,8 @@ jobs:
             depends_on :macos
             depends_on arch: :arm64
 
-            url "${URL}"
-            sha256 "${SHA}"
+            url "${FORMULA_URL}"
+            sha256 "${FORMULA_SHA}"
 
             def install
               bin.install "mux"
@@ -179,8 +186,30 @@ jobs:
           end
           FORMULA
 
+          # Update Cask
+          mkdir -p Casks
+          cat > Casks/mux.rb << CASK
+          cask "mux" do
+            version "${VERSION}"
+            sha256 "${CASK_SHA}"
+
+            url "${CASK_URL}"
+            name "mux"
+            desc "Single-binary MCP gateway for databases, APIs, and tunnels"
+            homepage "https://github.com/smnhffmnn/mux"
+
+            depends_on arch: :arm64
+
+            app "mux.app"
+
+            zap trash: [
+              "~/.mux",
+            ]
+          end
+          CASK
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/mux.rb
+          git add Formula/mux.rb Casks/mux.rb
           git commit -m "Update mux to ${VERSION}" || true
           git push
