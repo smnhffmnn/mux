@@ -85,6 +85,18 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		if err == nil {
 			toolDefs = el.Tools()
 		}
+	case "recraft":
+		var rc *Recraft
+		rc, err = NewRecraft(conn, dialer)
+		if err == nil {
+			toolDefs = rc.Tools()
+		}
+	case "ideogram":
+		var ig *Ideogram
+		ig, err = NewIdeogram(conn, dialer)
+		if err == nil {
+			toolDefs = ig.Tools()
+		}
 	case "microsoft-graph":
 		var mg *MicrosoftGraph
 		mg, err = NewMicrosoftGraph(conn, dialer)
@@ -128,6 +140,10 @@ func DefaultInstructions(connType string) string {
 		return DefaultOpenAIInstructions
 	case "elevenlabs":
 		return DefaultElevenLabsInstructions
+	case "recraft":
+		return DefaultRecraftInstructions
+	case "ideogram":
+		return DefaultIdeogramInstructions
 	default:
 		return ""
 	}
