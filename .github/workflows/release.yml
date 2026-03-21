@@ -30,7 +30,7 @@ jobs:
         run: npm ci && npm run build
 
       - name: Run tests
-        run: go test -tags notray ./...
+        run: CGO_ENABLED=0 go test -tags notray ./...
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
