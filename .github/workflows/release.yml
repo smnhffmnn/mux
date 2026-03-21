@@ -36,11 +36,6 @@ jobs:
             goarch: arm64
             binary: mux
             archive: tar.gz
-          - runner: macos-latest
-            goos: darwin
-            goarch: amd64
-            binary: mux
-            archive: tar.gz
           - runner: windows-latest
             goos: windows
             goarch: amd64
@@ -63,9 +58,6 @@ jobs:
         run: npm ci && npm run build
 
       - name: Build binary
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           go build -ldflags "-s -w -X main.version=${VERSION}" \
@@ -109,17 +101,10 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
 
-          # Download checksums
-          ARM64_URL="https://github.com/smnhffmnn/mux/releases/download/${GITHUB_REF_NAME}/mux_${VERSION}_darwin_arm64.tar.gz"
-          AMD64_URL="https://github.com/smnhffmnn/mux/releases/download/${GITHUB_REF_NAME}/mux_${VERSION}_darwin_amd64.tar.gz"
+          URL="https://github.com/smnhffmnn/mux/releases/download/${GITHUB_REF_NAME}/mux_${VERSION}_darwin_arm64.tar.gz"
+          curl -sL "$URL" -o release.tar.gz
+          SHA=$(sha256sum release.tar.gz | cut -d' ' -f1)
 
-          curl -sL "$ARM64_URL" -o arm64.tar.gz
-          curl -sL "$AMD64_URL" -o amd64.tar.gz
-
-          ARM64_SHA=$(sha256sum arm64.tar.gz | cut -d' ' -f1)
-          AMD64_SHA=$(sha256sum amd64.tar.gz | cut -d' ' -f1)
-
-          # Clone tap repo and update formula
           git clone https://x-access-token:${GITHUB_TOKEN}@github.com/smnhffmnn/homebrew-tap.git tap
           cd tap
 
@@ -130,15 +115,11 @@ jobs:
             version "${VERSION}"
             license "MIT"
 
-            on_macos do
-              if Hardware::CPU.arm?
-                url "${ARM64_URL}"
-                sha256 "${ARM64_SHA}"
-              else
-                url "${AMD64_URL}"
-                sha256 "${AMD64_SHA}"
-              end
-            end
+            depends_on :macos
+            depends_on arch: :arm64
+
+            url "${URL}"
+            sha256 "${SHA}"
 
             def install
               bin.install "mux"
