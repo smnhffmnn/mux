@@ -52,6 +52,16 @@ type App struct {
 	// emitEvent sends a named event to the Wails frontend (set by main before app.Run).
 	// Nil in stdio mode.
 	emitEvent func(name string, data any)
+
+	// toolsMu protects registeredTools and closers from concurrent access.
+	toolsMu sync.Mutex
+
+	// registeredTools tracks which MCP tool names are registered per connection,
+	// so they can be removed on hot-reload.
+	registeredTools map[string][]string
+
+	// closers tracks io.Closers (e.g. sql.DB pools) per connection for cleanup on hot-reload.
+	closers map[string][]io.Closer
 }
 
 type pendingOAuthFlow struct {
@@ -72,18 +82,158 @@ type pendingDeviceFlow struct {
 // NewApp creates the App instance. Called before wails.Run().
 func NewApp(cfg *config.Config, version, buildTime string, port int, mcpServer *server.MCPServer, wgMgr *wireguard.Manager) *App {
 	return &App{
-		cfg:           cfg,
-		version:       version,
-		buildTime:     buildTime,
-		startTime:     time.Now(),
-		port:          port,
-		mcpServer:     mcpServer,
-		wgMgr:         wgMgr,
-		pendingOAuth:  make(map[string]*pendingOAuthFlow),
-		pendingDevice: make(map[string]*pendingDeviceFlow),
+		cfg:             cfg,
+		version:         version,
+		buildTime:       buildTime,
+		startTime:       time.Now(),
+		port:            port,
+		mcpServer:       mcpServer,
+		wgMgr:           wgMgr,
+		pendingOAuth:    make(map[string]*pendingOAuthFlow),
+		pendingDevice:   make(map[string]*pendingDeviceFlow),
+		registeredTools: make(map[string][]string),
+		closers:         make(map[string][]io.Closer),
 	}
 }
 
+
+// --- Hot-reload: ToolReloader interface ---
+
+// ReloadConnection re-registers MCP tools for a connection (implements tools.ToolReloader).
+func (a *App) ReloadConnection(conn config.Connection) {
+	a.registerConnectionTools(conn)
+}
+
+// UnloadConnection removes MCP tools for a connection (implements tools.ToolReloader).
+func (a *App) UnloadConnection(name string) {
+	a.unregisterConnectionTools(name)
+}
+
+// unregisterConnectionTools removes all MCP tools previously registered for a connection
+// and closes any associated resources (e.g. sql.DB pools).
+func (a *App) unregisterConnectionTools(connName string) {
+	if a.mcpServer == nil {
+		return
+	}
+	a.toolsMu.Lock()
+	defer a.toolsMu.Unlock()
+	if names, ok := a.registeredTools[connName]; ok && len(names) > 0 {
+		a.mcpServer.DeleteTools(names...)
+		log.Printf("[mux] Unregistered %d tools for %s", len(names), connName)
+	}
+	delete(a.registeredTools, connName)
+	if closers, ok := a.closers[connName]; ok {
+		for _, c := range closers {
+			c.Close()
+		}
+		delete(a.closers, connName)
+	}
+}
+
+// registerConnectionTools registers (or re-registers) MCP tools for a connection.
+func (a *App) registerConnectionTools(conn config.Connection) {
+	if a.mcpServer == nil {
+		return
+	}
+
+	// Always unregister first to avoid duplicates
+	a.unregisterConnectionTools(conn.Name)
+
+	if !conn.Enabled() {
+		return
+	}
+
+	if config.IsProxyType(conn.Type) {
+		a.registerProxyConnection(conn)
+		return
+	}
+
+	// Resolve tunnel dialer (fail-closed)
+	var dialer tools.Dialer
+	if conn.Tunnel != "" {
+		t := a.wgMgr.Get(conn.Tunnel)
+		if t == nil {
+			log.Printf("[mux] Skipping %q: tunnel %q not available", conn.Name, conn.Tunnel)
+			return
+		}
+		dialer = t
+	}
+
+	names, closer, err := tools.RegisterConnection(a.mcpServer, conn, dialer)
+	if err != nil {
+		log.Printf("[mux] Warning: %s not available: %v", conn.Name, err)
+		return
+	}
+	a.toolsMu.Lock()
+	a.registeredTools[conn.Name] = names
+	if closer != nil {
+		a.closers[conn.Name] = append(a.closers[conn.Name], closer)
+	}
+	a.toolsMu.Unlock()
+}
+
+// registerProxyConnection handles hot-reload for proxy-type connections.
+func (a *App) registerProxyConnection(conn config.Connection) {
+	if conn.OAuth {
+		tokenStore := config.NewKeychainTokenStore(conn.Name)
+		if !tokenStore.HasToken() {
+			return
+		}
+		adapter := proxy.NewKeychainTokenAdapter(tokenStore)
+		clientID, clientSecret := config.LoadOAuthClientID(conn.Name)
+		mount := proxy.Mount{
+			Name:       conn.Name,
+			URL:        conn.URL,
+			TokenStore: tokenStore,
+			OAuth: &transport.OAuthConfig{
+				ClientID:     clientID,
+				ClientSecret: clientSecret,
+				RedirectURI:  fmt.Sprintf("http://localhost:%d/oauth/callback", a.port),
+				TokenStore:   adapter,
+				PKCEEnabled:  true,
+			},
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := proxy.RegisterMount(ctx, a.mcpServer, mount); err != nil {
+			log.Printf("[mux] Warning: proxy %s not available: %v", conn.Name, err)
+			return
+		}
+		// Track the registered tool names
+		a.trackProxyTools(conn.Name)
+	} else if conn.Token != "" {
+		mount := proxy.Mount{
+			Name:  conn.Name,
+			URL:   conn.URL,
+			Token: proxy.NewTokenProvider(conn.Token),
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := proxy.RegisterMount(ctx, a.mcpServer, mount); err != nil {
+			log.Printf("[mux] Warning: proxy %s not available: %v", conn.Name, err)
+			return
+		}
+		// Track the registered tool names
+		a.trackProxyTools(conn.Name)
+	}
+}
+
+// trackProxyTools discovers which tools were registered for a proxy connection
+// by scanning the MCPServer's tool list for the connection prefix.
+func (a *App) trackProxyTools(connName string) {
+	prefix := connName + "_"
+	var names []string
+	for name := range a.mcpServer.ListTools() {
+		if strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	if len(names) > 0 {
+		a.toolsMu.Lock()
+		a.registeredTools[connName] = names
+		a.toolsMu.Unlock()
+	}
+}
 
 // --- Connection type registry ---
 // The single source of truth for connection types lives in config.AllTypes.
@@ -291,6 +441,8 @@ func (a *App) AddConnection(name, typ string) (*ConnInfo, error) {
 		log.Printf("[app] Warning: could not save config file: %v", err)
 	}
 
+	a.registerConnectionTools(conn)
+
 	ci := buildConnInfo(conn)
 	return &ci, nil
 }
@@ -348,6 +500,8 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 		}
 	}
 
+	a.registerConnectionTools(*conn)
+
 	ci := buildConnInfo(*conn)
 	return &ci, nil
 }
@@ -371,6 +525,7 @@ func (a *App) DeleteConnection(name string) error {
 		return fmt.Errorf("connection not found: %s", name)
 	}
 
+	a.unregisterConnectionTools(name)
 	a.cfg.Connections = newConns
 	if err := a.cfg.Save(); err != nil {
 		log.Printf("[app] Warning: could not save config file: %v", err)
@@ -506,18 +661,28 @@ func (a *App) SyncERP() (*PageData, error) {
 		return nil, fmt.Errorf("ERP sync failed: %w", err)
 	}
 
+	// Collect old ERP connection names before overwriting
+	oldERP := make(map[string]bool)
+	for _, c := range a.cfg.AllConnections() {
+		if c.Source == "erp" {
+			oldERP[c.Name] = true
+		}
+	}
+
 	a.cfg.SetERP(resp.Tunnels, resp.Connections)
 	log.Printf("[app] ERP sync: %d tunnels, %d connections", len(resp.Tunnels), len(resp.Connections))
 
-	if a.mcpServer != nil {
-		for _, conn := range resp.Connections {
-			if config.IsProxyType(conn.Type) || !conn.Enabled() {
-				continue
-			}
-			if _, err := tools.RegisterConnection(a.mcpServer, conn, nil); err != nil {
-				log.Printf("[app] Warning: ERP connection %s not available: %v", conn.Name, err)
-			}
-		}
+	// Unregister connections that were removed from ERP
+	for _, c := range resp.Connections {
+		delete(oldERP, c.Name)
+	}
+	for name := range oldERP {
+		a.unregisterConnectionTools(name)
+	}
+
+	// Register current connections
+	for _, conn := range resp.Connections {
+		a.registerConnectionTools(conn)
 	}
 
 	data := a.GetPageData()

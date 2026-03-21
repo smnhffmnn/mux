@@ -13,14 +13,23 @@ import (
 	"github.com/smnhffmnn/mux/internal/proxy"
 )
 
+// ToolReloader triggers hot-reload of MCP tools when connections change.
+type ToolReloader interface {
+	ReloadConnection(conn config.Connection)
+	UnloadConnection(name string)
+}
+
 // ConfigTools holds MCP tools for querying and managing mux connections and secrets.
 type ConfigTools struct {
-	cfg *config.Config
+	cfg      *config.Config
+	reloader ToolReloader
 }
 
 // NewConfigTools creates the config management tool set.
-func NewConfigTools(cfg *config.Config) *ConfigTools {
-	return &ConfigTools{cfg: cfg}
+// The reloader is called when connections are added, deleted, or become enabled via secret_set.
+// Pass nil if hot-reload is not needed.
+func NewConfigTools(cfg *config.Config, reloader ToolReloader) *ConfigTools {
+	return &ConfigTools{cfg: cfg, reloader: reloader}
 }
 
 // Tools returns all config management tool definitions.
@@ -283,6 +292,10 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 		return mcp.NewToolResultError(fmt.Sprintf("failed to save config: %v", err)), nil
 	}
 
+	if ct.reloader != nil {
+		ct.reloader.ReloadConnection(conn)
+	}
+
 	return mcp.NewToolResultText(fmt.Sprintf("connection %q (%s) created", name, typ)), nil
 }
 
@@ -315,6 +328,10 @@ func (ct *ConfigTools) handleConnectionDelete(_ context.Context, req mcp.CallToo
 		return mcp.NewToolResultError(fmt.Sprintf("failed to save config: %v", err)), nil
 	}
 
+	if ct.reloader != nil {
+		ct.reloader.UnloadConnection(name)
+	}
+
 	return mcp.NewToolResultText(fmt.Sprintf("connection %q deleted", name)), nil
 }
 
@@ -345,17 +362,23 @@ func (ct *ConfigTools) handleSecretSet(_ context.Context, req mcp.CallToolReques
 func (ct *ConfigTools) updateInMemorySecret(key, value string) {
 	if strings.HasSuffix(key, "-password") {
 		name := strings.TrimSuffix(key, "-password")
-		if c := ct.cfg.FindConnection(name); c != nil {
+		if c := ct.cfg.FindAnyConnection(name); c != nil {
 			c.Password = value
+			if ct.reloader != nil {
+				ct.reloader.ReloadConnection(*c)
+			}
 		}
 	} else if key != "provisioning-token" && strings.HasSuffix(key, "-token") {
 		name := strings.TrimSuffix(key, "-token")
-		if c := ct.cfg.FindConnection(name); c != nil {
+		if c := ct.cfg.FindAnyConnection(name); c != nil {
 			c.Token = value
-		}
-		// Hot-reload: update the proxy's in-flight token
-		if tp := proxy.GetTokenProvider(name); tp != nil {
-			tp.Set(value)
+			// Hot-reload: update the proxy's in-flight token
+			if tp := proxy.GetTokenProvider(name); tp != nil {
+				tp.Set(value)
+			}
+			if ct.reloader != nil {
+				ct.reloader.ReloadConnection(*c)
+			}
 		}
 	}
 }

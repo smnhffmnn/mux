@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 
@@ -26,23 +27,25 @@ type ToolDef struct {
 }
 
 // RegisterConnection creates and registers tools for a connection on the MCP server.
-// Returns the tool names registered, or an error if the connection could not be opened.
+// Returns the tool names registered, an optional io.Closer for resource cleanup
+// (non-nil for database types with connection pools), or an error.
 // The dialer parameter is optional (nil = direct TCP connection).
 //
 // Known connection types are defined in config.AllTypes (internal/config/types.go),
 // which is the single source of truth. This switch handles the implementation-specific
 // creation of tool handlers for each type.
-func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dialer) ([]string, error) {
+func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dialer) ([]string, io.Closer, error) {
 	if !conn.Enabled() {
-		return nil, fmt.Errorf("connection %q not configured", conn.Name)
+		return nil, nil, fmt.Errorf("connection %q not configured", conn.Name)
 	}
 
 	// Validate against the canonical type registry before attempting handler creation.
 	if !config.ValidType(conn.Type) {
-		return nil, fmt.Errorf("unknown connection type %q", conn.Type)
+		return nil, nil, fmt.Errorf("unknown connection type %q", conn.Type)
 	}
 
 	var toolDefs []ToolDef
+	var closer io.Closer
 	var err error
 
 	switch conn.Type {
@@ -51,18 +54,21 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		mdb, err = NewMariaDB(conn, dialer)
 		if err == nil {
 			toolDefs = mdb.Tools()
+			closer = mdb
 		}
 	case "clickhouse":
 		var ch *ClickHouse
 		ch, err = NewClickHouse(conn, dialer)
 		if err == nil {
 			toolDefs = ch.Tools()
+			closer = ch
 		}
 	case "postgresql":
 		var pg *PostgreSQL
 		pg, err = NewPostgreSQL(conn, dialer)
 		if err == nil {
 			toolDefs = pg.Tools()
+			closer = pg
 		}
 	case "http":
 		var h *HTTP
@@ -120,13 +126,13 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		}
 	default:
 		if config.IsProxyType(conn.Type) {
-			return nil, fmt.Errorf("proxy connections must be registered via the proxy package")
+			return nil, nil, fmt.Errorf("proxy connections must be registered via the proxy package")
 		}
-		return nil, fmt.Errorf("unknown connection type %q", conn.Type)
+		return nil, nil, fmt.Errorf("unknown connection type %q", conn.Type)
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var names []string
@@ -138,7 +144,7 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		log.Printf("[mux] Registered: %s", prefixedName)
 		names = append(names, prefixedName)
 	}
-	return names, nil
+	return names, closer, nil
 }
 
 // DefaultInstructions returns built-in instructions for connection types that have them.

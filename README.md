@@ -26,8 +26,14 @@ mux is a [Model Context Protocol](https://modelcontextprotocol.io) gateway that 
 
 ```bash
 brew tap smnhffmnn/tap
-brew install mux
+brew install mux                # CLI only
+brew install --cask mux         # Desktop app (installs to /Applications)
 ```
+
+> **macOS Gatekeeper:** The app is not code-signed yet. On first launch macOS may show "mux is damaged and can't be opened". Fix with:
+> ```bash
+> xattr -cr /Applications/mux.app
+> ```
 
 ### GitHub Releases
 

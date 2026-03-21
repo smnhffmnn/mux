@@ -114,15 +114,14 @@ func main() {
 	s.AddTool(tools.DateTimeTool.Tool, tools.DateTimeTool.Handler)
 	log.Println("[mux] Registered: get_datetime")
 
-	// Register config management tools
-	configTools := tools.NewConfigTools(cfg)
-	for _, t := range configTools.Tools() {
-		s.AddTool(t.Tool, t.Handler)
-		log.Printf("[mux] Registered: %s", t.Tool.Name)
-	}
-
 	// --- Stdio mode (Claude Desktop, piped stdin) ---
 	if useStdio {
+		reloader := &stdioReloader{mcpServer: s, cfg: cfg, wgMgr: wgMgr, registeredTools: make(map[string][]string), closers: make(map[string][]io.Closer)}
+		configTools := tools.NewConfigTools(cfg, reloader)
+		for _, t := range configTools.Tools() {
+			s.AddTool(t.Tool, t.Handler)
+			log.Printf("[mux] Registered: %s", t.Tool.Name)
+		}
 		if err := server.ServeStdio(s); err != nil {
 			fmt.Fprintf(os.Stderr, "stdio server error: %v\n", err)
 			os.Exit(1)
@@ -132,6 +131,13 @@ func main() {
 
 	// --- Desktop mode (Wails v3 + MCP HTTP) ---
 	app := NewApp(cfg, version, buildTime, cfg.Server.Port, s, wgMgr)
+
+	// Register config management tools (with app as hot-reloader)
+	configTools := tools.NewConfigTools(cfg, app)
+	for _, t := range configTools.Tools() {
+		s.AddTool(t.Tool, t.Handler)
+		log.Printf("[mux] Registered: %s", t.Tool.Name)
+	}
 
 	// Start MCP HTTP server on localhost only (avoids firewall popups)
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Server.Port)
