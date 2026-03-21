@@ -73,7 +73,7 @@ brews:
     repository:
       owner: smnhffmnn
       name: homebrew-tap
-    folder: Formula
+    directory: Formula
     homepage: "https://github.com/smnhffmnn/mux"
     description: "MCP Unified Exchange — single-binary MCP gateway for databases, APIs, and tunnels"
     license: "MIT"
