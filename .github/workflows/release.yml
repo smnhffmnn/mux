@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  # GoReleaser creates the release + headless binaries for all platforms
+  # GoReleaser creates the release + headless binaries (macOS + Windows)
   release:
     runs-on: ubuntu-latest
     steps:
@@ -40,7 +40,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Separate job: macOS native build with system tray (requires CGO)
+  # macOS native build with system tray (requires CGO)
   macos-desktop:
     needs: release
     strategy:
