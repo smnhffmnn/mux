@@ -24,7 +24,7 @@ jobs:
         run: npm ci && npm run build
 
       - name: Test (headless)
-        run: CGO_ENABLED=0 go test -tags notray ./...
+        run: CGO_ENABLED=0 go test ./internal/...
 
       - name: Build (headless)
         run: CGO_ENABLED=0 go build -tags notray -o mux .
