@@ -85,115 +85,21 @@ func NewApp(cfg *config.Config, version, buildTime string, port int, mcpServer *
 }
 
 
-// --- Connection type registry (ported from templates.go) ---
-
-type fieldDef struct {
-	Key         string
-	Label       string
-	Placeholder string
-	Secret      bool
-	Small       bool
-}
-
-type typeDef struct {
-	Label  string
-	Fields []fieldDef
-}
-
-var typeRegistry = map[string]typeDef{
-	"postgresql": {Label: "PostgreSQL", Fields: []fieldDef{
-		{Key: "host", Label: "Host", Placeholder: "localhost"},
-		{Key: "port", Label: "Port", Placeholder: "5432", Small: true},
-		{Key: "user", Label: "User", Placeholder: "postgres"},
-		{Key: "password", Label: "Password", Placeholder: "password", Secret: true},
-		{Key: "database", Label: "Database", Placeholder: "postgres"},
-	}},
-	"clickhouse": {Label: "ClickHouse", Fields: []fieldDef{
-		{Key: "host", Label: "Host", Placeholder: "localhost"},
-		{Key: "port", Label: "Port", Placeholder: "8123", Small: true},
-		{Key: "user", Label: "User", Placeholder: "default"},
-		{Key: "password", Label: "Password", Placeholder: "password", Secret: true},
-		{Key: "database", Label: "Default Database", Placeholder: "default"},
-	}},
-	"mariadb": {Label: "MariaDB", Fields: []fieldDef{
-		{Key: "host", Label: "Host", Placeholder: "localhost"},
-		{Key: "port", Label: "Port", Placeholder: "3306", Small: true},
-		{Key: "user", Label: "User", Placeholder: "root"},
-		{Key: "password", Label: "Password", Placeholder: "password", Secret: true},
-		{Key: "database", Label: "Database", Placeholder: "mydb"},
-	}},
-	"proxy": {Label: "MCP Proxy (generic)", Fields: []fieldDef{
-		{Key: "url", Label: "MCP URL", Placeholder: "https://example.com/mcp"},
-		{Key: "token", Label: "Token", Placeholder: "perm:...", Secret: true},
-	}},
-	"youtrack": {Label: "YouTrack", Fields: []fieldDef{
-		{Key: "url", Label: "MCP URL", Placeholder: "https://instance.myjetbrains.com/mcp"},
-		{Key: "token", Label: "Token", Placeholder: "perm:...", Secret: true},
-	}},
-	"sentry": {Label: "Sentry", Fields: []fieldDef{
-		{Key: "url", Label: "MCP URL", Placeholder: "https://mcp.sentry.dev/mcp"},
-	}},
-	"netdata": {Label: "Netdata", Fields: []fieldDef{
-		{Key: "url", Label: "MCP URL", Placeholder: "https://app.netdata.cloud/api/v1/mcp"},
-		{Key: "token", Label: "Token", Placeholder: "ndc.xxx", Secret: true},
-	}},
-	"notion": {Label: "Notion", Fields: []fieldDef{
-		{Key: "url", Label: "MCP URL", Placeholder: "https://mcp.notion.com/mcp"},
-	}},
-	"http": {Label: "HTTP API", Fields: []fieldDef{
-		{Key: "url", Label: "Base URL", Placeholder: "https://api.example.com"},
-		{Key: "token", Label: "API Token (optional)", Placeholder: "Bearer token", Secret: true},
-	}},
-	"firecrawl": {Label: "Firecrawl", Fields: []fieldDef{
-		{Key: "url", Label: "API URL", Placeholder: "https://api.firecrawl.dev (default)"},
-		{Key: "token", Label: "API Key", Placeholder: "fc-...", Secret: true},
-	}},
-	"brave": {Label: "Brave Search", Fields: []fieldDef{
-		{Key: "url", Label: "API URL", Placeholder: "https://api.search.brave.com (default)"},
-		{Key: "token", Label: "API Key", Placeholder: "BSA...", Secret: true},
-	}},
-	"microsoft-graph": {Label: "Microsoft Graph", Fields: []fieldDef{
-		{Key: "scopes", Label: "Scopes (optional)", Placeholder: "Mail.ReadWrite Mail.Send offline_access"},
-	}},
-	"google-tagmanager": {Label: "Google Tag Manager", Fields: []fieldDef{
-		{Key: "token", Label: "Service Account JSON Key", Placeholder: `{"client_email":"...","private_key":"..."}`, Secret: true},
-	}},
-	"openai": {Label: "OpenAI", Fields: []fieldDef{
-		{Key: "url", Label: "API URL", Placeholder: "https://api.openai.com (default)"},
-		{Key: "token", Label: "API Key", Placeholder: "sk-...", Secret: true},
-	}},
-	"elevenlabs": {Label: "ElevenLabs", Fields: []fieldDef{
-		{Key: "url", Label: "API URL", Placeholder: "https://api.elevenlabs.io (default)"},
-		{Key: "token", Label: "API Key", Placeholder: "xi_...", Secret: true},
-	}},
-	"recraft": {Label: "Recraft", Fields: []fieldDef{
-		{Key: "url", Label: "API URL", Placeholder: "https://external.api.recraft.ai/v1 (default)"},
-		{Key: "token", Label: "API Key", Placeholder: "Recraft API token", Secret: true},
-	}},
-	"ideogram": {Label: "Ideogram", Fields: []fieldDef{
-		{Key: "url", Label: "API URL", Placeholder: "https://api.ideogram.ai (default)"},
-		{Key: "token", Label: "API Key", Placeholder: "Ideogram API key", Secret: true},
-	}},
-}
-
-func typeLabel(typ string) string {
-	if td, ok := typeRegistry[typ]; ok {
-		return td.Label
-	}
-	return typ
-}
+// --- Connection type registry ---
+// The single source of truth for connection types lives in config.AllTypes.
+// See internal/config/types.go.
 
 func allTypes() []TypeListEntry {
 	var types []TypeListEntry
-	for typ, td := range typeRegistry {
-		types = append(types, TypeListEntry{Type: typ, Label: td.Label})
+	for _, td := range config.AllTypes {
+		types = append(types, TypeListEntry{Type: td.Type, Label: td.Label})
 	}
 	sort.Slice(types, func(i, j int) bool { return types[i].Label < types[j].Label })
 	return types
 }
 
 func buildConnInfo(conn config.Connection) ConnInfo {
-	td := typeRegistry[conn.Type]
+	td := config.LookupType(conn.Type)
 
 	var summary string
 	switch {
@@ -210,41 +116,43 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 	}
 
 	var fields []FieldInfo
-	for _, fd := range td.Fields {
-		fi := FieldInfo{
-			Key:         fd.Key,
-			Label:       fd.Label,
-			Placeholder: fd.Placeholder,
-			Secret:      fd.Secret,
-			Small:       fd.Small,
-		}
-		if !fd.Secret {
-			switch fd.Key {
-			case "host":
-				fi.Value = conn.Host
-			case "port":
-				if conn.Port > 0 {
-					fi.Value = fmt.Sprintf("%d", conn.Port)
+	if td != nil {
+		for _, fd := range td.Fields {
+			fi := FieldInfo{
+				Key:         fd.Key,
+				Label:       fd.Label,
+				Placeholder: fd.Placeholder,
+				Secret:      fd.Secret,
+				Small:       fd.Small,
+			}
+			if !fd.Secret {
+				switch fd.Key {
+				case "host":
+					fi.Value = conn.Host
+				case "port":
+					if conn.Port > 0 {
+						fi.Value = fmt.Sprintf("%d", conn.Port)
+					}
+				case "user":
+					fi.Value = conn.User
+				case "database":
+					fi.Value = conn.Database
+				case "url":
+					fi.Value = conn.URL
+				case "scopes":
+					fi.Value = conn.Scopes
 				}
-			case "user":
-				fi.Value = conn.User
-			case "database":
-				fi.Value = conn.Database
-			case "url":
-				fi.Value = conn.URL
-			case "scopes":
-				fi.Value = conn.Scopes
 			}
-		}
-		if fd.Secret {
-			switch fd.Key {
-			case "password":
-				fi.SecretStored = conn.Password != ""
-			case "token":
-				fi.SecretStored = conn.Token != ""
+			if fd.Secret {
+				switch fd.Key {
+				case "password":
+					fi.SecretStored = conn.Password != ""
+				case "token":
+					fi.SecretStored = conn.Token != ""
+				}
 			}
+			fields = append(fields, fi)
 		}
-		fields = append(fields, fi)
 	}
 
 	isOAuth := config.IsProxyType(conn.Type) && conn.OAuth
@@ -265,7 +173,7 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 	return ConnInfo{
 		Name:         conn.Name,
 		Type:         conn.Type,
-		TypeLabel:    typeLabel(conn.Type),
+		TypeLabel:    config.TypeLabel(conn.Type),
 		Configured:   conn.Enabled(),
 		Source:       conn.Source,
 		Tunnel:       conn.Tunnel,
@@ -361,6 +269,10 @@ func (a *App) AddConnection(name, typ string) (*ConnInfo, error) {
 	name = strings.TrimSpace(strings.ToLower(strings.ReplaceAll(name, " ", "-")))
 	if name == "" || typ == "" {
 		return nil, fmt.Errorf("name and type are required")
+	}
+
+	if !config.ValidType(typ) {
+		return nil, fmt.Errorf("unknown connection type: %s", typ)
 	}
 
 	if a.cfg.FindAnyConnection(name) != nil {
@@ -521,6 +433,10 @@ func (a *App) TestConnection(name string) *TestResult {
 		result = a.testOpenAI(*conn)
 	case "elevenlabs":
 		result = a.testElevenLabs(*conn)
+	case "recraft":
+		result = a.testRecraft(*conn)
+	case "ideogram":
+		result = a.testIdeogram(*conn)
 	case "microsoft-graph":
 		result = a.testMicrosoftGraph(*conn)
 	case "google-tagmanager":
@@ -1275,6 +1191,69 @@ func (a *App) testElevenLabs(conn config.Connection) testResponse {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
 	}
 	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: ElevenLabs API (HTTP %d)", resp.StatusCode)}
+}
+
+func (a *App) testRecraft(conn config.Connection) testResponse {
+	if conn.Token == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "API key not configured"}
+	}
+
+	apiURL := conn.URL
+	if apiURL == "" {
+		apiURL = "https://external.api.recraft.ai/v1"
+	}
+	apiURL = strings.TrimRight(apiURL, "/")
+
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, apiURL+"/users/me", nil)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	}
+	req.Header.Set("Authorization", "Bearer "+conn.Token)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
+	}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Recraft API (HTTP %d)", resp.StatusCode)}
+}
+
+func (a *App) testIdeogram(conn config.Connection) testResponse {
+	if conn.Token == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "API key not configured"}
+	}
+
+	apiURL := conn.URL
+	if apiURL == "" {
+		apiURL = "https://api.ideogram.ai"
+	}
+	apiURL = strings.TrimRight(apiURL, "/")
+
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	// Ideogram has no simple GET health endpoint. POST an empty body to the
+	// generate endpoint: 400 = authenticated (bad request), 401/403 = bad key.
+	req, err := http.NewRequest(http.MethodPost, apiURL+"/v1/ideogram-v3/generate", strings.NewReader("{}"))
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	}
+	req.Header.Set("Api-Key", conn.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
+	}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Ideogram API (HTTP %d)", resp.StatusCode)}
 }
 
 func (a *App) testMicrosoftGraph(conn config.Connection) testResponse {

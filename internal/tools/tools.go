@@ -28,9 +28,18 @@ type ToolDef struct {
 // RegisterConnection creates and registers tools for a connection on the MCP server.
 // Returns the tool names registered, or an error if the connection could not be opened.
 // The dialer parameter is optional (nil = direct TCP connection).
+//
+// Known connection types are defined in config.AllTypes (internal/config/types.go),
+// which is the single source of truth. This switch handles the implementation-specific
+// creation of tool handlers for each type.
 func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dialer) ([]string, error) {
 	if !conn.Enabled() {
 		return nil, fmt.Errorf("connection %q not configured", conn.Name)
+	}
+
+	// Validate against the canonical type registry before attempting handler creation.
+	if !config.ValidType(conn.Type) {
+		return nil, fmt.Errorf("unknown connection type %q", conn.Type)
 	}
 
 	var toolDefs []ToolDef

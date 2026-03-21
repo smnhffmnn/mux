@@ -45,6 +45,20 @@ type Connection struct {
 }
 
 // Enabled reports whether the connection has enough config to attempt a connection.
+func (c *Connection) Enabled() bool {
+	switch {
+	case IsProxyType(c.Type), c.Type == "http":
+		return c.URL != ""
+	case c.Type == "microsoft-graph":
+		return true // auth is interactive via tools
+	case c.Type == "firecrawl", c.Type == "brave", c.Type == "google-tagmanager",
+		c.Type == "openai", c.Type == "elevenlabs", c.Type == "recraft", c.Type == "ideogram":
+		return c.Token != ""
+	default:
+		return c.Host != "" && c.User != ""
+	}
+}
+
 // IsProxyType reports whether a connection type proxies an upstream MCP server.
 func IsProxyType(typ string) bool {
 	switch typ {
@@ -52,19 +66,6 @@ func IsProxyType(typ string) bool {
 		return true
 	}
 	return false
-}
-
-func (c *Connection) Enabled() bool {
-	switch {
-	case IsProxyType(c.Type), c.Type == "http":
-		return c.URL != ""
-	case c.Type == "microsoft-graph":
-		return true // auth is interactive via tools
-	case c.Type == "firecrawl", c.Type == "brave", c.Type == "google-tagmanager", c.Type == "openai", c.Type == "elevenlabs":
-		return c.Token != ""
-	default:
-		return c.Host != "" && c.User != ""
-	}
 }
 
 // Tunnel represents a WireGuard tunnel definition.

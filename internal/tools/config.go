@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -55,6 +56,14 @@ func (ct *ConfigTools) connectionListTool() ToolDef {
 }
 
 func (ct *ConfigTools) connectionAddTool() ToolDef {
+	// Build type list dynamically from config.AllTypes
+	var typeNames []string
+	for _, td := range config.AllTypes {
+		typeNames = append(typeNames, td.Type)
+	}
+	sort.Strings(typeNames)
+	typeDesc := "Connection type: " + strings.Join(typeNames, ", ") + "."
+
 	return ToolDef{
 		Tool: mcp.NewTool("connection_add",
 			mcp.WithDescription("Add a new connection. After creating, use secret_set to store the API key or password."),
@@ -62,7 +71,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("Connection name (lowercase, hyphens allowed, e.g. 'my-firecrawl')."),
 			),
 			mcp.WithString("type", mcp.Required(),
-				mcp.Description("Connection type: brave, clickhouse, firecrawl, http, mariadb, microsoft-graph, netdata, notion, postgresql, proxy, sentry, youtrack."),
+				mcp.Description(typeDesc),
 			),
 			mcp.WithString("url",
 				mcp.Description("URL for the connection (required for proxy/http/api types, optional for types with defaults like firecrawl/brave)."),
@@ -132,24 +141,19 @@ func (ct *ConfigTools) secretCheckTool() ToolDef {
 // --- Handlers ---
 
 func (ct *ConfigTools) handleTypeList(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	types := []map[string]any{
-		{"type": "brave", "label": "Brave Search", "fields": []string{"url (optional)", "token"}, "default_url": "https://api.search.brave.com"},
-		{"type": "clickhouse", "label": "ClickHouse", "fields": []string{"host", "port", "user", "password", "database"}},
-		{"type": "firecrawl", "label": "Firecrawl", "fields": []string{"url (optional)", "token"}, "default_url": "https://api.firecrawl.dev"},
-		{"type": "google-tagmanager", "label": "Google Tag Manager", "fields": []string{"token (service account JSON key)"}},
-		{"type": "http", "label": "HTTP API", "fields": []string{"url", "token (optional)"}},
-		{"type": "mariadb", "label": "MariaDB", "fields": []string{"host", "port", "user", "password", "database"}},
-		{"type": "microsoft-graph", "label": "Microsoft Graph", "fields": []string{"scopes (optional)"}, "auth": "device-code"},
-		{"type": "netdata", "label": "Netdata", "fields": []string{"url", "token"}},
-		{"type": "notion", "label": "Notion", "fields": []string{"url"}},
-		{"type": "postgresql", "label": "PostgreSQL", "fields": []string{"host", "port", "user", "password", "database"}},
-		{"type": "proxy", "label": "MCP Proxy (generic)", "fields": []string{"url", "token"}},
-		{"type": "sentry", "label": "Sentry", "fields": []string{"url"}, "auth": "oauth"},
-		{"type": "youtrack", "label": "YouTrack", "fields": []string{"url", "token"}},
+	var types []map[string]any
+	for _, td := range config.AllTypes {
+		fields := make([]string, len(td.Fields))
+		for i, f := range td.Fields {
+			fields[i] = f.Key
+		}
+		types = append(types, map[string]any{
+			"type":   td.Type,
+			"label":  td.Label,
+			"fields": fields,
+		})
 	}
-
-	data, _ := json.MarshalIndent(types, "", "  ")
-	return mcp.NewToolResultText(string(data)), nil
+	return jsonResult(types)
 }
 
 func (ct *ConfigTools) handleConnectionList(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -225,6 +229,11 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 	typ, err := req.RequireString("type")
 	if err != nil {
 		return mcp.NewToolResultError("missing required parameter: type"), nil
+	}
+
+	// Validate type
+	if !config.ValidType(typ) {
+		return mcp.NewToolResultError(fmt.Sprintf("unknown connection type: %s", typ)), nil
 	}
 
 	// Validate name

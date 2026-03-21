@@ -1,0 +1,135 @@
+package config
+
+import "sync"
+
+// TypeField defines a field shown in the UI for configuring a connection.
+type TypeField struct {
+	Key         string
+	Label       string
+	Placeholder string
+	Secret      bool
+	Small       bool
+}
+
+// TypeDef defines a connection type with its UI metadata and fields.
+// This is the SINGLE SOURCE OF TRUTH for all known connection types.
+type TypeDef struct {
+	Type   string      // e.g. "postgresql", "recraft"
+	Label  string      // e.g. "PostgreSQL", "Recraft"
+	Fields []TypeField // fields shown in the add/edit UI
+}
+
+// AllTypes is the single source of truth for all connection types.
+// Do not modify at runtime — treat as read-only.
+// When adding a new connection type, add it here and implement the
+// handler in internal/tools (RegisterConnection switch).
+var AllTypes = []TypeDef{
+	{Type: "postgresql", Label: "PostgreSQL", Fields: []TypeField{
+		{Key: "host", Label: "Host", Placeholder: "localhost"},
+		{Key: "port", Label: "Port", Placeholder: "5432", Small: true},
+		{Key: "user", Label: "User", Placeholder: "postgres"},
+		{Key: "password", Label: "Password", Placeholder: "password", Secret: true},
+		{Key: "database", Label: "Database", Placeholder: "postgres"},
+	}},
+	{Type: "clickhouse", Label: "ClickHouse", Fields: []TypeField{
+		{Key: "host", Label: "Host", Placeholder: "localhost"},
+		{Key: "port", Label: "Port", Placeholder: "8123", Small: true},
+		{Key: "user", Label: "User", Placeholder: "default"},
+		{Key: "password", Label: "Password", Placeholder: "password", Secret: true},
+		{Key: "database", Label: "Default Database", Placeholder: "default"},
+	}},
+	{Type: "mariadb", Label: "MariaDB", Fields: []TypeField{
+		{Key: "host", Label: "Host", Placeholder: "localhost"},
+		{Key: "port", Label: "Port", Placeholder: "3306", Small: true},
+		{Key: "user", Label: "User", Placeholder: "root"},
+		{Key: "password", Label: "Password", Placeholder: "password", Secret: true},
+		{Key: "database", Label: "Database", Placeholder: "mydb"},
+	}},
+	{Type: "proxy", Label: "MCP Proxy (generic)", Fields: []TypeField{
+		{Key: "url", Label: "MCP URL", Placeholder: "https://example.com/mcp"},
+		{Key: "token", Label: "Token", Placeholder: "perm:...", Secret: true},
+	}},
+	{Type: "youtrack", Label: "YouTrack", Fields: []TypeField{
+		{Key: "url", Label: "MCP URL", Placeholder: "https://instance.myjetbrains.com/mcp"},
+		{Key: "token", Label: "Token", Placeholder: "perm:...", Secret: true},
+	}},
+	{Type: "sentry", Label: "Sentry", Fields: []TypeField{
+		{Key: "url", Label: "MCP URL", Placeholder: "https://mcp.sentry.dev/mcp"},
+	}},
+	{Type: "netdata", Label: "Netdata", Fields: []TypeField{
+		{Key: "url", Label: "MCP URL", Placeholder: "https://app.netdata.cloud/api/v1/mcp"},
+		{Key: "token", Label: "Token", Placeholder: "ndc.xxx", Secret: true},
+	}},
+	{Type: "notion", Label: "Notion", Fields: []TypeField{
+		{Key: "url", Label: "MCP URL", Placeholder: "https://mcp.notion.com/mcp"},
+	}},
+	{Type: "http", Label: "HTTP API", Fields: []TypeField{
+		{Key: "url", Label: "Base URL", Placeholder: "https://api.example.com"},
+		{Key: "token", Label: "API Token (optional)", Placeholder: "Bearer token", Secret: true},
+	}},
+	{Type: "firecrawl", Label: "Firecrawl", Fields: []TypeField{
+		{Key: "url", Label: "API URL", Placeholder: "https://api.firecrawl.dev (default)"},
+		{Key: "token", Label: "API Key", Placeholder: "fc-...", Secret: true},
+	}},
+	{Type: "brave", Label: "Brave Search", Fields: []TypeField{
+		{Key: "url", Label: "API URL", Placeholder: "https://api.search.brave.com (default)"},
+		{Key: "token", Label: "API Key", Placeholder: "BSA...", Secret: true},
+	}},
+	{Type: "microsoft-graph", Label: "Microsoft Graph", Fields: []TypeField{
+		{Key: "scopes", Label: "Scopes (optional)", Placeholder: "Mail.ReadWrite Mail.Send offline_access"},
+	}},
+	{Type: "google-tagmanager", Label: "Google Tag Manager", Fields: []TypeField{
+		{Key: "token", Label: "Service Account JSON Key", Placeholder: `{"client_email":"...","private_key":"..."}`, Secret: true},
+	}},
+	{Type: "openai", Label: "OpenAI", Fields: []TypeField{
+		{Key: "url", Label: "API URL", Placeholder: "https://api.openai.com (default)"},
+		{Key: "token", Label: "API Key", Placeholder: "sk-...", Secret: true},
+	}},
+	{Type: "elevenlabs", Label: "ElevenLabs", Fields: []TypeField{
+		{Key: "url", Label: "API URL", Placeholder: "https://api.elevenlabs.io (default)"},
+		{Key: "token", Label: "API Key", Placeholder: "xi_...", Secret: true},
+	}},
+	{Type: "recraft", Label: "Recraft", Fields: []TypeField{
+		{Key: "url", Label: "API URL", Placeholder: "https://external.api.recraft.ai/v1 (default)"},
+		{Key: "token", Label: "API Key", Placeholder: "Recraft API token", Secret: true},
+	}},
+	{Type: "ideogram", Label: "Ideogram", Fields: []TypeField{
+		{Key: "url", Label: "API URL", Placeholder: "https://api.ideogram.ai (default)"},
+		{Key: "token", Label: "API Key", Placeholder: "Ideogram API key", Secret: true},
+	}},
+}
+
+// typeIndex is a lazily-built lookup map from type string to TypeDef.
+var (
+	typeIndex map[string]*TypeDef
+	indexOnce sync.Once
+)
+
+func ensureIndex() {
+	indexOnce.Do(func() {
+		typeIndex = make(map[string]*TypeDef, len(AllTypes))
+		for i := range AllTypes {
+			typeIndex[AllTypes[i].Type] = &AllTypes[i]
+		}
+	})
+}
+
+// LookupType returns the TypeDef for the given type string, or nil if unknown.
+func LookupType(typ string) *TypeDef {
+	ensureIndex()
+	return typeIndex[typ]
+}
+
+// TypeLabel returns the human-readable label for a connection type.
+// Falls back to the raw type string if not found.
+func TypeLabel(typ string) string {
+	if td := LookupType(typ); td != nil {
+		return td.Label
+	}
+	return typ
+}
+
+// ValidType reports whether typ is a known connection type.
+func ValidType(typ string) bool {
+	return LookupType(typ) != nil
+}
