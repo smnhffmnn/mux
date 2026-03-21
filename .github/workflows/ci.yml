@@ -19,11 +19,9 @@ jobs:
         with:
           node-version: 22
 
-      - name: Generate bindings & build frontend
-        run: |
-          go install github.com/wailsapp/wails/v3/cmd/wails3@latest
-          wails3 generate bindings
-          cd frontend && npm ci && npm run build
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci && npm run build
 
       - name: Test (headless)
         run: go test -tags notray ./...
@@ -58,11 +56,9 @@ jobs:
         with:
           node-version: 22
 
-      - name: Generate bindings & build frontend
-        run: |
-          go install github.com/wailsapp/wails/v3/cmd/wails3@latest
-          wails3 generate bindings
-          cd frontend && npm ci && npm run build
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci && npm run build
 
       - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
