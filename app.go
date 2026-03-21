@@ -166,6 +166,14 @@ var typeRegistry = map[string]typeDef{
 		{Key: "url", Label: "API URL", Placeholder: "https://api.elevenlabs.io (default)"},
 		{Key: "token", Label: "API Key", Placeholder: "xi_...", Secret: true},
 	}},
+	"recraft": {Label: "Recraft", Fields: []fieldDef{
+		{Key: "url", Label: "API URL", Placeholder: "https://external.api.recraft.ai/v1 (default)"},
+		{Key: "token", Label: "API Key", Placeholder: "Recraft API token", Secret: true},
+	}},
+	"ideogram": {Label: "Ideogram", Fields: []fieldDef{
+		{Key: "url", Label: "API URL", Placeholder: "https://api.ideogram.ai (default)"},
+		{Key: "token", Label: "API Key", Placeholder: "Ideogram API key", Secret: true},
+	}},
 }
 
 func typeLabel(typ string) string {
@@ -189,7 +197,7 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 
 	var summary string
 	switch {
-	case config.IsProxyType(conn.Type), conn.Type == "http", conn.Type == "firecrawl", conn.Type == "brave", conn.Type == "openai", conn.Type == "elevenlabs":
+	case config.IsProxyType(conn.Type), conn.Type == "http", conn.Type == "firecrawl", conn.Type == "brave", conn.Type == "openai", conn.Type == "elevenlabs", conn.Type == "recraft", conn.Type == "ideogram":
 		summary = conn.URL
 	case conn.Type == "microsoft-graph":
 		summary = "Microsoft Graph API"
