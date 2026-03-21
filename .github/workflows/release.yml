@@ -36,7 +36,7 @@ jobs:
             goarch: arm64
             binary: mux
             archive: tar.gz
-          - runner: macos-13
+          - runner: macos-latest
             goos: darwin
             goarch: amd64
             binary: mux
@@ -63,6 +63,9 @@ jobs:
         run: npm ci && npm run build
 
       - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           go build -ldflags "-s -w -X main.version=${VERSION}" \
