@@ -21,6 +21,14 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci && npm run build
+
       - name: Run tests
         run: go test -tags notray ./...
 
@@ -49,6 +57,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci && npm run build
 
       - name: Build macOS desktop binary
         run: |
