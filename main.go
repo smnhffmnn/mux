@@ -13,6 +13,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
 
 	"github.com/smnhffmnn/mux/internal/config"
 	"github.com/smnhffmnn/mux/internal/erp"
@@ -172,6 +173,9 @@ func main() {
 	// Create Wails v3 application
 	wailsApp := application.New(application.Options{
 		Name: "mux",
+		Mac: application.MacOptions{
+			ApplicationShouldTerminateAfterLastWindowClosed: false,
+		},
 		Services: []application.Service{
 			application.NewService(app),
 		},
@@ -186,7 +190,7 @@ func main() {
 	}
 
 	// Create the main window
-	wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
+	window := wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:  "mux — MCP Unified Exchange",
 		Width:  900,
 		Height: 680,
@@ -195,6 +199,13 @@ func main() {
 			Backdrop:               application.MacBackdropTranslucent,
 		},
 		URL: "/",
+	})
+
+	// Hide window on close (red button) instead of destroying it.
+	// Wails' built-in ApplicationShouldHandleReopen handler shows it again on dock click.
+	window.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
+		e.Cancel()
+		window.Hide()
 	})
 
 	// Start Wails app (blocks — owns main thread)
