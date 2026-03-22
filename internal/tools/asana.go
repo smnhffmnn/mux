@@ -22,6 +22,32 @@ const (
 	asanaMaxBody = 512 * 1024
 )
 
+// DefaultAsanaInstructions are shown to AI clients for the Asana REST API type.
+const DefaultAsanaInstructions = `Asana REST API — project and task management.
+
+Auth: Personal Access Token (Bearer). Base URL: https://app.asana.com/api/1.0
+
+Setup: Create a PAT at https://app.asana.com/0/my-apps → "Create new token".
+Then: secret_set key=<name>-token value=0/...
+
+Typical workflow: me → workspaces → projects → sections → tasks.
+All IDs are GID strings (e.g. "1234567890").`
+
+// DefaultAsanaMCPInstructions are shown to AI clients for the Asana MCP proxy type.
+const DefaultAsanaMCPInstructions = `Asana MCP — proxy to Asana's official MCP server (OAuth).
+
+Proxies all tools from https://mcp.asana.com/v2/mcp. Provides full access
+to the Asana Work Graph with automatically updated tools from Asana.
+
+Setup (requires pre-registered OAuth app):
+1. Go to https://app.asana.com/0/my-apps → "Create new app" → select "MCP app"
+2. Under "OAuth": set Redirect URL to http://localhost:7700/oauth/callback
+3. Under "Manage distribution": add your workspace(s)
+4. Store credentials in mux:
+   secret_set key=<name>-oauth-client-id value=YOUR_CLIENT_ID
+   secret_set key=<name>-oauth-client-secret value=YOUR_CLIENT_SECRET
+5. The OAuth browser flow will start automatically on next connection attempt.`
+
 // Asana wraps the Asana REST API as MCP tools.
 type Asana struct {
 	client *http.Client

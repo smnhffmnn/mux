@@ -165,6 +165,10 @@ func DefaultInstructions(connType string) string {
 		return DefaultRecraftInstructions
 	case "ideogram":
 		return DefaultIdeogramInstructions
+	case "asana":
+		return DefaultAsanaInstructions
+	case "asana-mcp":
+		return DefaultAsanaMCPInstructions
 	default:
 		return ""
 	}
