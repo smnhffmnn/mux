@@ -97,6 +97,12 @@ var AllTypes = []TypeDef{
 		{Key: "url", Label: "API URL", Placeholder: "https://api.ideogram.ai (default)"},
 		{Key: "token", Label: "API Key", Placeholder: "Ideogram API key", Secret: true},
 	}},
+	{Type: "asana", Label: "Asana", Fields: []TypeField{
+		{Key: "token", Label: "Personal Access Token", Placeholder: "0/abc123...", Secret: true},
+	}},
+	{Type: "asana-mcp", Label: "Asana MCP", Fields: []TypeField{
+		{Key: "url", Label: "MCP URL", Placeholder: "https://mcp.asana.com/v2/mcp (default)"},
+	}},
 }
 
 // typeIndex is a lazily-built lookup map from type string to TypeDef.

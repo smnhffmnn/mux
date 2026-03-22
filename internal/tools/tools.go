@@ -124,6 +124,12 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		if err == nil {
 			toolDefs = gtm.Tools()
 		}
+	case "asana":
+		var a *Asana
+		a, err = NewAsana(conn, dialer)
+		if err == nil {
+			toolDefs = a.Tools()
+		}
 	default:
 		if config.IsProxyType(conn.Type) {
 			return nil, nil, fmt.Errorf("proxy connections must be registered via the proxy package")

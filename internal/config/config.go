@@ -52,7 +52,8 @@ func (c *Connection) Enabled() bool {
 	case c.Type == "microsoft-graph":
 		return true // auth is interactive via tools
 	case c.Type == "firecrawl", c.Type == "brave", c.Type == "google-tagmanager",
-		c.Type == "openai", c.Type == "elevenlabs", c.Type == "recraft", c.Type == "ideogram":
+		c.Type == "openai", c.Type == "elevenlabs", c.Type == "recraft", c.Type == "ideogram",
+		c.Type == "asana":
 		return c.Token != ""
 	default:
 		return c.Host != "" && c.User != ""
@@ -62,7 +63,7 @@ func (c *Connection) Enabled() bool {
 // IsProxyType reports whether a connection type proxies an upstream MCP server.
 func IsProxyType(typ string) bool {
 	switch typ {
-	case "proxy", "youtrack", "sentry", "netdata", "notion":
+	case "proxy", "youtrack", "sentry", "netdata", "notion", "asana-mcp":
 		return true
 	}
 	return false
@@ -397,6 +398,11 @@ func ApplyConnectionDefaults(c *Connection) {
 	case "postgresql":
 		if c.Port == 0 {
 			c.Port = 5432
+		}
+	case "asana-mcp":
+		c.OAuth = true
+		if c.URL == "" {
+			c.URL = "https://mcp.asana.com/v2/mcp"
 		}
 	}
 }
