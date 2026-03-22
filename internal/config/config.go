@@ -642,7 +642,9 @@ func ValidSecretKey(key string) bool {
 	}
 	if strings.HasSuffix(key, "-password") ||
 		strings.HasSuffix(key, "-token") ||
-		strings.HasSuffix(key, "-oauth-token") {
+		strings.HasSuffix(key, "-oauth-token") ||
+		strings.HasSuffix(key, "-oauth-client-id") ||
+		strings.HasSuffix(key, "-oauth-client-secret") {
 		return len(key) > len("-password") // must have a prefix
 	}
 	if strings.HasPrefix(key, "tunnel-") &&

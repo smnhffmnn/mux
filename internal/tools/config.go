@@ -380,6 +380,17 @@ func (ct *ConfigTools) updateInMemorySecret(key, value string) {
 				ct.reloader.ReloadConnection(*c)
 			}
 		}
+	} else if strings.HasSuffix(key, "-oauth-client-id") || strings.HasSuffix(key, "-oauth-client-secret") {
+		// OAuth client credentials changed — reload the connection so the proxy picks them up
+		var name string
+		if strings.HasSuffix(key, "-oauth-client-id") {
+			name = strings.TrimSuffix(key, "-oauth-client-id")
+		} else {
+			name = strings.TrimSuffix(key, "-oauth-client-secret")
+		}
+		if c := ct.cfg.FindAnyConnection(name); c != nil && ct.reloader != nil {
+			ct.reloader.ReloadConnection(*c)
+		}
 	}
 }
 
