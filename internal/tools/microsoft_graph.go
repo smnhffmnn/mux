@@ -318,6 +318,9 @@ func (mg *MicrosoftGraph) handleGetConversation(ctx context.Context, req mcp.Cal
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	if len(msgs) == 0 {
+		return mcp.NewToolResultError(fmt.Sprintf("no inbox messages found for conversation %s — it may be older than the search window", convID)), nil
+	}
 
 	return jsonResult(msgs)
 }
@@ -336,6 +339,9 @@ func (mg *MicrosoftGraph) handleArchiveConversation(ctx context.Context, req mcp
 	msgs, err := mg.getConversationMessages(ctx, convID, "id")
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if len(msgs) == 0 {
+		return mcp.NewToolResultError(fmt.Sprintf("no inbox messages found for conversation %s — it may be older than the search window", convID)), nil
 	}
 
 	moved := 0
@@ -359,6 +365,9 @@ func (mg *MicrosoftGraph) handleDeleteConversation(ctx context.Context, req mcp.
 	msgs, err := mg.getConversationMessages(ctx, convID, "id")
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if len(msgs) == 0 {
+		return mcp.NewToolResultError(fmt.Sprintf("no inbox messages found for conversation %s — it may be older than the search window", convID)), nil
 	}
 
 	deleted := 0
@@ -577,11 +586,17 @@ func (mg *MicrosoftGraph) doGraph(ctx context.Context, method, path string, body
 // --- Conversation helpers ---
 
 func (mg *MicrosoftGraph) getConversationMessages(ctx context.Context, convID, fields string) ([]graphRawMessage, error) {
-	filter := url.QueryEscape(fmt.Sprintf("conversationId eq '%s'", convID))
-	path := fmt.Sprintf("/me/mailFolders/inbox/messages?$filter=%s&$orderby=receivedDateTime+asc&$select=%s&$top=50", filter, fields)
+	// conversationId is not efficiently filterable in Graph API — $filter combined
+	// with $orderby returns InefficientFilter error. Fetch inbox messages in pages
+	// and filter client-side. Paginates up to maxPages (~1000 messages) to find
+	// conversations that may be beyond the first page.
+	selectFields := fields + ",conversationId"
+	path := fmt.Sprintf("/me/mailFolders/inbox/messages?$orderby=receivedDateTime+desc&$select=%s&$top=250", selectFields)
 
-	var all []graphRawMessage
-	for path != "" {
+	const maxPages = 4
+	var matched []graphRawMessage
+
+	for page := 0; path != "" && page < maxPages; page++ {
 		data, status, err := mg.doGraph(ctx, http.MethodGet, path, nil)
 		if err != nil {
 			return nil, err
@@ -598,9 +613,20 @@ func (mg *MicrosoftGraph) getConversationMessages(ctx context.Context, convID, f
 			return nil, fmt.Errorf("parse messages: %w", err)
 		}
 
-		all = append(all, resp.Value...)
+		prevCount := len(matched)
+		for _, m := range resp.Value {
+			if m.ConversationID == convID {
+				matched = append(matched, m)
+			}
+		}
 
-		// Follow pagination; nextLink is a full URL — strip graphBaseURL prefix
+		// If we had matches before this page but found none on it, the
+		// conversation's messages are fully collected — stop early.
+		if prevCount > 0 && len(matched) == prevCount {
+			break
+		}
+
+		// Follow pagination
 		if resp.NextLink != "" {
 			after, ok := cutPrefix(resp.NextLink, graphBaseURL)
 			if !ok {
@@ -612,32 +638,24 @@ func (mg *MicrosoftGraph) getConversationMessages(ctx context.Context, convID, f
 		}
 	}
 
-	return all, nil
+	// Reverse to chronological order (oldest first) — the API returns newest-first.
+	for i, j := 0, len(matched)-1; i < j; i, j = i+1, j-1 {
+		matched[i], matched[j] = matched[j], matched[i]
+	}
+
+	return matched, nil
 }
 
 func (mg *MicrosoftGraph) getLatestMessage(ctx context.Context, convID string) (*graphRawMessage, error) {
-	filter := url.QueryEscape(fmt.Sprintf("conversationId eq '%s'", convID))
-	path := fmt.Sprintf("/me/mailFolders/inbox/messages?$filter=%s&$orderby=receivedDateTime+desc&$top=1&$select=id", filter)
-
-	data, status, err := mg.doGraph(ctx, http.MethodGet, path, nil)
+	// getConversationMessages returns chronological order (oldest first)
+	msgs, err := mg.getConversationMessages(ctx, convID, "id")
 	if err != nil {
 		return nil, err
 	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("Graph API error (HTTP %d): %s", status, string(data))
-	}
-
-	var resp struct {
-		Value []graphRawMessage `json:"value"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("parse: %w", err)
-	}
-	if len(resp.Value) == 0 {
+	if len(msgs) == 0 {
 		return nil, fmt.Errorf("no messages found for conversation %s", convID)
 	}
-
-	return &resp.Value[0], nil
+	return &msgs[len(msgs)-1], nil
 }
 
 func (mg *MicrosoftGraph) getArchiveFolderID(ctx context.Context) (string, error) {
@@ -702,6 +720,7 @@ type graphConversation struct {
 	ConversationID string            `json:"conversationId"`
 	Subject        string            `json:"subject"`
 	MessageCount   int               `json:"messageCount"`
+	MessageIDs     []string          `json:"messageIds"`
 	Participants   []string          `json:"participants"`
 	LatestMessage  graphMessageBrief `json:"latestMessage"`
 	IsRead         bool              `json:"isRead"`
@@ -801,10 +820,16 @@ func groupByConversation(messages []graphRawMessage, limit int) []graphConversat
 			cc = append(cc, r.EmailAddress.Address)
 		}
 
+		msgIDs := make([]string, len(msgs))
+		for i, m := range msgs {
+			msgIDs[i] = m.ID
+		}
+
 		conv := graphConversation{
 			ConversationID: entry.cid,
 			Subject:        latest.Subject,
 			MessageCount:   len(msgs),
+			MessageIDs:     msgIDs,
 			Participants:   participants,
 			LatestMessage: graphMessageBrief{
 				ID:          latest.ID,
