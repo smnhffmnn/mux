@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -100,6 +101,14 @@ func (mg *MicrosoftGraph) Tools() []ToolDef {
 				mcp.WithNumber("limit", mcp.Description("Max conversations to return (default: 20)")),
 			),
 			Handler: mg.handleListConversations,
+		},
+		{
+			Tool: mcp.NewTool("search_messages",
+				mcp.WithDescription("Search messages across all mail folders using KQL. Examples: subject:audit, from:john@example.com, subject:\"exact phrase\", hasAttachments:true. Results grouped by conversation, ordered by relevance (not date)."),
+				mcp.WithString("query", mcp.Required(), mcp.Description("KQL search query (do not wrap in quotes — pass raw KQL)")),
+				mcp.WithNumber("limit", mcp.Description("Max conversations to return (default: 25)")),
+			),
+			Handler: mg.handleSearchMessages,
 		},
 		{
 			Tool: mcp.NewTool("get_conversation",
@@ -276,6 +285,49 @@ func (mg *MicrosoftGraph) handleAuthPoll(ctx context.Context, req mcp.CallToolRe
 }
 
 // --- Mail handlers ---
+
+func (mg *MicrosoftGraph) handleSearchMessages(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	query, _ := req.RequireString("query")
+	if query == "" {
+		return mcp.NewToolResultError("query is required"), nil
+	}
+
+	limit := 25
+	if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+
+	fetchCount := limit * 3
+	if fetchCount > 250 {
+		fetchCount = 250
+	}
+
+	fields := "id,conversationId,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,isRead,flag,bodyPreview"
+	// $search uses KQL across all mail folders; $orderby is not supported with $search.
+	// The query is passed as-is to allow raw KQL (subject:text, from:email, etc.).
+	// Wrapping in outer quotes is required by the OData $search protocol.
+	escaped := strings.ReplaceAll(query, `"`, `\"`)
+	searchParam := url.QueryEscape(`"` + escaped + `"`)
+	path := fmt.Sprintf("/me/messages?$search=%s&$select=%s&$top=%d", searchParam, fields, fetchCount)
+
+	data, status, err := mg.doGraph(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if status != http.StatusOK {
+		return mcp.NewToolResultError(fmt.Sprintf("Graph API error (HTTP %d): %s", status, string(data))), nil
+	}
+
+	var resp struct {
+		Value []graphRawMessage `json:"value"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return mcp.NewToolResultError("parse messages: " + err.Error()), nil
+	}
+
+	conversations := groupByConversation(resp.Value, limit)
+	return jsonResult(conversations)
+}
 
 func (mg *MicrosoftGraph) handleListConversations(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	limit := 20
@@ -568,6 +620,7 @@ func (mg *MicrosoftGraph) doGraph(ctx context.Context, method, path string, body
 	mg.mu.Unlock()
 
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("ConsistencyLevel", "eventual") // Required for $search queries; harmless for other requests
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
