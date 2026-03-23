@@ -28,9 +28,34 @@ func main() {
 		flagVersion bool
 	)
 
-	flag.IntVar(&flagPort, "port", 0, "HTTP port (default: 7700)")
-	flag.StringVar(&flagConfig, "config", "", "Config file path (default: ~/.mux/config.toml)")
-	flag.BoolVar(&flagVersion, "version", false, "Print version and exit")
+	flag.IntVar(&flagPort, "port", 0, "HTTP port")
+	flag.StringVar(&flagConfig, "config", "", "config file path")
+	flag.BoolVar(&flagVersion, "version", false, "print version and exit")
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, `mux — MCP Unified Exchange
+
+Single-binary MCP gateway for databases, APIs, and tunnels.
+Provides Claude with unified access to configured connections
+via the Model Context Protocol (MCP).
+
+Usage:
+  mux                     Start desktop app (GUI + MCP server)
+  echo '...' | mux        Start in stdio mode (Claude Desktop)
+
+Options:
+  --config <path>    Config file (default: ~/.mux/config.toml)
+  --port <port>      MCP HTTP port (default: 7700)
+  --version          Print version and exit
+
+Transport modes:
+  Desktop   Interactive terminal — launches GUI + HTTP server on localhost
+  Stdio     Piped input detected — MCP stdio transport (no logs, no UI)
+
+More info: https://github.com/smnhffmnn/mux
+`)
+	}
+
 	flag.Parse()
 
 	if flagVersion {
