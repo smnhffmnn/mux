@@ -2,14 +2,12 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
 
 permissions:
   contents: write
 
 jobs:
-  # Create the GitHub Release first
   create-release:
     runs-on: ubuntu-latest
     steps:
@@ -22,13 +20,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create ${{ github.ref_name }} \
-            --title "v${GITHUB_REF_NAME#v}" \
+            --title "${{ github.ref_name }}" \
             --generate-notes
 
-  # Build on each platform natively
   build:
     needs: create-release
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runner: macos-latest
@@ -41,7 +39,36 @@ jobs:
             goarch: amd64
             binary: mux.exe
             archive: zip
+          # Linux headless (CLI, no CGO)
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            binary: mux
+            archive: tar.gz
+            variant: headless
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            binary: mux
+            archive: tar.gz
+            variant: headless
+          # Linux desktop (GUI, CGO + webkit2gtk)
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            binary: mux
+            archive: tar.gz
+            variant: desktop
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            binary: mux
+            archive: tar.gz
+            variant: desktop
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -53,45 +80,57 @@ jobs:
         with:
           node-version: 22
 
+      - name: Set build variables
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          SUFFIX=""
+          if [ -n "${{ matrix.variant }}" ]; then
+            SUFFIX="_${{ matrix.variant }}"
+          fi
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "ARCHIVE_BASE=mux_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}${SUFFIX}" >> $GITHUB_ENV
+
+      - name: Install Linux desktop dependencies
+        if: matrix.goos == 'linux' && matrix.variant == 'desktop'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
+
       - name: Build frontend
         working-directory: frontend
         run: npm ci && npm run build
 
       - name: Build binary
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          go build -ldflags "-s -w -X main.version=${VERSION}" \
-            -o ${{ matrix.binary }} .
-        shell: bash
+          export GOOS=${{ matrix.goos }}
+          export GOARCH=${{ matrix.goarch }}
+          BUILD_TAGS=""
+          if [ "${{ matrix.variant }}" = "headless" ]; then
+            BUILD_TAGS="-tags notray"
+            export CGO_ENABLED=0
+          fi
+          go build -ldflags "-s -w -X main.version=${{ env.VERSION }}" \
+            ${BUILD_TAGS} -o ${{ matrix.binary }} .
 
       - name: Create archive
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
           if [ "${{ matrix.archive }}" = "zip" ]; then
-            7z a mux_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip \
+            7z a ${{ env.ARCHIVE_BASE }}.zip \
               ${{ matrix.binary }} LICENSE config.example.toml
           else
-            tar czf mux_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz \
+            tar czf ${{ env.ARCHIVE_BASE }}.tar.gz \
               ${{ matrix.binary }} LICENSE config.example.toml
           fi
-        shell: bash
 
       - name: Create macOS .app bundle
         if: matrix.goos == 'darwin'
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-
-          # Create .app directory structure
           mkdir -p mux.app/Contents/MacOS
           mkdir -p mux.app/Contents/Resources
 
-          # Copy binary
           cp mux mux.app/Contents/MacOS/mux
+          sed "s/1.0.0/${{ env.VERSION }}/g" build/darwin/Info.plist > mux.app/Contents/Info.plist
 
-          # Copy Info.plist with updated version
-          sed "s/1.0.0/${VERSION}/g" build/darwin/Info.plist > mux.app/Contents/Info.plist
-
-          # Generate .icns from appicon.png
           mkdir -p /tmp/icon.iconset
           for size in 16 32 128 256 512; do
             sips -z $size $size build/appicon.png --out /tmp/icon.iconset/icon_${size}x${size}.png 2>/dev/null
@@ -104,43 +143,49 @@ jobs:
           iconutil -c icns /tmp/icon.iconset -o mux.app/Contents/Resources/appicon.icns
           rm -rf /tmp/icon.iconset
 
-          # Add icon reference to Info.plist
           /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string appicon" mux.app/Contents/Info.plist 2>/dev/null || \
           /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile appicon" mux.app/Contents/Info.plist
 
-          # Create .app archive
-          tar czf mux_${VERSION}_darwin_${GOARCH}_app.tar.gz mux.app
-        shell: bash
-        env:
-          GOARCH: ${{ matrix.goarch }}
+          tar czf mux_${{ env.VERSION }}_darwin_${{ matrix.goarch }}_app.tar.gz mux.app
 
       - name: Upload to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
           if [ "${{ matrix.archive }}" = "zip" ]; then
             gh release upload ${{ github.ref_name }} \
-              mux_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip --clobber
+              ${{ env.ARCHIVE_BASE }}.zip --clobber
           else
             gh release upload ${{ github.ref_name }} \
-              mux_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz --clobber
+              ${{ env.ARCHIVE_BASE }}.tar.gz --clobber
           fi
-        shell: bash
 
       - name: Upload .app bundle
         if: matrix.goos == 'darwin'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
           gh release upload ${{ github.ref_name }} \
-            mux_${VERSION}_darwin_${{ matrix.goarch }}_app.tar.gz --clobber
-        shell: bash
+            mux_${{ env.VERSION }}_darwin_${{ matrix.goarch }}_app.tar.gz --clobber
 
-  # Update Homebrew tap
-  homebrew:
+  checksums:
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate SHA256 checksums
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/assets && cd /tmp/assets
+          gh release download ${{ github.ref_name }} \
+            --repo ${{ github.repository }} \
+            --pattern '*.tar.gz' --pattern '*.zip'
+          sha256sum * | sort > SHA256SUMS
+          gh release upload ${{ github.ref_name }} SHA256SUMS \
+            --repo ${{ github.repository }} --clobber
+
+  homebrew:
+    needs: [build, checksums]
     runs-on: ubuntu-latest
     steps:
       - name: Update Homebrew tap
@@ -149,9 +194,9 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
 
-          # Download and checksum both archives
-          FORMULA_URL="https://github.com/smnhffmnn/mux/releases/download/${GITHUB_REF_NAME}/mux_${VERSION}_darwin_arm64.tar.gz"
-          CASK_URL="https://github.com/smnhffmnn/mux/releases/download/${GITHUB_REF_NAME}/mux_${VERSION}_darwin_arm64_app.tar.gz"
+          REPO="${{ github.repository }}"
+          FORMULA_URL="https://github.com/${REPO}/releases/download/${GITHUB_REF_NAME}/mux_${VERSION}_darwin_arm64.tar.gz"
+          CASK_URL="https://github.com/${REPO}/releases/download/${GITHUB_REF_NAME}/mux_${VERSION}_darwin_arm64_app.tar.gz"
 
           curl -sL "$FORMULA_URL" -o formula.tar.gz
           curl -sL "$CASK_URL" -o cask.tar.gz
@@ -162,7 +207,6 @@ jobs:
           git clone https://x-access-token:${TAP_TOKEN}@github.com/smnhffmnn/homebrew-tap.git tap
           cd tap
 
-          # Update Formula
           cat > Formula/mux.rb << FORMULA
           class Mux < Formula
             desc "Single-binary MCP gateway for databases, APIs, and tunnels"
@@ -186,7 +230,6 @@ jobs:
           end
           FORMULA
 
-          # Update Cask
           mkdir -p Casks
           cat > Casks/mux.rb << CASK
           cask "mux" do
