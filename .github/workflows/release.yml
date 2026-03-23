@@ -39,32 +39,16 @@ jobs:
             goarch: amd64
             binary: mux.exe
             archive: zip
-          # Linux headless (CLI, no CGO)
           - runner: ubuntu-latest
             goos: linux
             goarch: amd64
             binary: mux
             archive: tar.gz
-            variant: headless
-          - runner: ubuntu-latest
-            goos: linux
-            goarch: arm64
-            binary: mux
-            archive: tar.gz
-            variant: headless
-          # Linux desktop (GUI, CGO + webkit2gtk)
-          - runner: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            binary: mux
-            archive: tar.gz
-            variant: desktop
           - runner: ubuntu-24.04-arm
             goos: linux
             goarch: arm64
             binary: mux
             archive: tar.gz
-            variant: desktop
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -83,15 +67,11 @@ jobs:
       - name: Set build variables
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          SUFFIX=""
-          if [ -n "${{ matrix.variant }}" ]; then
-            SUFFIX="_${{ matrix.variant }}"
-          fi
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
-          echo "ARCHIVE_BASE=mux_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}${SUFFIX}" >> $GITHUB_ENV
+          echo "ARCHIVE_BASE=mux_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}" >> $GITHUB_ENV
 
-      - name: Install Linux desktop dependencies
-        if: matrix.goos == 'linux' && matrix.variant == 'desktop'
+      - name: Install Linux dependencies
+        if: matrix.goos == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
@@ -102,15 +82,8 @@ jobs:
 
       - name: Build binary
         run: |
-          export GOOS=${{ matrix.goos }}
-          export GOARCH=${{ matrix.goarch }}
-          BUILD_TAGS=""
-          if [ "${{ matrix.variant }}" = "headless" ]; then
-            BUILD_TAGS="-tags notray"
-            export CGO_ENABLED=0
-          fi
           go build -ldflags "-s -w -X main.version=${{ env.VERSION }}" \
-            ${BUILD_TAGS} -o ${{ matrix.binary }} .
+            -o ${{ matrix.binary }} .
 
       - name: Create archive
         run: |
