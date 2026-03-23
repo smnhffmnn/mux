@@ -22,7 +22,7 @@ const (
 	graphBaseURL   = "https://graph.microsoft.com/v1.0"
 	graphAuthURL   = "https://login.microsoftonline.com/common/oauth2/v2.0"
 	GraphClientID  = "9e5f94bc-e8a4-4e73-b8be-63364c29d753" // Exported for UI test handler
-	graphDefScopes = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access"
+	graphDefScopes = "https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access"
 	graphMaxBody    = 512 * 1024
 	graphRefreshBuf = 5 * time.Minute
 )
@@ -164,8 +164,11 @@ func (mg *MicrosoftGraph) handleAuthStatus(ctx context.Context, _ mcp.CallToolRe
 
 	// Verify by calling /me
 	data, status, err := mg.doGraph(ctx, http.MethodGet, "/me?$select=displayName,mail", nil)
-	if err != nil || status != http.StatusOK {
-		return jsonResult(map[string]any{"authenticated": false, "error": "graph API unreachable"})
+	if err != nil {
+		return jsonResult(map[string]any{"authenticated": false, "error": "graph API unreachable: " + err.Error()})
+	}
+	if status != http.StatusOK {
+		return jsonResult(map[string]any{"authenticated": false, "error": fmt.Sprintf("graph API returned HTTP %d: %s", status, string(data))})
 	}
 
 	var me struct {
