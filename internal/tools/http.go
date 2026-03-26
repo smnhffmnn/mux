@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -22,6 +23,7 @@ type HTTP struct {
 	client       *http.Client
 	baseURL      string
 	token        string
+	readOnly     bool
 	instructions string
 }
 
@@ -51,21 +53,22 @@ func NewHTTP(conn config.Connection, dialer Dialer) (*HTTP, error) {
 		},
 		baseURL:      baseURL,
 		token:        conn.Token,
+		readOnly:     conn.ReadOnly,
 		instructions: conn.Instructions,
 	}, nil
 }
 
 // Tools returns the MCP tools for this HTTP connection.
 func (h *HTTP) Tools() []ToolDef {
-	desc := fmt.Sprintf("Make an HTTP GET request to %s and return the response body.", h.baseURL)
+	getDesc := fmt.Sprintf("Make an HTTP GET request to %s and return the response body.", h.baseURL)
 	if h.instructions != "" {
-		desc += "\n\n" + h.instructions
+		getDesc += "\n\n" + h.instructions
 	}
 
-	return []ToolDef{
+	tools := []ToolDef{
 		{
 			Tool: mcp.NewTool("get",
-				mcp.WithDescription(desc),
+				mcp.WithDescription(getDesc),
 				mcp.WithString("path",
 					mcp.Required(),
 					mcp.Description("Path to append to the base URL, e.g. /api/products"),
@@ -74,9 +77,52 @@ func (h *HTTP) Tools() []ToolDef {
 			Handler: h.handleGet,
 		},
 	}
+
+	if !h.readOnly {
+		writeDesc := fmt.Sprintf("Make an HTTP request with a body to %s. Supports POST, PUT, PATCH, and DELETE.", h.baseURL)
+
+		tools = append(tools, ToolDef{
+			Tool: mcp.NewTool("request",
+				mcp.WithDescription(writeDesc),
+				mcp.WithString("method",
+					mcp.Required(),
+					mcp.Description("HTTP method: POST, PUT, PATCH, or DELETE"),
+					mcp.Enum("POST", "PUT", "PATCH", "DELETE"),
+				),
+				mcp.WithString("path",
+					mcp.Required(),
+					mcp.Description("Path to append to the base URL, e.g. /api/users/42"),
+				),
+				mcp.WithString("body",
+					mcp.Description("JSON request body (optional)"),
+				),
+			),
+			Handler: h.handleRequest,
+		})
+	}
+
+	return tools
 }
 
 func (h *HTTP) handleGet(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return h.doRequest(ctx, http.MethodGet, req)
+}
+
+func (h *HTTP) handleRequest(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	method, _ := req.RequireString("method")
+	method = strings.ToUpper(method)
+
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		// valid
+	default:
+		return mcp.NewToolResultError(fmt.Sprintf("unsupported method: %s (use POST, PUT, PATCH, or DELETE)", method)), nil
+	}
+
+	return h.doRequest(ctx, method, req)
+}
+
+func (h *HTTP) doRequest(ctx context.Context, method string, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, _ := req.RequireString("path")
 	if path == "" {
 		return mcp.NewToolResultError("path is required"), nil
@@ -89,12 +135,20 @@ func (h *HTTP) handleGet(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 
 	url := h.baseURL + path
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	var bodyReader io.Reader
+	if body, err := req.RequireString("body"); err == nil && body != "" {
+		bodyReader = bytes.NewBufferString(body)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid request: %v", err)), nil
 	}
 
 	httpReq.Header.Set("Accept", "application/json")
+	if bodyReader != nil {
+		httpReq.Header.Set("Content-Type", "application/json")
+	}
 	if h.token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+h.token)
 	}
