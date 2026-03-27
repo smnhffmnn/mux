@@ -14,7 +14,7 @@ mux is a [Model Context Protocol](https://modelcontextprotocol.io) gateway that 
 - **Generic HTTP** -- connect any REST API with optional Bearer auth
 - **WireGuard Tunnels** -- reach databases on private networks through userspace WireGuard (no root, no VPN client)
 - **Remote Provisioning** -- centrally manage connections and tunnels for your team from a single HTTP endpoint
-- **Dual Transport** -- stdio (Claude Desktop) and Streamable HTTP (`/mcp`) with auto-detection
+- **Two Transports, Three Modes** -- stdio (Claude Desktop) and Streamable HTTP (`/mcp`), with auto-detection of desktop, headless, and stdio modes
 - **Desktop App** -- Wails v3 + Svelte 5 with system tray, web UI, OAuth flows, and connection testing
 - **OS Keychain** -- secrets stored in macOS Keychain, GNOME Keyring, or Windows Credential Manager
 - **Dynamic Config** -- add, remove, and manage connections at runtime via MCP tools
@@ -71,7 +71,7 @@ Run mux:
 mux
 ```
 
-mux auto-detects the mode: terminal = desktop app + HTTP server on port 7700, piped stdin = stdio mode.
+mux auto-detects the mode: piped stdin = stdio mode, no display = headless HTTP server, terminal with display = desktop app + HTTP server on port 7700.
 
 ## Usage
 
@@ -112,15 +112,11 @@ Run `mux` from a terminal. A system tray icon appears (macOS) and the web UI is 
 
 ### Headless Mode
 
+On servers without a display (no `DISPLAY` or `WAYLAND_DISPLAY`), mux automatically starts in headless HTTP mode -- no flags needed:
+
 ```bash
-# HTTP server (for Claude Code, API access)
-mux --http
-
-# Stdio (for Claude Desktop, piped agents)
-mux --stdio
-
-# Custom port and config
-mux --http --port 8080 --config ./my-config.toml
+mux                                        # auto-detects headless
+mux --port 8080 --config ./my-config.toml  # custom port and config
 ```
 
 ## Configuration

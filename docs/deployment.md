@@ -69,23 +69,11 @@ brew install mux
 ## Running
 
 ```bash
-# Auto-detect mode (terminal = HTTP, pipe = stdio)
+# Auto-detect mode (see below)
 mux
 
-# Force HTTP mode
-mux --http
-
-# Force stdio mode
-mux --stdio
-
 # Custom port and config
-mux --http --port 8080 --config /path/to/config.toml
-
-# Disable system tray (desktop build only)
-mux --http --no-tray
-
-# Disable web UI
-mux --http --no-ui
+mux --port 8080 --config /path/to/config.toml
 
 # Version
 mux --version
@@ -93,9 +81,11 @@ mux --version
 
 ### Mode Auto-Detection
 
-If no `--stdio` or `--http` flag is given:
-- stdin is a pipe -> stdio mode (for Claude Desktop, piped agents)
-- stdin is a terminal -> HTTP mode + desktop app
+mux automatically selects the right mode — no flags needed:
+
+1. **stdin is a pipe** → stdio mode (for Claude Desktop, piped agents)
+2. **No DISPLAY/WAYLAND_DISPLAY** → headless HTTP mode (servers, containers)
+3. **Otherwise** → desktop GUI mode (macOS/Linux with display)
 
 ## Platform Notes
 
@@ -109,7 +99,7 @@ If no `--stdio` or `--http` flag is given:
 
 **Headless build**:
 - Works without Xcode
-- No tray icon, but web UI at `http://localhost:7700/ui` still works
+- No tray icon, no web UI — MCP endpoint only (`http://localhost:7700/mcp`)
 - Secrets stored in macOS Keychain Access (service: "mux")
 
 ### Linux
@@ -118,15 +108,17 @@ Only headless builds are supported.
 
 ```bash
 CGO_ENABLED=0 go build -tags notray -o mux .
-./mux --http
+./mux
 ```
+
+mux detects the absence of `DISPLAY`/`WAYLAND_DISPLAY` and starts in headless HTTP mode automatically.
 
 **Keychain**: Secrets use the Secret Service API (GNOME Keyring or KWallet). For headless servers without a desktop environment, use environment variables instead:
 
 ```bash
 export POSTGRESQL_DB_PASSWORD=secret
 export MUX_PROVISIONING_TOKEN=my-token
-./mux --http
+./mux
 ```
 
 ### Windows
@@ -135,7 +127,7 @@ Only headless builds are supported.
 
 ```powershell
 $env:CGO_ENABLED=0; go build -tags notray -o mux.exe .
-.\mux.exe --http
+.\mux.exe
 ```
 
 Secrets are stored in Windows Credential Manager (service: "mux").
@@ -152,7 +144,7 @@ After=network.target
 [Service]
 Type=simple
 User=mux
-ExecStart=/usr/local/bin/mux --http --no-tray
+ExecStart=/usr/local/bin/mux
 Restart=on-failure
 RestartSec=5
 Environment=MUX_PORT=7700
@@ -168,7 +160,7 @@ WantedBy=multi-user.target
 Use a service wrapper like [NSSM](https://nssm.cc/) or [WinSW](https://github.com/winsw/winsw):
 
 ```bash
-nssm install mux "C:\path\to\mux.exe" "--http --no-tray"
+nssm install mux "C:\path\to\mux.exe"
 nssm start mux
 ```
 
@@ -186,7 +178,7 @@ FROM alpine:latest
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /app/mux /usr/local/bin/mux
 EXPOSE 7700
-ENTRYPOINT ["mux", "--http", "--no-tray"]
+ENTRYPOINT ["mux"]
 ```
 
 Docker containers have no OS keychain. Use environment variables for all secrets:

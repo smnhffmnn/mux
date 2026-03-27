@@ -90,8 +90,8 @@ func registerProxies(ctx context.Context, s *server.MCPServer, cfg *config.Confi
 	}
 }
 
-// stdioReloader implements tools.ToolReloader for stdio mode (no App/Wails).
-type stdioReloader struct {
+// simpleReloader implements tools.ToolReloader for stdio and headless modes (no App/Wails).
+type simpleReloader struct {
 	mcpServer       *server.MCPServer
 	cfg             *config.Config
 	wgMgr           *wireguard.Manager
@@ -100,7 +100,7 @@ type stdioReloader struct {
 	closers         map[string][]io.Closer
 }
 
-func (r *stdioReloader) ReloadConnection(conn config.Connection) {
+func (r *simpleReloader) ReloadConnection(conn config.Connection) {
 	r.unregisterConnection(conn.Name)
 
 	if !conn.Enabled() {
@@ -136,11 +136,11 @@ func (r *stdioReloader) ReloadConnection(conn config.Connection) {
 	r.toolsMu.Unlock()
 }
 
-func (r *stdioReloader) UnloadConnection(name string) {
+func (r *simpleReloader) UnloadConnection(name string) {
 	r.unregisterConnection(name)
 }
 
-func (r *stdioReloader) unregisterConnection(name string) {
+func (r *simpleReloader) unregisterConnection(name string) {
 	r.toolsMu.Lock()
 	defer r.toolsMu.Unlock()
 	if names, ok := r.registeredTools[name]; ok && len(names) > 0 {
@@ -156,7 +156,7 @@ func (r *stdioReloader) unregisterConnection(name string) {
 	}
 }
 
-func (r *stdioReloader) registerProxy(conn config.Connection) {
+func (r *simpleReloader) registerProxy(conn config.Connection) {
 	if conn.OAuth {
 		tokenStore := config.NewKeychainTokenStore(conn.Name)
 		if !tokenStore.HasToken() {
@@ -199,7 +199,7 @@ func (r *stdioReloader) registerProxy(conn config.Connection) {
 	}
 }
 
-func (r *stdioReloader) trackProxyTools(connName string) {
+func (r *simpleReloader) trackProxyTools(connName string) {
 	prefix := connName + "_"
 	var names []string
 	for name := range r.mcpServer.ListTools() {

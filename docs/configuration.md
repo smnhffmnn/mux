@@ -22,7 +22,6 @@ Configuration is loaded in layers (highest priority wins):
 ```toml
 [server]
 port = 7700          # HTTP port (default: 7700)
-auto_start = false   # auto-start MCP server on launch (default: false)
 ```
 
 ### Connections

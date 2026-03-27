@@ -96,8 +96,7 @@ type ERPConfig struct {
 }
 
 type ServerConfig struct {
-	Port      int  `toml:"port"`
-	AutoStart bool `toml:"auto_start"`
+	Port int `toml:"port"`
 }
 
 // Config is the application configuration.

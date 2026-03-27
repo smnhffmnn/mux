@@ -9,11 +9,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/wailsapp/wails/v3/pkg/application"
-	"github.com/wailsapp/wails/v3/pkg/events"
 
 	"github.com/smnhffmnn/mux/internal/config"
 	"github.com/smnhffmnn/mux/internal/erp"
@@ -49,8 +49,9 @@ Options:
   --version          Print version and exit
 
 Transport modes:
-  Desktop   Interactive terminal — launches GUI + HTTP server on localhost
-  Stdio     Piped input detected — MCP stdio transport (no logs, no UI)
+  Desktop    Interactive terminal with display — launches GUI + HTTP server
+  Headless   Interactive terminal, no display — HTTP server only (servers)
+  Stdio      Piped input detected — MCP stdio transport (no logs, no UI)
 
 More info: https://github.com/smnhffmnn/mux
 `)
@@ -63,7 +64,7 @@ More info: https://github.com/smnhffmnn/mux
 		os.Exit(0)
 	}
 
-	// Auto-detect transport mode: pipe = stdio, terminal = desktop
+	// Auto-detect transport mode: pipe = stdio, terminal = headless or desktop
 	// Check EARLY before any log output (stdio mode must not pollute stdout/stderr)
 	fi, err := os.Stdin.Stat()
 	useStdio := err == nil && fi != nil && (fi.Mode()&os.ModeCharDevice) == 0
@@ -142,12 +143,8 @@ More info: https://github.com/smnhffmnn/mux
 
 	// --- Stdio mode (Claude Desktop, piped stdin) ---
 	if useStdio {
-		reloader := &stdioReloader{mcpServer: s, cfg: cfg, wgMgr: wgMgr, registeredTools: make(map[string][]string), closers: make(map[string][]io.Closer)}
-		configTools := tools.NewConfigTools(cfg, reloader)
-		for _, t := range configTools.Tools() {
-			s.AddTool(t.Tool, t.Handler)
-			log.Printf("[mux] Registered: %s", t.Tool.Name)
-		}
+		log.Println("[mux] Starting in stdio mode")
+		registerConfigTools(s, cfg, wgMgr)
 		if err := server.ServeStdio(s); err != nil {
 			fmt.Fprintf(os.Stderr, "stdio server error: %v\n", err)
 			os.Exit(1)
@@ -155,23 +152,56 @@ More info: https://github.com/smnhffmnn/mux
 		return
 	}
 
-	// --- Desktop mode (Wails v3 + MCP HTTP) ---
-	app := NewApp(cfg, version, buildTime, cfg.Server.Port, s, wgMgr)
+	// Detect display availability for GUI vs headless decision
+	hasDisplay := runtime.GOOS == "darwin" || runtime.GOOS == "windows" ||
+		os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
 
-	// Register config management tools (with app as hot-reloader)
-	configTools := tools.NewConfigTools(cfg, app)
+	// --- Headless HTTP mode (no display server available) ---
+	if !hasDisplay {
+		log.Println("[mux] Starting in headless HTTP mode (no display detected)")
+
+		registerConfigTools(s, cfg, wgMgr)
+
+		httpSrv := startHTTPServer(s, nil, cfg.Server.Port)
+
+		// Block until SIGINT/SIGTERM
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		<-sigCh
+		log.Println("[mux] Shutting down...")
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		httpSrv.Shutdown(shutdownCtx)
+		cancel()
+		return
+	}
+
+	// --- Desktop mode (Wails v3 + MCP HTTP) ---
+	runDesktop(s, cfg, wgMgr, ctx, cancel)
+}
+
+// registerConfigTools creates a simpleReloader and registers config management tools on the MCP server.
+func registerConfigTools(s *server.MCPServer, cfg *config.Config, wgMgr *wireguard.Manager) {
+	reloader := &simpleReloader{mcpServer: s, cfg: cfg, wgMgr: wgMgr, registeredTools: make(map[string][]string), closers: make(map[string][]io.Closer)}
+	configTools := tools.NewConfigTools(cfg, reloader)
 	for _, t := range configTools.Tools() {
 		s.AddTool(t.Tool, t.Handler)
 		log.Printf("[mux] Registered: %s", t.Tool.Name)
 	}
+}
 
-	// Start MCP HTTP server on localhost only (avoids firewall popups)
-	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Server.Port)
+// startHTTPServer creates and starts the MCP HTTP server on localhost.
+// If app is non-nil (desktop mode), the OAuth callback handler is registered.
+func startHTTPServer(s *server.MCPServer, app *App, port int) *http.Server {
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	mux := http.NewServeMux()
 
 	mcpHandler := server.NewStreamableHTTPServer(s)
 	mux.Handle("/mcp", mcpHandler)
-	mux.HandleFunc("/oauth/callback", app.oauthCallbackHandler())
+
+	if app != nil {
+		mux.HandleFunc("/oauth/callback", app.oauthCallbackHandler())
+	}
 
 	httpSrv := &http.Server{Addr: addr, Handler: mux}
 
@@ -182,59 +212,6 @@ More info: https://github.com/smnhffmnn/mux
 		}
 	}()
 
-	log.Printf("[mux] MCP available at http://localhost:%d/mcp", cfg.Server.Port)
-
-	// Signal handling (os.Interrupt works on all platforms, including Windows)
-	go func() {
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, os.Interrupt)
-		<-sigCh
-		log.Println("[mux] Shutting down...")
-		httpSrv.Shutdown(ctx)
-		cancel()
-		os.Exit(0)
-	}()
-
-	// Create Wails v3 application
-	wailsApp := application.New(application.Options{
-		Name: "mux",
-		Mac: application.MacOptions{
-			ApplicationShouldTerminateAfterLastWindowClosed: false,
-		},
-		Services: []application.Service{
-			application.NewService(app),
-		},
-		Assets: application.AssetOptions{
-			Handler: application.AssetFileServerFS(assets),
-		},
-	})
-
-	// Wire up event emission from App to Wails
-	app.emitEvent = func(name string, data any) {
-		wailsApp.Event.Emit(name, data)
-	}
-
-	// Create the main window
-	window := wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title:  "mux — MCP Unified Exchange",
-		Width:  900,
-		Height: 680,
-		Mac: application.MacWindow{
-			InvisibleTitleBarHeight: 50,
-			Backdrop:               application.MacBackdropTranslucent,
-		},
-		URL: "/",
-	})
-
-	// Hide window on close (red button) instead of destroying it.
-	// Wails' built-in ApplicationShouldHandleReopen handler shows it again on dock click.
-	window.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
-		e.Cancel()
-		window.Hide()
-	})
-
-	// Start Wails app (blocks — owns main thread)
-	if err := wailsApp.Run(); err != nil {
-		log.Fatalf("Wails error: %v", err)
-	}
+	log.Printf("[mux] MCP available at http://localhost:%d/mcp", port)
+	return httpSrv
 }
