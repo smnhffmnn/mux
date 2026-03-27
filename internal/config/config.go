@@ -86,10 +86,11 @@ type TunnelConfig struct {
 	KeepAlive     int    `toml:"keepalive,omitempty" json:"keepalive,omitempty"`
 
 	// SSH fields
-	Host    string `toml:"host,omitempty" json:"host,omitempty"`
-	Port    int    `toml:"port,omitempty" json:"port,omitempty"`
-	User    string `toml:"user,omitempty" json:"user,omitempty"`
-	KeyFile string `toml:"key_file,omitempty" json:"keyFile,omitempty"` // path to SSH private key file
+	Host              string `toml:"host,omitempty" json:"host,omitempty"`
+	Port              int    `toml:"port,omitempty" json:"port,omitempty"`
+	User              string `toml:"user,omitempty" json:"user,omitempty"`
+	KeyFile           string `toml:"key_file,omitempty" json:"keyFile,omitempty"`                         // path to SSH private key file
+	InsecureHostKey   bool   `toml:"insecure_host_key,omitempty" json:"insecureHostKey,omitempty"`        // skip host key verification (default: false)
 
 	// Shared
 	PrivateKey string `toml:"-" json:"privateKey,omitempty"` // WG: base64 key; SSH: PEM key content
@@ -402,7 +403,7 @@ func Load(path string) (*Config, error) {
 			}
 			// Load SSH key from file if not already in keychain
 			if cfg.Tunnels[i].PrivateKey == "" && cfg.Tunnels[i].KeyFile != "" {
-				if data, err := os.ReadFile(expandHome(cfg.Tunnels[i].KeyFile)); err == nil {
+				if data, err := os.ReadFile(ExpandHome(cfg.Tunnels[i].KeyFile)); err == nil {
 					cfg.Tunnels[i].PrivateKey = string(data)
 				}
 			}
@@ -449,8 +450,8 @@ func ApplyConnectionDefaults(c *Connection) {
 	}
 }
 
-// expandHome replaces a leading ~ with the user's home directory.
-func expandHome(path string) string {
+// ExpandHome replaces a leading ~ with the user's home directory.
+func ExpandHome(path string) string {
 	if strings.HasPrefix(path, "~/") || path == "~" {
 		if home, err := os.UserHomeDir(); err == nil {
 			return filepath.Join(home, path[1:])

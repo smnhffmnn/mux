@@ -34,7 +34,7 @@ type ERPInfo struct {
 	ResultSuccess bool   `json:"resultSuccess,omitempty"`
 }
 
-// TunnelInfo describes a WireGuard tunnel.
+// TunnelInfo describes a WireGuard or SSH tunnel.
 type TunnelInfo struct {
 	Name          string `json:"name"`
 	Type          string `json:"type"`                    // "wireguard" or "ssh"

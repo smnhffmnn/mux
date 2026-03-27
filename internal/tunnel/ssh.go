@@ -43,7 +43,7 @@ func NewSSH(cfg config.TunnelConfig) (*SSHTunnel, error) {
 	// Load key from file if not already in keychain
 	keyData := cfg.PrivateKey
 	if keyData == "" && cfg.KeyFile != "" {
-		path := expandHome(cfg.KeyFile)
+		path := config.ExpandHome(cfg.KeyFile)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("read SSH key file %s: %w", path, err)
@@ -66,19 +66,21 @@ func NewSSH(cfg config.TunnelConfig) (*SSHTunnel, error) {
 
 	var hostKeyCallback ssh.HostKeyCallback
 
-	// Try loading known_hosts for host key verification (C1)
-	knownHostsPath := defaultKnownHostsPath()
-	if _, err := os.Stat(knownHostsPath); err == nil {
-		cb, err := knownhosts.New(knownHostsPath)
-		if err != nil {
-			log.Printf("[ssh] Warning: could not parse %s: %v — falling back to insecure", knownHostsPath, err)
-			hostKeyCallback = ssh.InsecureIgnoreHostKey()
-		} else {
-			hostKeyCallback = cb
-		}
-	} else {
-		log.Printf("[ssh] Warning: %s not found — accepting any host key (insecure)", knownHostsPath)
+	if cfg.InsecureHostKey {
+		log.Printf("[ssh] Tunnel %q: host key verification disabled (insecure_host_key = true)", cfg.Name)
 		hostKeyCallback = ssh.InsecureIgnoreHostKey()
+	} else {
+		// Try loading known_hosts for host key verification
+		knownHostsPath := defaultKnownHostsPath()
+		if _, err := os.Stat(knownHostsPath); err == nil {
+			cb, err := knownhosts.New(knownHostsPath)
+			if err != nil {
+				return nil, fmt.Errorf("parse %s: %w (set insecure_host_key = true to skip verification)", knownHostsPath, err)
+			}
+			hostKeyCallback = cb
+		} else {
+			return nil, fmt.Errorf("%s not found — cannot verify host key (set insecure_host_key = true to skip verification)", knownHostsPath)
+		}
 	}
 
 	sshCfg := &ssh.ClientConfig{
@@ -298,12 +300,3 @@ func defaultKnownHostsPath() string {
 	return filepath.Join(home, ".ssh", "known_hosts")
 }
 
-// expandHome replaces a leading ~ with the user's home directory.
-func expandHome(path string) string {
-	if len(path) >= 2 && path[:2] == "~/" {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, path[2:])
-		}
-	}
-	return path
-}
