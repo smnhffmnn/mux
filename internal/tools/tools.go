@@ -130,6 +130,12 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		if err == nil {
 			toolDefs = a.Tools()
 		}
+	case "imap":
+		var im *IMAP
+		im, err = NewIMAP(conn, dialer)
+		if err == nil {
+			toolDefs = im.Tools()
+		}
 	default:
 		if config.IsProxyType(conn.Type) {
 			return nil, nil, fmt.Errorf("proxy connections must be registered via the proxy package")
@@ -169,6 +175,8 @@ func DefaultInstructions(connType string) string {
 		return DefaultAsanaInstructions
 	case "asana-mcp":
 		return DefaultAsanaMCPInstructions
+	case "imap":
+		return DefaultIMAPInstructions
 	default:
 		return ""
 	}

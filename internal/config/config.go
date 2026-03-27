@@ -54,6 +54,8 @@ func (c *Connection) Enabled() bool {
 		c.Type == "openai", c.Type == "elevenlabs", c.Type == "recraft", c.Type == "ideogram",
 		c.Type == "asana":
 		return c.Token != ""
+	case c.Type == "imap":
+		return c.Host != "" && c.User != "" && c.Password != ""
 	default:
 		return c.Host != "" && c.User != ""
 	}
@@ -68,23 +70,44 @@ func IsProxyType(typ string) bool {
 	return false
 }
 
-// Tunnel represents a WireGuard tunnel definition.
+// TunnelConfig represents a WireGuard or SSH tunnel definition.
 type TunnelConfig struct {
 	Name          string `toml:"name" json:"name"`
-	PeerPublicKey string `toml:"peer_public_key" json:"peerPublicKey"`
-	PeerEndpoint  string `toml:"peer_endpoint" json:"peerEndpoint"`
-	AllowedIPs    string `toml:"allowed_ips" json:"allowedIPs"`
-	TunnelAddress string `toml:"tunnel_address" json:"tunnelAddress"`
+	Type          string `toml:"type,omitempty" json:"type,omitempty"` // "wireguard" (default) or "ssh"
+
+	// WireGuard fields
+	PeerPublicKey string `toml:"peer_public_key,omitempty" json:"peerPublicKey,omitempty"`
+	PeerEndpoint  string `toml:"peer_endpoint,omitempty" json:"peerEndpoint,omitempty"`
+	AllowedIPs    string `toml:"allowed_ips,omitempty" json:"allowedIPs,omitempty"`
+	TunnelAddress string `toml:"tunnel_address,omitempty" json:"tunnelAddress,omitempty"`
 	DNS           string `toml:"dns,omitempty" json:"dns,omitempty"`
-	PrivateKey    string `toml:"-" json:"privateKey,omitempty"`
 	PresharedKey  string `toml:"-" json:"presharedKey,omitempty"`
 	MTU           int    `toml:"mtu,omitempty" json:"mtu,omitempty"`
 	KeepAlive     int    `toml:"keepalive,omitempty" json:"keepalive,omitempty"`
-	Source        string `toml:"-" json:"source,omitempty"` // "local" or "erp"
+
+	// SSH fields
+	Host              string `toml:"host,omitempty" json:"host,omitempty"`
+	Port              int    `toml:"port,omitempty" json:"port,omitempty"`
+	User              string `toml:"user,omitempty" json:"user,omitempty"`
+	KeyFile           string `toml:"key_file,omitempty" json:"keyFile,omitempty"`                         // path to SSH private key file
+	InsecureHostKey   bool   `toml:"insecure_host_key,omitempty" json:"insecureHostKey,omitempty"`        // skip host key verification (default: false)
+
+	// Shared
+	PrivateKey string `toml:"-" json:"privateKey,omitempty"` // WG: base64 key; SSH: PEM key content
+	Source     string `toml:"-" json:"source,omitempty"`     // "local" or "erp"
+}
+
+// IsSSH reports whether the tunnel is an SSH tunnel.
+func (t *TunnelConfig) IsSSH() bool {
+	return t.Type == "ssh"
 }
 
 // Enabled reports whether the tunnel has enough config to be started.
 func (t *TunnelConfig) Enabled() bool {
+	if t.IsSSH() {
+		return t.Host != "" && t.User != "" && (t.PrivateKey != "" || t.KeyFile != "")
+	}
+	// WireGuard
 	return t.PrivateKey != "" && t.PeerPublicKey != "" && t.PeerEndpoint != ""
 }
 
@@ -176,11 +199,17 @@ func (cfg *Config) SetERP(tunnels []TunnelConfig, connections []Connection) {
 		if tunnels[i].Source == "" {
 			tunnels[i].Source = "erp"
 		}
-		if tunnels[i].MTU == 0 {
-			tunnels[i].MTU = 1420
-		}
-		if tunnels[i].KeepAlive == 0 {
-			tunnels[i].KeepAlive = 25
+		if tunnels[i].IsSSH() {
+			if tunnels[i].Port == 0 {
+				tunnels[i].Port = 22
+			}
+		} else {
+			if tunnels[i].MTU == 0 {
+				tunnels[i].MTU = 1420
+			}
+			if tunnels[i].KeepAlive == 0 {
+				tunnels[i].KeepAlive = 25
+			}
 		}
 		// Supplement tunnel secrets from keychain/file
 		if tunnels[i].PrivateKey == "" {
@@ -368,11 +397,23 @@ func Load(path string) (*Config, error) {
 		ApplyConnectionDefaults(&cfg.Connections[i])
 	}
 	for i := range cfg.Tunnels {
-		if cfg.Tunnels[i].MTU == 0 {
-			cfg.Tunnels[i].MTU = 1420
-		}
-		if cfg.Tunnels[i].KeepAlive == 0 {
-			cfg.Tunnels[i].KeepAlive = 25
+		if cfg.Tunnels[i].IsSSH() {
+			if cfg.Tunnels[i].Port == 0 {
+				cfg.Tunnels[i].Port = 22
+			}
+			// Load SSH key from file if not already in keychain
+			if cfg.Tunnels[i].PrivateKey == "" && cfg.Tunnels[i].KeyFile != "" {
+				if data, err := os.ReadFile(ExpandHome(cfg.Tunnels[i].KeyFile)); err == nil {
+					cfg.Tunnels[i].PrivateKey = string(data)
+				}
+			}
+		} else {
+			if cfg.Tunnels[i].MTU == 0 {
+				cfg.Tunnels[i].MTU = 1420
+			}
+			if cfg.Tunnels[i].KeepAlive == 0 {
+				cfg.Tunnels[i].KeepAlive = 25
+			}
 		}
 	}
 
@@ -402,10 +443,23 @@ func ApplyConnectionDefaults(c *Connection) {
 		if c.URL == "" {
 			c.URL = "https://mcp.asana.com/v2/mcp"
 		}
+	case "imap":
+		if c.Port == 0 {
+			c.Port = 993
+		}
 	}
 }
 
-// hostFromURL extracts the hostname (without port) from a URL string.
+// ExpandHome replaces a leading ~ with the user's home directory.
+func ExpandHome(path string) string {
+	if strings.HasPrefix(path, "~/") || path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[1:])
+		}
+	}
+	return path
+}
+
 func hostFromURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {

@@ -98,16 +98,32 @@ More info: https://github.com/smnhffmnn/mux
 		}
 	}
 
-	// WireGuard tunnels
+	// Tunnels (WireGuard + SSH)
 	wgMgr := wireguard.NewManager()
 	defer wgMgr.Close()
 
 	allTunnels := cfg.AllTunnels()
-	if len(allTunnels) > 0 {
-		errs := wgMgr.Start(allTunnels)
-		for name, err := range errs {
+
+	// Start WireGuard tunnels
+	var wgTunnels []config.TunnelConfig
+	for _, t := range allTunnels {
+		if !t.IsSSH() {
+			wgTunnels = append(wgTunnels, t)
+		}
+	}
+	if len(wgTunnels) > 0 {
+		for name, err := range wgMgr.Start(wgTunnels) {
 			log.Printf("[mux] Tunnel %q failed: %v — connections using it will be skipped", name, err)
 		}
+	}
+
+	// Combined tunnel manager (WireGuard + SSH)
+	tm := newTunnelManager(wgMgr)
+	defer tm.Close()
+
+	// Start SSH tunnels
+	for name, err := range tm.StartSSH(allTunnels) {
+		log.Printf("[mux] Tunnel %q failed: %v — connections using it will be skipped", name, err)
 	}
 
 	// Build MCP instructions from connection descriptions
@@ -130,7 +146,7 @@ More info: https://github.com/smnhffmnn/mux
 	)
 
 	// Register connections (with fail-closed tunnel logic)
-	registerConnections(s, cfg, wgMgr)
+	registerConnections(s, cfg, tm)
 
 	// Register proxy mounts
 	ctx, cancel := context.WithCancel(context.Background())
@@ -144,7 +160,7 @@ More info: https://github.com/smnhffmnn/mux
 	// --- Stdio mode (Claude Desktop, piped stdin) ---
 	if useStdio {
 		log.Println("[mux] Starting in stdio mode")
-		registerConfigTools(s, cfg, wgMgr)
+		registerConfigTools(s, cfg, tm)
 		if err := server.ServeStdio(s); err != nil {
 			fmt.Fprintf(os.Stderr, "stdio server error: %v\n", err)
 			os.Exit(1)
@@ -160,7 +176,7 @@ More info: https://github.com/smnhffmnn/mux
 	if !hasDisplay {
 		log.Println("[mux] Starting in headless HTTP mode (no display detected)")
 
-		registerConfigTools(s, cfg, wgMgr)
+		registerConfigTools(s, cfg, tm)
 
 		httpSrv := startHTTPServer(s, cfg.Server.Port, nil)
 
@@ -177,12 +193,12 @@ More info: https://github.com/smnhffmnn/mux
 	}
 
 	// --- Desktop mode (Wails v3 + MCP HTTP) ---
-	runDesktop(s, cfg, wgMgr, ctx, cancel)
+	runDesktop(s, cfg, tm, ctx, cancel)
 }
 
 // registerConfigTools creates a simpleReloader and registers config management tools on the MCP server.
-func registerConfigTools(s *server.MCPServer, cfg *config.Config, wgMgr *wireguard.Manager) {
-	reloader := &simpleReloader{mcpServer: s, cfg: cfg, wgMgr: wgMgr, registeredTools: make(map[string][]string), closers: make(map[string][]io.Closer)}
+func registerConfigTools(s *server.MCPServer, cfg *config.Config, tm *tunnelManager) {
+	reloader := &simpleReloader{mcpServer: s, cfg: cfg, tm: tm, registeredTools: make(map[string][]string), closers: make(map[string][]io.Closer)}
 	configTools := tools.NewConfigTools(cfg, reloader)
 	for _, t := range configTools.Tools() {
 		s.AddTool(t.Tool, t.Handler)

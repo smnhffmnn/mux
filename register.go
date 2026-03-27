@@ -15,15 +15,76 @@ import (
 	"github.com/smnhffmnn/mux/internal/config"
 	"github.com/smnhffmnn/mux/internal/proxy"
 	"github.com/smnhffmnn/mux/internal/tools"
+	"github.com/smnhffmnn/mux/internal/tunnel"
 	"github.com/smnhffmnn/mux/internal/wireguard"
 )
 
 var version = "dev"
 var buildTime = ""
 
+// tunnelManager wraps WireGuard and SSH tunnels behind a common Dialer interface.
+type tunnelManager struct {
+	wg  *wireguard.Manager
+	ssh map[string]*tunnel.SSHTunnel
+}
+
+func newTunnelManager(wgMgr *wireguard.Manager) *tunnelManager {
+	return &tunnelManager{wg: wgMgr, ssh: make(map[string]*tunnel.SSHTunnel)}
+}
+
+// StartSSH creates and starts SSH tunnels from the given configs.
+// Returns errors keyed by tunnel name for any that failed.
+func (tm *tunnelManager) StartSSH(tunnels []config.TunnelConfig) map[string]error {
+	errs := make(map[string]error)
+	for _, cfg := range tunnels {
+		if !cfg.IsSSH() || !cfg.Enabled() {
+			continue
+		}
+		t, err := tunnel.NewSSH(cfg)
+		if err != nil {
+			errs[cfg.Name] = err
+			log.Printf("[ssh] Tunnel %q failed: %v", cfg.Name, err)
+			continue
+		}
+		tm.ssh[cfg.Name] = t
+		log.Printf("[ssh] Tunnel %q started (%s@%s:%d)", cfg.Name, cfg.User, cfg.Host, cfg.Port)
+	}
+	return errs
+}
+
+// Get returns a Dialer for the named tunnel (WireGuard or SSH), or nil.
+func (tm *tunnelManager) Get(name string) tools.Dialer {
+	if t := tm.wg.Get(name); t != nil {
+		return t
+	}
+	if t, ok := tm.ssh[name]; ok {
+		return t
+	}
+	return nil
+}
+
+// IsUp reports whether the named tunnel is running.
+func (tm *tunnelManager) IsUp(name string) bool {
+	if tm.wg.IsUp(name) {
+		return true
+	}
+	if t, ok := tm.ssh[name]; ok {
+		return t.IsUp()
+	}
+	return false
+}
+
+// Close shuts down all SSH tunnels. WireGuard tunnels are closed via wg.Manager.
+func (tm *tunnelManager) Close() {
+	for name, t := range tm.ssh {
+		log.Printf("[ssh] Closing tunnel %q", name)
+		t.Close()
+	}
+}
+
 // registerConnections registers native database tools for each configured connection.
 // Fail-closed: if a connection references a tunnel that isn't available, it's skipped.
-func registerConnections(s *server.MCPServer, cfg *config.Config, wgMgr *wireguard.Manager) {
+func registerConnections(s *server.MCPServer, cfg *config.Config, tm *tunnelManager) {
 	for _, conn := range cfg.AllConnections() {
 		if config.IsProxyType(conn.Type) {
 			continue // handled by registerProxies
@@ -35,12 +96,11 @@ func registerConnections(s *server.MCPServer, cfg *config.Config, wgMgr *wiregua
 		// Resolve tunnel dialer (fail-closed)
 		var dialer tools.Dialer
 		if conn.Tunnel != "" {
-			t := wgMgr.Get(conn.Tunnel)
-			if t == nil {
+			dialer = tm.Get(conn.Tunnel)
+			if dialer == nil {
 				log.Printf("[mux] Skipping %q: tunnel %q not available", conn.Name, conn.Tunnel)
 				continue
 			}
-			dialer = t
 		}
 
 		if _, _, err := tools.RegisterConnection(s, conn, dialer); err != nil {
@@ -94,7 +154,7 @@ func registerProxies(ctx context.Context, s *server.MCPServer, cfg *config.Confi
 type simpleReloader struct {
 	mcpServer       *server.MCPServer
 	cfg             *config.Config
-	wgMgr           *wireguard.Manager
+	tm              *tunnelManager
 	toolsMu         sync.Mutex
 	registeredTools map[string][]string
 	closers         map[string][]io.Closer
@@ -115,12 +175,11 @@ func (r *simpleReloader) ReloadConnection(conn config.Connection) {
 	// Resolve tunnel dialer (fail-closed)
 	var dialer tools.Dialer
 	if conn.Tunnel != "" {
-		t := r.wgMgr.Get(conn.Tunnel)
-		if t == nil {
+		dialer = r.tm.Get(conn.Tunnel)
+		if dialer == nil {
 			log.Printf("[mux] Skipping %q: tunnel %q not available", conn.Name, conn.Tunnel)
 			return
 		}
-		dialer = t
 	}
 
 	names, closer, err := tools.RegisterConnection(r.mcpServer, conn, dialer)
