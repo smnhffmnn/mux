@@ -103,6 +103,12 @@ var AllTypes = []TypeDef{
 	{Type: "asana-mcp", Label: "Asana MCP", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "https://mcp.asana.com/v2/mcp (default)"},
 	}},
+	{Type: "imap", Label: "IMAP", Fields: []TypeField{
+		{Key: "host", Label: "IMAP Host", Placeholder: "imap.example.com"},
+		{Key: "port", Label: "Port", Placeholder: "993", Small: true},
+		{Key: "user", Label: "Email / Username", Placeholder: "user@example.com"},
+		{Key: "password", Label: "Password", Placeholder: "password", Secret: true},
+	}},
 }
 
 // typeIndex is a lazily-built lookup map from type string to TypeDef.

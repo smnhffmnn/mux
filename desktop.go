@@ -17,12 +17,11 @@ import (
 
 	"github.com/smnhffmnn/mux/internal/config"
 	"github.com/smnhffmnn/mux/internal/tools"
-	"github.com/smnhffmnn/mux/internal/wireguard"
 )
 
-func runDesktop(s *server.MCPServer, cfg *config.Config, wgMgr *wireguard.Manager, ctx context.Context, cancel context.CancelFunc) {
+func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx context.Context, cancel context.CancelFunc) {
 	log.Println("[mux] Starting desktop app")
-	app := NewApp(cfg, version, buildTime, cfg.Server.Port, s, wgMgr)
+	app := NewApp(cfg, version, buildTime, cfg.Server.Port, s, tm)
 
 	// Register config management tools (with app as hot-reloader)
 	configTools := tools.NewConfigTools(cfg, app)

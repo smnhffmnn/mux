@@ -37,8 +37,12 @@ type ERPInfo struct {
 // TunnelInfo describes a WireGuard tunnel.
 type TunnelInfo struct {
 	Name          string `json:"name"`
-	PeerEndpoint  string `json:"peerEndpoint"`
-	TunnelAddress string `json:"tunnelAddress"`
+	Type          string `json:"type"`                    // "wireguard" or "ssh"
+	PeerEndpoint  string `json:"peerEndpoint,omitempty"`  // WireGuard
+	TunnelAddress string `json:"tunnelAddress,omitempty"` // WireGuard
+	Host          string `json:"host,omitempty"`          // SSH
+	Port          int    `json:"port,omitempty"`          // SSH
+	User          string `json:"user,omitempty"`          // SSH
 	Source        string `json:"source"`
 	Connected     bool   `json:"connected"`
 }

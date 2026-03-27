@@ -31,7 +31,6 @@ import (
 	"github.com/smnhffmnn/mux/internal/erp"
 	"github.com/smnhffmnn/mux/internal/proxy"
 	"github.com/smnhffmnn/mux/internal/tools"
-	"github.com/smnhffmnn/mux/internal/wireguard"
 )
 
 // App is the Wails v3 service struct. All exported methods become frontend bindings.
@@ -43,7 +42,7 @@ type App struct {
 	startTime time.Time
 	port      int
 	mcpServer *server.MCPServer
-	wgMgr     *wireguard.Manager
+	tm        *tunnelManager
 
 	oauthMu      sync.Mutex
 	pendingOAuth map[string]*pendingOAuthFlow
@@ -82,7 +81,7 @@ type pendingDeviceFlow struct {
 }
 
 // NewApp creates the App instance. Called before wails.Run().
-func NewApp(cfg *config.Config, version, buildTime string, port int, mcpServer *server.MCPServer, wgMgr *wireguard.Manager) *App {
+func NewApp(cfg *config.Config, version, buildTime string, port int, mcpServer *server.MCPServer, tm *tunnelManager) *App {
 	return &App{
 		cfg:             cfg,
 		version:         version,
@@ -90,7 +89,7 @@ func NewApp(cfg *config.Config, version, buildTime string, port int, mcpServer *
 		startTime:       time.Now(),
 		port:            port,
 		mcpServer:       mcpServer,
-		wgMgr:           wgMgr,
+		tm:              tm,
 		pendingOAuth:    make(map[string]*pendingOAuthFlow),
 		pendingDevice:   make(map[string]*pendingDeviceFlow),
 		registeredTools: make(map[string][]string),
@@ -153,7 +152,7 @@ func (a *App) registerConnectionTools(conn config.Connection) {
 	// Resolve tunnel dialer (fail-closed)
 	var dialer tools.Dialer
 	if conn.Tunnel != "" {
-		t := a.wgMgr.Get(conn.Tunnel)
+		t := a.tm.Get(conn.Tunnel)
 		if t == nil {
 			log.Printf("[mux] Skipping %q: tunnel %q not available", conn.Name, conn.Tunnel)
 			return
@@ -368,13 +367,21 @@ func (a *App) GetPageData() PageData {
 
 	for _, t := range a.cfg.AllTunnels() {
 		connected := false
-		if a.wgMgr != nil {
-			connected = a.wgMgr.IsUp(t.Name)
+		if a.tm != nil {
+			connected = a.tm.IsUp(t.Name)
+		}
+		typ := "wireguard"
+		if t.IsSSH() {
+			typ = "ssh"
 		}
 		data.Tunnels = append(data.Tunnels, TunnelInfo{
 			Name:          t.Name,
+			Type:          typ,
 			PeerEndpoint:  t.PeerEndpoint,
 			TunnelAddress: t.TunnelAddress,
+			Host:          t.Host,
+			Port:          t.Port,
+			User:          t.User,
 			Source:        t.Source,
 			Connected:     connected,
 		})
@@ -538,17 +545,19 @@ func (a *App) DeleteConnection(name string) error {
 }
 
 // TunnelLookup resolves a hostname through a WireGuard tunnel's DNS.
+// Only works for WireGuard tunnels (SSH tunnels do not provide DNS resolution).
 func (a *App) TunnelLookup(tunnelName, hostname string) *TestResult {
-	t := a.wgMgr.Get(tunnelName)
-	if t == nil {
-		return &TestResult{Connection: tunnelName, Message: fmt.Sprintf("tunnel %q not available", tunnelName)}
+	// DNS lookup is WireGuard-specific (gVisor netstack)
+	wgTunnel := a.tm.wg.Get(tunnelName)
+	if wgTunnel == nil {
+		return &TestResult{Connection: tunnelName, Message: fmt.Sprintf("tunnel %q not available or not a WireGuard tunnel (DNS lookup requires WireGuard)", tunnelName)}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	start := time.Now()
-	addrs, err := t.LookupHost(ctx, hostname)
+	addrs, err := wgTunnel.LookupHost(ctx, hostname)
 	if err != nil {
 		return &TestResult{
 			Connection: tunnelName,
@@ -1113,7 +1122,7 @@ func (a *App) testMariaDB(conn config.Connection) testResponse {
 
 	networkName := "tcp"
 	if conn.Tunnel != "" {
-		t := a.wgMgr.Get(conn.Tunnel)
+		t := a.tm.Get(conn.Tunnel)
 		if t == nil {
 			return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("tunnel %q not available", conn.Tunnel)}
 		}
@@ -1148,7 +1157,7 @@ func (a *App) testClickHouse(conn config.Connection) testResponse {
 
 	var dialer tools.Dialer
 	if conn.Tunnel != "" {
-		t := a.wgMgr.Get(conn.Tunnel)
+		t := a.tm.Get(conn.Tunnel)
 		if t == nil {
 			return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("tunnel %q not available", conn.Tunnel)}
 		}
@@ -1174,7 +1183,7 @@ func (a *App) testPostgreSQL(conn config.Connection) testResponse {
 
 	var dialer tools.Dialer
 	if conn.Tunnel != "" {
-		t := a.wgMgr.Get(conn.Tunnel)
+		t := a.tm.Get(conn.Tunnel)
 		if t == nil {
 			return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("tunnel %q not available", conn.Tunnel)}
 		}
