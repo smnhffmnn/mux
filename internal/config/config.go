@@ -11,7 +11,6 @@ import (
 	"sync"
 
 	"github.com/BurntSushi/toml"
-	"github.com/zalando/go-keyring"
 )
 
 const (
@@ -159,15 +158,15 @@ func (cfg *Config) SetERP(tunnels []TunnelConfig, connections []Connection) {
 				connections[i].Token = cfg.ERP.Token
 			}
 		}
-		// Supplement with locally stored secrets from keychain.
+		// Supplement with locally stored secrets from keychain/file.
 		// Only fills in gaps — if ERP provides a secret, it wins.
 		if connections[i].Password == "" {
-			if v, err := keyring.Get(ServiceName, connections[i].Name+"-password"); err == nil {
+			if v, err := getSecret(connections[i].Name + "-password"); err == nil {
 				connections[i].Password = v
 			}
 		}
 		if connections[i].Token == "" {
-			if v, err := keyring.Get(ServiceName, connections[i].Name+"-token"); err == nil {
+			if v, err := getSecret(connections[i].Name + "-token"); err == nil {
 				connections[i].Token = v
 			}
 		}
@@ -183,14 +182,14 @@ func (cfg *Config) SetERP(tunnels []TunnelConfig, connections []Connection) {
 		if tunnels[i].KeepAlive == 0 {
 			tunnels[i].KeepAlive = 25
 		}
-		// Supplement tunnel secrets from keychain
+		// Supplement tunnel secrets from keychain/file
 		if tunnels[i].PrivateKey == "" {
-			if v, err := keyring.Get(ServiceName, "tunnel-"+tunnels[i].Name+"-private-key"); err == nil {
+			if v, err := getSecret("tunnel-" + tunnels[i].Name + "-private-key"); err == nil {
 				tunnels[i].PrivateKey = v
 			}
 		}
 		if tunnels[i].PresharedKey == "" {
-			if v, err := keyring.Get(ServiceName, "tunnel-"+tunnels[i].Name+"-preshared-key"); err == nil {
+			if v, err := getSecret("tunnel-" + tunnels[i].Name + "-preshared-key"); err == nil {
 				tunnels[i].PresharedKey = v
 			}
 		}
@@ -445,17 +444,17 @@ func (cfg *Config) Save() error {
 
 func loadKeychain(cfg *Config) {
 	// Provisioning token
-	if v, err := keyring.Get(ServiceName, "provisioning-token"); err == nil {
+	if v, err := getSecret("provisioning-token"); err == nil {
 		cfg.ERP.Token = v
 	}
 
 	// Connection secrets (password or token, keyed by connection name)
 	for i := range cfg.Connections {
 		name := cfg.Connections[i].Name
-		if v, err := keyring.Get(ServiceName, name+"-password"); err == nil {
+		if v, err := getSecret(name + "-password"); err == nil {
 			cfg.Connections[i].Password = v
 		}
-		if v, err := keyring.Get(ServiceName, name+"-token"); err == nil && cfg.Connections[i].Token == "" {
+		if v, err := getSecret(name + "-token"); err == nil && cfg.Connections[i].Token == "" {
 			cfg.Connections[i].Token = v
 		}
 	}
@@ -463,10 +462,10 @@ func loadKeychain(cfg *Config) {
 	// Tunnel secrets (private key, preshared key)
 	for i := range cfg.Tunnels {
 		name := cfg.Tunnels[i].Name
-		if v, err := keyring.Get(ServiceName, "tunnel-"+name+"-private-key"); err == nil {
+		if v, err := getSecret("tunnel-" + name + "-private-key"); err == nil {
 			cfg.Tunnels[i].PrivateKey = v
 		}
-		if v, err := keyring.Get(ServiceName, "tunnel-"+name+"-preshared-key"); err == nil {
+		if v, err := getSecret("tunnel-" + name + "-preshared-key"); err == nil {
 			cfg.Tunnels[i].PresharedKey = v
 		}
 	}
@@ -619,19 +618,19 @@ func (cfg *Config) FindAnyConnection(name string) *Connection {
 
 // --- Secrets ---
 
-// SaveSecret stores a credential in the OS keychain.
+// SaveSecret stores a credential in the OS keychain (with file fallback).
 func SaveSecret(key, value string) error {
-	return keyring.Set(ServiceName, key, value)
+	return setSecret(key, value)
 }
 
-// GetSecret reads a credential from the OS keychain.
+// GetSecret reads a credential from the OS keychain (with file fallback).
 func GetSecret(key string) (string, error) {
-	return keyring.Get(ServiceName, key)
+	return getSecret(key)
 }
 
-// DeleteSecret removes a credential from the OS keychain.
+// DeleteSecret removes a credential from the OS keychain (and file store).
 func DeleteSecret(key string) error {
-	return keyring.Delete(ServiceName, key)
+	return deleteSecret(key)
 }
 
 // ValidSecretKey checks that a keychain key matches known mux patterns.
@@ -642,6 +641,7 @@ func ValidSecretKey(key string) bool {
 	if strings.HasSuffix(key, "-password") ||
 		strings.HasSuffix(key, "-token") ||
 		strings.HasSuffix(key, "-oauth-token") ||
+		strings.HasSuffix(key, "-oauth-refresh-token") ||
 		strings.HasSuffix(key, "-oauth-client-id") ||
 		strings.HasSuffix(key, "-oauth-client-secret") {
 		return len(key) > len("-password") // must have a prefix
@@ -667,7 +667,7 @@ type KeychainTokenStore struct {
 // NewKeychainTokenStore creates a token store for the given service name.
 func NewKeychainTokenStore(service string) *KeychainTokenStore {
 	s := &KeychainTokenStore{service: service}
-	if raw, err := keyring.Get(ServiceName, service+"-oauth-token"); err == nil && raw != "" {
+	if raw, err := getSecret(service + "-oauth-token"); err == nil && raw != "" {
 		s.cached = json.RawMessage(raw)
 	}
 	return s
@@ -685,8 +685,8 @@ func (s *KeychainTokenStore) GetRawToken() (json.RawMessage, error) {
 
 // SaveRawToken persists a token as raw JSON to the OS keychain.
 func (s *KeychainTokenStore) SaveRawToken(data json.RawMessage) error {
-	if err := keyring.Set(ServiceName, s.service+"-oauth-token", string(data)); err != nil {
-		return fmt.Errorf("save token to keychain: %w", err)
+	if err := setSecret(s.service+"-oauth-token", string(data)); err != nil {
+		return fmt.Errorf("save token: %w", err)
 	}
 	s.mu.Lock()
 	s.cached = data
@@ -703,18 +703,18 @@ func (s *KeychainTokenStore) HasToken() bool {
 
 // SaveOAuthClient stores OAuth client credentials in the keychain.
 func SaveOAuthClient(service, clientID, clientSecret string) error {
-	if err := keyring.Set(ServiceName, service+"-oauth-client-id", clientID); err != nil {
+	if err := setSecret(service+"-oauth-client-id", clientID); err != nil {
 		return err
 	}
 	if clientSecret != "" {
-		return keyring.Set(ServiceName, service+"-oauth-client-secret", clientSecret)
+		return setSecret(service+"-oauth-client-secret", clientSecret)
 	}
 	return nil
 }
 
-// LoadOAuthClientID loads a stored OAuth client ID from the keychain.
+// LoadOAuthClientID loads a stored OAuth client ID from the keychain/file store.
 func LoadOAuthClientID(service string) (clientID, clientSecret string) {
-	clientID, _ = keyring.Get(ServiceName, service+"-oauth-client-id")
-	clientSecret, _ = keyring.Get(ServiceName, service+"-oauth-client-secret")
+	clientID, _ = getSecret(service + "-oauth-client-id")
+	clientSecret, _ = getSecret(service + "-oauth-client-secret")
 	return
 }

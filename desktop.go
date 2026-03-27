@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -30,7 +31,9 @@ func runDesktop(s *server.MCPServer, cfg *config.Config, wgMgr *wireguard.Manage
 		log.Printf("[mux] Registered: %s", t.Tool.Name)
 	}
 
-	httpSrv := startHTTPServer(s, app, cfg.Server.Port)
+	httpSrv := startHTTPServer(s, cfg.Server.Port, func(mux *http.ServeMux) {
+		mux.HandleFunc("/oauth/callback", app.oauthCallbackHandler())
+	})
 
 	// Create Wails v3 application
 	wailsApp := application.New(application.Options{

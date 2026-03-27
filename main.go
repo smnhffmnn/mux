@@ -162,7 +162,7 @@ More info: https://github.com/smnhffmnn/mux
 
 		registerConfigTools(s, cfg, wgMgr)
 
-		httpSrv := startHTTPServer(s, nil, cfg.Server.Port)
+		httpSrv := startHTTPServer(s, cfg.Server.Port, nil)
 
 		// Block until SIGINT/SIGTERM
 		sigCh := make(chan os.Signal, 1)
@@ -191,16 +191,16 @@ func registerConfigTools(s *server.MCPServer, cfg *config.Config, wgMgr *wiregua
 }
 
 // startHTTPServer creates and starts the MCP HTTP server on localhost.
-// If app is non-nil (desktop mode), the OAuth callback handler is registered.
-func startHTTPServer(s *server.MCPServer, app *App, port int) *http.Server {
+// extraRoutes is called (if non-nil) to register additional routes before the server starts.
+func startHTTPServer(s *server.MCPServer, port int, extraRoutes func(*http.ServeMux)) *http.Server {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	mux := http.NewServeMux()
 
 	mcpHandler := server.NewStreamableHTTPServer(s)
 	mux.Handle("/mcp", mcpHandler)
 
-	if app != nil {
-		mux.HandleFunc("/oauth/callback", app.oauthCallbackHandler())
+	if extraRoutes != nil {
+		extraRoutes(mux)
 	}
 
 	httpSrv := &http.Server{Addr: addr, Handler: mux}

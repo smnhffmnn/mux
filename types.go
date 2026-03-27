@@ -1,3 +1,5 @@
+//go:build !notray
+
 package main
 
 // Shared data types for Wails bindings.

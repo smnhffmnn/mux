@@ -1,3 +1,5 @@
+//go:build !notray
+
 package main
 
 import (

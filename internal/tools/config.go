@@ -123,7 +123,7 @@ func (ct *ConfigTools) connectionDeleteTool() ToolDef {
 func (ct *ConfigTools) secretSetTool() ToolDef {
 	return ToolDef{
 		Tool: mcp.NewTool("secret_set",
-			mcp.WithDescription("Store a secret in the OS keychain. Write-only — the value can never be read back. Use '{connection-name}-token' for API keys or '{connection-name}-password' for database passwords."),
+			mcp.WithDescription("Store a secret securely (OS keychain with file fallback). Write-only — the value can never be read back. Use '{connection-name}-token' for API keys or '{connection-name}-password' for database passwords."),
 			mcp.WithString("key", mcp.Required(),
 				mcp.Description("Keychain key, e.g. 'my-firecrawl-token', 'production-password', 'provisioning-token'."),
 			),
@@ -138,7 +138,7 @@ func (ct *ConfigTools) secretSetTool() ToolDef {
 func (ct *ConfigTools) secretCheckTool() ToolDef {
 	return ToolDef{
 		Tool: mcp.NewTool("secret_check",
-			mcp.WithDescription("Check which secrets are set in the OS keychain. Returns true/false per key — never the actual values."),
+			mcp.WithDescription("Check which secrets are set (OS keychain with file fallback). Returns true/false per key — never the actual values."),
 			mcp.WithString("connection",
 				mcp.Description("Check secrets for a specific connection name. If omitted, checks all."),
 			),
@@ -356,7 +356,7 @@ func (ct *ConfigTools) handleSecretSet(_ context.Context, req mcp.CallToolReques
 	// Update in-memory config
 	ct.updateInMemorySecret(key, value)
 
-	return mcp.NewToolResultText(fmt.Sprintf("secret %q stored in keychain", key)), nil
+	return mcp.NewToolResultText(fmt.Sprintf("secret %q stored", key)), nil
 }
 
 func (ct *ConfigTools) updateInMemorySecret(key, value string) {
