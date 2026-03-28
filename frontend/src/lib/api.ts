@@ -9,6 +9,9 @@ import {
   SaveConnection as _SaveConnection,
   DeleteConnection as _DeleteConnection,
   TestConnection as _TestConnection,
+  AddTunnel as _AddTunnel,
+  SaveTunnel as _SaveTunnel,
+  DeleteTunnel as _DeleteTunnel,
   SetupERP as _SetupERP,
   SyncERP as _SyncERP,
   SelfUpdate as _SelfUpdate,
@@ -39,10 +42,40 @@ export interface ERPInfo {
 
 export interface TunnelInfo {
   name: string
+  type: string                  // "wireguard" or "ssh"
   peerEndpoint: string
   tunnelAddress: string
+  peerPublicKey: string
+  allowedIPs: string
+  dns: string
+  mtu: number
+  keepAlive: number
+  host: string
+  port: number
+  user: string
+  keyFile: string
+  insecureHostKey: boolean
   source: string
   connected: boolean
+  privateKeySet: boolean
+  presharedKeySet: boolean
+}
+
+export interface SaveTunnelRequest {
+  peerPublicKey?: string
+  peerEndpoint?: string
+  allowedIPs?: string
+  tunnelAddress?: string
+  dns?: string
+  mtu?: string
+  keepAlive?: string
+  privateKey?: string
+  presharedKey?: string
+  host?: string
+  port?: string
+  user?: string
+  keyFile?: string
+  insecureHostKey?: boolean
 }
 
 export interface FieldInfo {
@@ -140,6 +173,9 @@ export const AddConnection = _AddConnection as (name: string, type: string) => P
 export const SaveConnection = _SaveConnection as (name: string, fields: SaveConnectionRequest) => Promise<ConnInfo>
 export const DeleteConnection = _DeleteConnection as (name: string) => Promise<void>
 export const TestConnection = _TestConnection as (name: string) => Promise<TestResult>
+export const AddTunnel = _AddTunnel as (name: string, type: string) => Promise<TunnelInfo>
+export const SaveTunnel = _SaveTunnel as (name: string, fields: SaveTunnelRequest) => Promise<TunnelInfo>
+export const DeleteTunnel = _DeleteTunnel as (name: string) => Promise<void>
 export const SetupERP = _SetupERP as (endpoint: string, token: string) => Promise<ERPInfo>
 export const SyncERP = _SyncERP as () => Promise<PageData>
 export const SelfUpdate = _SelfUpdate as () => Promise<UpdateResult>

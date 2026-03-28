@@ -370,21 +370,7 @@ func (a *App) GetPageData() PageData {
 		if a.tm != nil {
 			connected = a.tm.IsUp(t.Name)
 		}
-		typ := "wireguard"
-		if t.IsSSH() {
-			typ = "ssh"
-		}
-		data.Tunnels = append(data.Tunnels, TunnelInfo{
-			Name:          t.Name,
-			Type:          typ,
-			PeerEndpoint:  t.PeerEndpoint,
-			TunnelAddress: t.TunnelAddress,
-			Host:          t.Host,
-			Port:          t.Port,
-			User:          t.User,
-			Source:        t.Source,
-			Connected:     connected,
-		})
+		data.Tunnels = append(data.Tunnels, buildTunnelInfo(t, connected))
 	}
 
 	for _, conn := range a.cfg.AllConnections() {
@@ -542,6 +528,179 @@ func (a *App) DeleteConnection(name string) error {
 		log.Printf("[app] Warning: could not save config file: %v", err)
 	}
 	return nil
+}
+
+// AddTunnel creates a new tunnel and returns its info.
+func (a *App) AddTunnel(name, typ string) (*TunnelInfo, error) {
+	name = strings.TrimSpace(strings.ToLower(strings.ReplaceAll(name, " ", "-")))
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+
+	if typ != "wireguard" && typ != "ssh" {
+		return nil, fmt.Errorf("type must be 'wireguard' or 'ssh'")
+	}
+
+	if a.cfg.FindAnyTunnel(name) != nil {
+		return nil, fmt.Errorf("tunnel already exists: %s", name)
+	}
+
+	t := config.TunnelConfig{
+		Name:   name,
+		Type:   typ,
+		Source: "local",
+	}
+	if typ == "ssh" {
+		t.Port = 22
+	} else {
+		t.MTU = 1420
+		t.KeepAlive = 25
+	}
+	a.cfg.Tunnels = append(a.cfg.Tunnels, t)
+
+	if err := a.cfg.Save(); err != nil {
+		log.Printf("[app] Warning: could not save config file: %v", err)
+	}
+
+	info := buildTunnelInfo(t, false)
+	return &info, nil
+}
+
+// SaveTunnel saves tunnel fields and returns the updated info.
+func (a *App) SaveTunnel(name string, fields SaveTunnelRequest) (*TunnelInfo, error) {
+	t := a.cfg.FindAnyTunnel(name)
+	if t == nil {
+		return nil, fmt.Errorf("tunnel not found: %s", name)
+	}
+	isERP := t.Source == "erp"
+
+	if !isERP {
+		// WireGuard fields
+		if fields.PeerPublicKey != "" {
+			t.PeerPublicKey = fields.PeerPublicKey
+		}
+		if fields.PeerEndpoint != "" {
+			t.PeerEndpoint = fields.PeerEndpoint
+		}
+		if fields.AllowedIPs != "" {
+			t.AllowedIPs = fields.AllowedIPs
+		}
+		if fields.TunnelAddress != "" {
+			t.TunnelAddress = fields.TunnelAddress
+		}
+		if fields.DNS != "" {
+			t.DNS = fields.DNS
+		}
+		if fields.MTU != "" {
+			fmt.Sscanf(fields.MTU, "%d", &t.MTU)
+		}
+		if fields.KeepAlive != "" {
+			fmt.Sscanf(fields.KeepAlive, "%d", &t.KeepAlive)
+		}
+
+		// SSH fields
+		if fields.Host != "" {
+			t.Host = fields.Host
+		}
+		if fields.Port != "" {
+			fmt.Sscanf(fields.Port, "%d", &t.Port)
+		}
+		if fields.User != "" {
+			t.User = fields.User
+		}
+		if fields.KeyFile != "" {
+			t.KeyFile = fields.KeyFile
+		}
+		if fields.InsecureHostKey != nil {
+			t.InsecureHostKey = *fields.InsecureHostKey
+		}
+	}
+
+	// Secrets — always saveable (even for ERP tunnels, to allow local key override)
+	if fields.PrivateKey != "" {
+		t.PrivateKey = fields.PrivateKey
+		if err := config.SaveSecret("tunnel-"+name+"-private-key", fields.PrivateKey); err != nil {
+			log.Printf("[app] Warning: could not save tunnel private key: %v", err)
+		}
+	}
+	if fields.PresharedKey != "" {
+		t.PresharedKey = fields.PresharedKey
+		if err := config.SaveSecret("tunnel-"+name+"-preshared-key", fields.PresharedKey); err != nil {
+			log.Printf("[app] Warning: could not save tunnel preshared key: %v", err)
+		}
+	}
+
+	if !isERP {
+		if err := a.cfg.Save(); err != nil {
+			log.Printf("[app] Warning: could not save config file: %v", err)
+		}
+	}
+
+	connected := false
+	if a.tm != nil {
+		connected = a.tm.IsUp(name)
+	}
+	info := buildTunnelInfo(*t, connected)
+	return &info, nil
+}
+
+// DeleteTunnel removes a local tunnel.
+func (a *App) DeleteTunnel(name string) error {
+	found := false
+	var newTunnels []config.TunnelConfig
+	for _, t := range a.cfg.Tunnels {
+		if t.Name == name {
+			if t.Source == "erp" {
+				return fmt.Errorf("ERP-managed tunnels cannot be deleted")
+			}
+			found = true
+			continue
+		}
+		newTunnels = append(newTunnels, t)
+	}
+
+	if !found {
+		return fmt.Errorf("tunnel not found: %s", name)
+	}
+
+	a.cfg.Tunnels = newTunnels
+	if err := a.cfg.Save(); err != nil {
+		log.Printf("[app] Warning: could not save config file: %v", err)
+	}
+
+	// Best-effort cleanup of orphaned secrets
+	config.DeleteSecret("tunnel-" + name + "-private-key")
+	config.DeleteSecret("tunnel-" + name + "-preshared-key")
+
+	return nil
+}
+
+// buildTunnelInfo creates a TunnelInfo from a TunnelConfig.
+func buildTunnelInfo(t config.TunnelConfig, connected bool) TunnelInfo {
+	typ := "wireguard"
+	if t.IsSSH() {
+		typ = "ssh"
+	}
+	return TunnelInfo{
+		Name:            t.Name,
+		Type:            typ,
+		PeerEndpoint:    t.PeerEndpoint,
+		TunnelAddress:   t.TunnelAddress,
+		PeerPublicKey:   t.PeerPublicKey,
+		AllowedIPs:      t.AllowedIPs,
+		DNS:             t.DNS,
+		MTU:             t.MTU,
+		KeepAlive:       t.KeepAlive,
+		Host:            t.Host,
+		Port:            t.Port,
+		User:            t.User,
+		KeyFile:         t.KeyFile,
+		InsecureHostKey: t.InsecureHostKey,
+		Source:          t.Source,
+		Connected:       connected,
+		PrivateKeySet:   t.PrivateKey != "",
+		PresharedKeySet: t.PresharedKey != "",
+	}
 }
 
 // TunnelLookup resolves a hostname through a WireGuard tunnel's DNS.

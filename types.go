@@ -36,15 +36,24 @@ type ERPInfo struct {
 
 // TunnelInfo describes a WireGuard or SSH tunnel.
 type TunnelInfo struct {
-	Name          string `json:"name"`
-	Type          string `json:"type"`                    // "wireguard" or "ssh"
-	PeerEndpoint  string `json:"peerEndpoint,omitempty"`  // WireGuard
-	TunnelAddress string `json:"tunnelAddress,omitempty"` // WireGuard
-	Host          string `json:"host,omitempty"`          // SSH
-	Port          int    `json:"port,omitempty"`          // SSH
-	User          string `json:"user,omitempty"`          // SSH
-	Source        string `json:"source"`
-	Connected     bool   `json:"connected"`
+	Name            string `json:"name"`
+	Type            string `json:"type"`                              // "wireguard" or "ssh"
+	PeerEndpoint    string `json:"peerEndpoint,omitempty"`            // WireGuard
+	TunnelAddress   string `json:"tunnelAddress,omitempty"`           // WireGuard
+	PeerPublicKey   string `json:"peerPublicKey,omitempty"`           // WireGuard (display only, not secret)
+	AllowedIPs      string `json:"allowedIPs,omitempty"`              // WireGuard
+	DNS             string `json:"dns,omitempty"`                     // WireGuard
+	MTU             int    `json:"mtu,omitempty"`                     // WireGuard
+	KeepAlive       int    `json:"keepAlive,omitempty"`               // WireGuard
+	Host            string `json:"host,omitempty"`                    // SSH
+	Port            int    `json:"port,omitempty"`                    // SSH
+	User            string `json:"user,omitempty"`                    // SSH
+	KeyFile         string `json:"keyFile,omitempty"`                 // SSH
+	InsecureHostKey bool   `json:"insecureHostKey,omitempty"`         // SSH
+	Source          string `json:"source"`
+	Connected       bool   `json:"connected"`
+	PrivateKeySet   bool   `json:"privateKeySet"`                     // whether a private key is stored
+	PresharedKeySet bool   `json:"presharedKeySet,omitempty"`         // WireGuard: whether a preshared key is stored
 }
 
 // ConnInfo describes a connection with its current field values.
@@ -119,6 +128,27 @@ type DeviceAuthStart struct {
 type DeviceAuthStatus struct {
 	Completed bool   `json:"completed"`
 	Message   string `json:"message"`
+}
+
+// SaveTunnelRequest contains the fields to save for a tunnel.
+type SaveTunnelRequest struct {
+	// WireGuard fields
+	PeerPublicKey string `json:"peerPublicKey,omitempty"`
+	PeerEndpoint  string `json:"peerEndpoint,omitempty"`
+	AllowedIPs    string `json:"allowedIPs,omitempty"`
+	TunnelAddress string `json:"tunnelAddress,omitempty"`
+	DNS           string `json:"dns,omitempty"`
+	MTU           string `json:"mtu,omitempty"`
+	KeepAlive     string `json:"keepAlive,omitempty"`
+	PrivateKey    string `json:"privateKey,omitempty"`
+	PresharedKey  string `json:"presharedKey,omitempty"`
+
+	// SSH fields
+	Host            string `json:"host,omitempty"`
+	Port            string `json:"port,omitempty"`
+	User            string `json:"user,omitempty"`
+	KeyFile         string `json:"keyFile,omitempty"`
+	InsecureHostKey *bool  `json:"insecureHostKey,omitempty"` // pointer to distinguish unset from false
 }
 
 // SaveConnectionRequest contains the fields to save for a connection.

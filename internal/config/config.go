@@ -81,7 +81,7 @@ type TunnelConfig struct {
 	AllowedIPs    string `toml:"allowed_ips,omitempty" json:"allowedIPs,omitempty"`
 	TunnelAddress string `toml:"tunnel_address,omitempty" json:"tunnelAddress,omitempty"`
 	DNS           string `toml:"dns,omitempty" json:"dns,omitempty"`
-	PresharedKey  string `toml:"-" json:"presharedKey,omitempty"`
+	PresharedKey  string `toml:"-" json:"-"` // never serialize
 	MTU           int    `toml:"mtu,omitempty" json:"mtu,omitempty"`
 	KeepAlive     int    `toml:"keepalive,omitempty" json:"keepalive,omitempty"`
 
@@ -93,8 +93,8 @@ type TunnelConfig struct {
 	InsecureHostKey   bool   `toml:"insecure_host_key,omitempty" json:"insecureHostKey,omitempty"`        // skip host key verification (default: false)
 
 	// Shared
-	PrivateKey string `toml:"-" json:"privateKey,omitempty"` // WG: base64 key; SSH: PEM key content
-	Source     string `toml:"-" json:"source,omitempty"`     // "local" or "erp"
+	PrivateKey string `toml:"-" json:"-"` // WG: base64 key; SSH: PEM key content — never serialize
+	Source     string `toml:"-" json:"source,omitempty"` // "local" or "erp"
 }
 
 // IsSSH reports whether the tunnel is an SSH tunnel.
@@ -640,6 +640,32 @@ func findOrCreateConnection(cfg *Config, name, typ string) *Connection {
 		Source: "local",
 	})
 	return &cfg.Connections[len(cfg.Connections)-1]
+}
+
+// FindTunnel returns the local tunnel with the given name, or nil.
+func (cfg *Config) FindTunnel(name string) *TunnelConfig {
+	for i := range cfg.Tunnels {
+		if cfg.Tunnels[i].Name == name {
+			return &cfg.Tunnels[i]
+		}
+	}
+	return nil
+}
+
+// FindAnyTunnel returns the tunnel with the given name from
+// local or ERP tunnels. Returns a pointer to the actual element.
+func (cfg *Config) FindAnyTunnel(name string) *TunnelConfig {
+	for i := range cfg.Tunnels {
+		if cfg.Tunnels[i].Name == name {
+			return &cfg.Tunnels[i]
+		}
+	}
+	for i := range cfg.erpTunnels {
+		if cfg.erpTunnels[i].Name == name {
+			return &cfg.erpTunnels[i]
+		}
+	}
+	return nil
 }
 
 // FindConnection returns the connection with the given name, or nil.

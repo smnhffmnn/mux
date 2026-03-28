@@ -39,6 +39,8 @@ func (ct *ConfigTools) Tools() []ToolDef {
 		ct.connectionListTool(),
 		ct.connectionAddTool(),
 		ct.connectionDeleteTool(),
+		ct.tunnelAddTool(),
+		ct.tunnelDeleteTool(),
 		ct.secretSetTool(),
 		ct.secretCheckTool(),
 	}
@@ -98,7 +100,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("Database name (for mariadb, postgresql, clickhouse)."),
 			),
 			mcp.WithString("tunnel",
-				mcp.Description("Name of a WireGuard tunnel to route this connection through."),
+				mcp.Description("Name of a tunnel (WireGuard or SSH) to route this connection through."),
 			),
 			mcp.WithString("instructions",
 				mcp.Description("Instructions for AI agents describing when/how to use this connection."),
@@ -117,6 +119,62 @@ func (ct *ConfigTools) connectionDeleteTool() ToolDef {
 			),
 		),
 		Handler: ct.handleConnectionDelete,
+	}
+}
+
+func (ct *ConfigTools) tunnelAddTool() ToolDef {
+	return ToolDef{
+		Tool: mcp.NewTool("tunnel_add",
+			mcp.WithDescription("Add a new tunnel (WireGuard or SSH). After creating, use secret_set to store the private key (tunnel-{name}-private-key) and optionally the preshared key (tunnel-{name}-preshared-key)."),
+			mcp.WithString("name", mcp.Required(),
+				mcp.Description("Tunnel name (lowercase, hyphens allowed, e.g. 'office-vpn')."),
+			),
+			mcp.WithString("type",
+				mcp.Description("Tunnel type: 'wireguard' (default) or 'ssh'."),
+			),
+			// WireGuard fields
+			mcp.WithString("peer_public_key",
+				mcp.Description("WireGuard peer public key (base64)."),
+			),
+			mcp.WithString("peer_endpoint",
+				mcp.Description("WireGuard peer endpoint (host:port)."),
+			),
+			mcp.WithString("allowed_ips",
+				mcp.Description("WireGuard allowed IPs (CIDR, e.g. '10.100.0.0/16')."),
+			),
+			mcp.WithString("tunnel_address",
+				mcp.Description("WireGuard local tunnel IP (CIDR, e.g. '10.100.0.42/32')."),
+			),
+			mcp.WithString("dns",
+				mcp.Description("WireGuard DNS server (optional)."),
+			),
+			// SSH fields
+			mcp.WithString("host",
+				mcp.Description("SSH host (for ssh type)."),
+			),
+			mcp.WithNumber("port",
+				mcp.Description("SSH port (default: 22)."),
+			),
+			mcp.WithString("user",
+				mcp.Description("SSH user (for ssh type)."),
+			),
+			mcp.WithString("key_file",
+				mcp.Description("Path to SSH private key file (optional, alternative to keychain)."),
+			),
+		),
+		Handler: ct.handleTunnelAdd,
+	}
+}
+
+func (ct *ConfigTools) tunnelDeleteTool() ToolDef {
+	return ToolDef{
+		Tool: mcp.NewTool("tunnel_delete",
+			mcp.WithDescription("Delete a local tunnel. ERP-managed tunnels cannot be deleted."),
+			mcp.WithString("name", mcp.Required(),
+				mcp.Description("Tunnel name to delete."),
+			),
+		),
+		Handler: ct.handleTunnelDelete,
 	}
 }
 
@@ -214,12 +272,30 @@ func (ct *ConfigTools) handleConnectionList(_ context.Context, _ mcp.CallToolReq
 	// Tunnels
 	var tunnels []map[string]any
 	for _, t := range ct.cfg.AllTunnels() {
-		tunnels = append(tunnels, map[string]any{
-			"name":           t.Name,
-			"peer_endpoint":  t.PeerEndpoint,
-			"tunnel_address": t.TunnelAddress,
-			"source":         t.Source,
-		})
+		entry := map[string]any{
+			"name":   t.Name,
+			"source": t.Source,
+		}
+		if t.IsSSH() {
+			entry["type"] = "ssh"
+			entry["host"] = t.Host
+			entry["port"] = t.Port
+			entry["user"] = t.User
+			if t.KeyFile != "" {
+				entry["key_file"] = t.KeyFile
+			}
+			entry["private_key_set"] = t.PrivateKey != ""
+		} else {
+			entry["type"] = "wireguard"
+			entry["peer_endpoint"] = t.PeerEndpoint
+			entry["tunnel_address"] = t.TunnelAddress
+			if t.AllowedIPs != "" {
+				entry["allowed_ips"] = t.AllowedIPs
+			}
+			entry["private_key_set"] = t.PrivateKey != ""
+			entry["preshared_key_set"] = t.PresharedKey != ""
+		}
+		tunnels = append(tunnels, entry)
 	}
 	if tunnels == nil {
 		tunnels = []map[string]any{}
@@ -333,6 +409,115 @@ func (ct *ConfigTools) handleConnectionDelete(_ context.Context, req mcp.CallToo
 	}
 
 	return mcp.NewToolResultText(fmt.Sprintf("connection %q deleted", name)), nil
+}
+
+func (ct *ConfigTools) handleTunnelAdd(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	name, err := req.RequireString("name")
+	if err != nil {
+		return mcp.NewToolResultError("missing required parameter: name"), nil
+	}
+
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return mcp.NewToolResultError("name cannot be empty"), nil
+	}
+
+	if ct.cfg.FindAnyTunnel(name) != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("tunnel %q already exists", name)), nil
+	}
+
+	typ := req.GetString("type", "wireguard")
+	if typ != "wireguard" && typ != "ssh" {
+		return mcp.NewToolResultError("type must be 'wireguard' or 'ssh'"), nil
+	}
+
+	t := config.TunnelConfig{
+		Name:   name,
+		Type:   typ,
+		Source: "local",
+	}
+
+	if typ == "ssh" {
+		t.Host = req.GetString("host", "")
+		if v, ok := req.GetArguments()["port"].(float64); ok && v > 0 {
+			t.Port = int(v)
+		}
+		if t.Port == 0 {
+			t.Port = 22
+		}
+		t.User = req.GetString("user", "")
+		t.KeyFile = req.GetString("key_file", "")
+	} else {
+		t.PeerPublicKey = req.GetString("peer_public_key", "")
+		t.PeerEndpoint = req.GetString("peer_endpoint", "")
+		t.AllowedIPs = req.GetString("allowed_ips", "")
+		t.TunnelAddress = req.GetString("tunnel_address", "")
+		t.DNS = req.GetString("dns", "")
+		t.MTU = 1420
+		t.KeepAlive = 25
+	}
+
+	ct.cfg.Tunnels = append(ct.cfg.Tunnels, t)
+
+	if err := ct.cfg.Save(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to save config: %v", err)), nil
+	}
+
+	hint := fmt.Sprintf("tunnel %q (%s) created", name, typ)
+	if typ == "ssh" {
+		hint += ". Use secret_set with key 'tunnel-" + name + "-private-key' to store the SSH private key (or set key_file)."
+	} else {
+		hint += ". Use secret_set with key 'tunnel-" + name + "-private-key' to store the WireGuard private key."
+	}
+	return mcp.NewToolResultText(hint), nil
+}
+
+func (ct *ConfigTools) handleTunnelDelete(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	name, err := req.RequireString("name")
+	if err != nil {
+		return mcp.NewToolResultError("missing required parameter: name"), nil
+	}
+
+	found := false
+	var newTunnels []config.TunnelConfig
+	for _, t := range ct.cfg.Tunnels {
+		if t.Name == name {
+			if t.Source == "erp" {
+				return mcp.NewToolResultError(fmt.Sprintf("tunnel %q is ERP-managed and cannot be deleted", name)), nil
+			}
+			found = true
+			continue
+		}
+		newTunnels = append(newTunnels, t)
+	}
+
+	if !found {
+		return mcp.NewToolResultError(fmt.Sprintf("tunnel %q not found", name)), nil
+	}
+
+	ct.cfg.Tunnels = newTunnels
+
+	if err := ct.cfg.Save(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to save config: %v", err)), nil
+	}
+
+	// Best-effort cleanup of orphaned secrets
+	config.DeleteSecret("tunnel-" + name + "-private-key")
+	config.DeleteSecret("tunnel-" + name + "-preshared-key")
+
+	// Warn about connections that still reference this tunnel
+	var refs []string
+	for _, c := range ct.cfg.AllConnections() {
+		if c.Tunnel == name {
+			refs = append(refs, c.Name)
+		}
+	}
+	msg := fmt.Sprintf("tunnel %q deleted", name)
+	if len(refs) > 0 {
+		msg += fmt.Sprintf(". Warning: connections still referencing this tunnel (will be skipped): %s", strings.Join(refs, ", "))
+	}
+
+	return mcp.NewToolResultText(msg), nil
 }
 
 func (ct *ConfigTools) handleSecretSet(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

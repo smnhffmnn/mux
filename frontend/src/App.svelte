@@ -8,8 +8,10 @@
   import TunnelRow from './lib/components/TunnelRow.svelte'
   import ConnectionCard from './lib/components/ConnectionCard.svelte'
   import AddConnectionModal from './lib/components/AddConnectionModal.svelte'
+  import AddTunnelModal from './lib/components/AddTunnelModal.svelte'
 
   let showAddModal = $state(false)
+  let showAddTunnelModal = $state(false)
   let serverInfoInterval: ReturnType<typeof setInterval>
 
   onMount(async () => {
@@ -50,6 +52,11 @@
 
   function onConnectionAdded() {
     showAddModal = false
+    refreshData()
+  }
+
+  function onTunnelAdded() {
+    showAddTunnelModal = false
     refreshData()
   }
 
@@ -112,14 +119,15 @@
       {:else if $activeView === 'tunnels'}
         <div class="section">
           <div class="section-header">
-            <h2>WireGuard Tunnels</h2>
+            <h2>Tunnels</h2>
+            <button class="primary" onclick={() => (showAddTunnelModal = true)}>+ Add</button>
           </div>
           {#if $pageData.tunnels.length === 0}
-            <div class="empty">No tunnels configured.</div>
+            <div class="empty">No tunnels configured. Click "+ Add" to create one.</div>
           {:else}
             <div class="card-list">
               {#each $pageData.tunnels as tunnel (tunnel.name)}
-                <TunnelRow {tunnel} />
+                <TunnelRow {tunnel} onUpdate={refreshData} />
               {/each}
             </div>
           {/if}
@@ -147,6 +155,10 @@
 
 {#if showAddModal && $pageData}
   <AddConnectionModal types={$pageData.types} onAdd={onConnectionAdded} onClose={() => (showAddModal = false)} />
+{/if}
+
+{#if showAddTunnelModal}
+  <AddTunnelModal onAdd={onTunnelAdded} onClose={() => (showAddTunnelModal = false)} />
 {/if}
 
 <style>
