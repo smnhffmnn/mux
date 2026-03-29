@@ -17,9 +17,10 @@ import (
 
 	"github.com/smnhffmnn/mux/internal/config"
 	"github.com/smnhffmnn/mux/internal/tools"
+	"github.com/smnhffmnn/mux/internal/vault"
 )
 
-func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx context.Context, cancel context.CancelFunc) {
+func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx context.Context, cancel context.CancelFunc, vlt *vault.Vault, waServer *vault.WebAuthnServer, approvalQueue *vault.ApprovalQueue) {
 	log.Println("[mux] Starting desktop app")
 	app := NewApp(cfg, version, buildTime, cfg.Server.Port, s, tm)
 
@@ -30,8 +31,12 @@ func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx 
 		log.Printf("[mux] Registered: %s", t.Tool.Name)
 	}
 
-	httpSrv := startHTTPServer(s, cfg.Server.Port, func(mux *http.ServeMux) {
+	httpSrv := startHTTPServer(s, cfg, func(mux *http.ServeMux) {
 		mux.HandleFunc("/oauth/callback", app.oauthCallbackHandler())
+		if vlt != nil {
+			vault.RegisterHandlers(mux, vlt, waServer, approvalQueue)
+			log.Println("[mux] Vault HTTP endpoints registered on /vault/*")
+		}
 	})
 
 	// Create Wails v3 application

@@ -12,6 +12,16 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
+// SecretVault is the interface that the vault package satisfies.
+// Defined here to avoid importing the vault package (which would create
+// an upward dependency from config into a higher-level subsystem).
+type SecretVault interface {
+	IsUnlocked() bool
+	GetSecret(key string) (string, error)
+	SetSecret(key, value string) error
+	DeleteSecret(key string) error
+}
+
 // secretsFile holds the TOML structure for file-based secret storage.
 // Used as fallback when the OS keyring is unavailable (headless Linux, SSH, after reboot).
 type secretsFile struct {
@@ -21,7 +31,41 @@ type secretsFile struct {
 var (
 	fileStoreMu   sync.Mutex
 	keyringBroken atomic.Bool // cached: true after first keyring failure
+
+	// activeVault is set when the vault feature is enabled.
+	// When set, getSecret/setSecret/deleteSecret try the vault first.
+	activeVaultMu   sync.RWMutex
+	activeVaultInst SecretVault
+
+	// vaultExclusive, when true, skips keyring/file writes for secrets
+	// that are successfully stored in the vault. Eliminates the plaintext
+	// copy that otherwise undermines encryption at rest.
+	vaultExclusive atomic.Bool
 )
+
+// SetActiveVault registers the vault for the secrets layer.
+// When set, all secret operations try the vault first, then fall back
+// to keyring/file for secrets not yet migrated.
+func SetActiveVault(v SecretVault) {
+	activeVaultMu.Lock()
+	activeVaultInst = v
+	activeVaultMu.Unlock()
+}
+
+// getActiveVault returns the current vault (or nil).
+func getActiveVault() SecretVault {
+	activeVaultMu.RLock()
+	v := activeVaultInst
+	activeVaultMu.RUnlock()
+	return v
+}
+
+// SetVaultExclusive controls whether vault-stored secrets are also written
+// to legacy stores (keyring/file). When true, a successful vault write
+// skips the legacy stores — secrets exist only encrypted in the vault.
+func SetVaultExclusive(exclusive bool) {
+	vaultExclusive.Store(exclusive)
+}
 
 // secretsFilePath returns ~/.mux/secrets.toml.
 func secretsFilePath() string {
@@ -29,8 +73,16 @@ func secretsFilePath() string {
 	return filepath.Join(home, DefaultConfigDir, "secrets.toml")
 }
 
-// getSecret reads a secret, trying keyring first, then file fallback.
+// getSecret reads a secret. Priority: vault (if enabled+unlocked) → keyring → file.
 func getSecret(key string) (string, error) {
+	// Try vault first
+	if v := getActiveVault(); v != nil && v.IsUnlocked() {
+		if val, err := v.GetSecret(key); err == nil {
+			return val, nil
+		}
+		// Secret not in vault — fall through to legacy stores
+	}
+
 	if !keyringBroken.Load() {
 		v, err := keyring.Get(ServiceName, key)
 		if err == nil {
@@ -49,10 +101,24 @@ func getSecret(key string) (string, error) {
 	return fileGet(key)
 }
 
-// setSecret stores a secret. Always writes to the file store for durability.
-// Also writes to keyring when available (dual-write), so desktop mode has
-// instant access without reading the file.
+// setSecret stores a secret. If vault is unlocked, writes to vault.
+// In exclusive mode, a successful vault write skips legacy stores.
 func setSecret(key, value string) error {
+	// Write to vault if available and unlocked
+	vaultOK := false
+	if v := getActiveVault(); v != nil && v.IsUnlocked() {
+		if err := v.SetSecret(key, value); err != nil {
+			log.Printf("[secrets] Vault write failed for %q: %v (falling through to keyring/file)", key, err)
+		} else {
+			vaultOK = true
+		}
+	}
+
+	// In exclusive mode, skip legacy stores when vault write succeeded
+	if vaultOK && vaultExclusive.Load() {
+		return nil
+	}
+
 	if !keyringBroken.Load() {
 		err := keyring.Set(ServiceName, key, value)
 		if err != nil && !isKeyNotFound(err) {
@@ -65,9 +131,16 @@ func setSecret(key, value string) error {
 	return fileSet(key, value)
 }
 
-// deleteSecret removes a secret from keyring and file store.
+// deleteSecret removes a secret from vault, keyring, and file store.
 func deleteSecret(key string) error {
-	// Try both — secret might be in either or both.
+	// Delete from vault if available
+	if v := getActiveVault(); v != nil && v.IsUnlocked() {
+		if err := v.DeleteSecret(key); err != nil {
+			log.Printf("[secrets] Vault delete failed for %q: %v", key, err)
+		}
+	}
+
+	// Try both legacy stores — secret might be in either or both.
 	var keyringErr, fileErr error
 
 	if !keyringBroken.Load() {

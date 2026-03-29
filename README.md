@@ -17,6 +17,8 @@ mux is a [Model Context Protocol](https://modelcontextprotocol.io) gateway that 
 - **Two Transports, Three Modes** -- stdio (Claude Desktop) and Streamable HTTP (`/mcp`), with auto-detection of desktop, headless, and stdio modes
 - **Desktop App** -- Wails v3 + Svelte 5 with system tray, web UI, OAuth flows, and connection testing
 - **OS Keychain** -- secrets stored in macOS Keychain, GNOME Keyring, or Windows Credential Manager
+- **Encrypted Vault** -- optional hardware-security-grade secret storage with AES-256-GCM, Argon2id key derivation, inactivity auto-lock, and WebAuthn/FIDO2 unlock (FaceID, YubiKey)
+- **Approval Flow** -- human-in-the-loop approval for privileged agent actions (git push, etc.) with Discord notifications and browser-based WebAuthn approval page
 - **Dynamic Config** -- add, remove, and manage connections at runtime via MCP tools
 - **Cross-Platform** -- macOS, Linux, Windows (amd64 + arm64)
 
@@ -158,6 +160,80 @@ dns = "10.100.0.1"
 ```
 
 See [docs/configuration.md](docs/configuration.md) for the full reference.
+
+## Vault (Encrypted Secret Store)
+
+The vault is an opt-in feature that encrypts all secrets at rest using AES-256-GCM with Argon2id key derivation. It replaces the plaintext `secrets.toml` fallback with a hardware-security model: secrets are only accessible in memory while the vault is unlocked, and automatically wiped after a configurable inactivity timeout.
+
+### Setup
+
+```toml
+[server]
+port = 7700
+tls_cert = "/path/to/cert.pem"   # required for WebAuthn (HTTPS)
+tls_key = "/path/to/key.pem"
+
+[vault]
+enabled = true
+exclusive = true                  # secrets only in vault, not in legacy keyring/file
+inactivity_timeout = "30m"
+webauthn_rp_id = "mux.example.com"
+webauthn_origins = ["https://mux.example.com:7700"]
+base_url = "https://mux.example.com:7700"
+```
+
+### Unlock Methods
+
+1. **Passphrase** -- via MCP tool `vault_unlock` or `POST /vault/unlock`
+2. **WebAuthn/FIDO2** -- via browser (FaceID, YubiKey) at `POST /vault/webauthn/login/*`
+
+### MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `vault_status` | Show vault state, secret count, credential info, remaining lock time |
+| `vault_init` | Initialize vault with a passphrase (creates `~/.mux/vault.json` + `vault.key`) |
+| `vault_unlock` | Unlock with passphrase |
+| `vault_lock` | Lock immediately (wipes DEK from memory) |
+| `vault_migrate` | Migrate existing secrets from keychain/file into the encrypted vault |
+
+### Approval Flow
+
+When agents need to perform privileged actions (e.g., `git push`), the approval system creates a request, notifies the user via Discord webhook, and blocks until the user approves via WebAuthn in their browser.
+
+```
+Agent wants to push → Approval created → Discord notification with link
+→ User opens link on phone → FaceID/YubiKey → Approved → Agent proceeds
+```
+
+Configure the Discord webhook as a secret:
+```
+# Via MCP tool:
+secret_set key=vault-discord-webhook value=https://discord.com/api/webhooks/...
+```
+
+A PreToolUse hook script for Claude Code is included at `scripts/approval-hook.sh`.
+
+### HTTP API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/vault/status` | GET | Vault state |
+| `/vault/init` | POST | Initialize vault |
+| `/vault/unlock` | POST | Unlock with passphrase (rate-limited) |
+| `/vault/lock` | POST | Lock vault |
+| `/vault/migrate` | POST | Bulk migrate secrets |
+| `/vault/webauthn/register/begin` | POST | Start credential registration |
+| `/vault/webauthn/register/finish` | POST | Complete registration |
+| `/vault/webauthn/login/begin` | POST | Start authentication |
+| `/vault/webauthn/login/finish` | POST | Complete authentication (returns session token) |
+| `/vault/webauthn/credentials` | GET | List registered credentials |
+| `/vault/approval` | POST | Create approval request |
+| `/vault/approval/{id}` | GET | Check approval status |
+| `/vault/approval/{id}/grant` | POST | Grant (requires session token) |
+| `/vault/approval/{id}/deny` | POST | Deny |
+| `/vault/approve/{id}` | GET | Approval page (HTML) |
+| `/vault/approvals` | GET | List pending approvals |
 
 ## Documentation
 

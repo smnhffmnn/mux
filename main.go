@@ -18,6 +18,7 @@ import (
 	"github.com/smnhffmnn/mux/internal/config"
 	"github.com/smnhffmnn/mux/internal/erp"
 	"github.com/smnhffmnn/mux/internal/tools"
+	"github.com/smnhffmnn/mux/internal/vault"
 	"github.com/smnhffmnn/mux/internal/wireguard"
 )
 
@@ -98,6 +99,68 @@ More info: https://github.com/smnhffmnn/mux
 		}
 	}
 
+	// --- Vault (encrypted secret store) ---
+	var vlt *vault.Vault
+	var waServer *vault.WebAuthnServer
+	var approvalQueue *vault.ApprovalQueue
+
+	if cfg.Vault.Enabled {
+		var vaultOpts []vault.Option
+		if cfg.Vault.InactivityTimeout != "" {
+			d, err := time.ParseDuration(cfg.Vault.InactivityTimeout)
+			if err != nil {
+				log.Printf("[vault] Invalid inactivity_timeout %q: %v (using default)", cfg.Vault.InactivityTimeout, err)
+			} else {
+				vaultOpts = append(vaultOpts, vault.WithInactivityTimeout(d))
+			}
+		}
+		vlt = vault.New(vaultOpts...)
+
+		if err := vlt.Load(); err != nil {
+			log.Printf("[vault] Failed to load vault: %v (continuing without vault)", err)
+			vlt = nil
+		} else {
+			config.SetActiveVault(vlt)
+			if cfg.Vault.Exclusive {
+				config.SetVaultExclusive(true)
+				log.Println("[vault] Exclusive mode: secrets only in vault, not in legacy stores")
+			}
+			log.Printf("[vault] State: %s (%d secrets stored)", vlt.State(), vlt.Status().SecretCount)
+
+			// WebAuthn server (only if RP ID is configured)
+			if cfg.Vault.WebAuthnRPID != "" {
+				wa, err := vault.NewWebAuthnServer(vault.WebAuthnConfig{
+					RPID:          cfg.Vault.WebAuthnRPID,
+					RPOrigins:     cfg.Vault.WebAuthnOrigins,
+					RPDisplayName: "Mux Vault",
+				}, vlt)
+				if err != nil {
+					log.Printf("[vault] WebAuthn init failed: %v", err)
+				} else {
+					waServer = wa
+					log.Printf("[vault] WebAuthn enabled (RP: %s)", cfg.Vault.WebAuthnRPID)
+				}
+			}
+
+			// Approval queue + notifier
+			var notifier vault.Notifier
+			discordWebhook, _ := config.GetSecret("vault-discord-webhook")
+			if discordWebhook != "" {
+				notifier = vault.NewDiscordWebhookNotifier(discordWebhook)
+				log.Println("[vault] Discord webhook notifier configured")
+			} else {
+				notifier = &vault.LogNotifier{}
+			}
+
+			baseURL := cfg.Vault.BaseURL
+			if baseURL == "" {
+				baseURL = fmt.Sprintf("http://localhost:%d", cfg.Server.Port)
+			}
+			approvalQueue = vault.NewApprovalQueue(notifier, baseURL)
+			log.Println("[vault] Approval queue initialized")
+		}
+	}
+
 	// Tunnels (WireGuard + SSH)
 	wgMgr := wireguard.NewManager()
 	defer wgMgr.Close()
@@ -157,6 +220,15 @@ More info: https://github.com/smnhffmnn/mux
 	s.AddTool(tools.DateTimeTool.Tool, tools.DateTimeTool.Handler)
 	log.Println("[mux] Registered: get_datetime")
 
+	// Register vault MCP tools (all modes)
+	if vlt != nil {
+		vaultTools := tools.NewVaultTools(vlt, cfg)
+		for _, t := range vaultTools.Tools() {
+			s.AddTool(t.Tool, t.Handler)
+			log.Printf("[mux] Registered: %s", t.Tool.Name)
+		}
+	}
+
 	// --- Stdio mode (Claude Desktop, piped stdin) ---
 	if useStdio {
 		log.Println("[mux] Starting in stdio mode")
@@ -178,7 +250,12 @@ More info: https://github.com/smnhffmnn/mux
 
 		registerConfigTools(s, cfg, tm)
 
-		httpSrv := startHTTPServer(s, cfg.Server.Port, nil)
+		httpSrv := startHTTPServer(s, cfg, func(mux *http.ServeMux) {
+			if vlt != nil {
+				vault.RegisterHandlers(mux, vlt, waServer, approvalQueue)
+				log.Println("[mux] Vault HTTP endpoints registered on /vault/*")
+			}
+		})
 
 		// Block until SIGINT/SIGTERM
 		sigCh := make(chan os.Signal, 1)
@@ -193,7 +270,7 @@ More info: https://github.com/smnhffmnn/mux
 	}
 
 	// --- Desktop mode (Wails v3 + MCP HTTP) ---
-	runDesktop(s, cfg, tm, ctx, cancel)
+	runDesktop(s, cfg, tm, ctx, cancel, vlt, waServer, approvalQueue)
 }
 
 // registerConfigTools creates a simpleReloader and registers config management tools on the MCP server.
@@ -206,10 +283,10 @@ func registerConfigTools(s *server.MCPServer, cfg *config.Config, tm *tunnelMana
 	}
 }
 
-// startHTTPServer creates and starts the MCP HTTP server on localhost.
-// extraRoutes is called (if non-nil) to register additional routes before the server starts.
-func startHTTPServer(s *server.MCPServer, port int, extraRoutes func(*http.ServeMux)) *http.Server {
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+// startHTTPServer creates and starts the MCP HTTP server.
+// If TLS cert+key are configured, serves HTTPS on 0.0.0.0 (for Tailscale access).
+// Otherwise, serves plain HTTP on localhost only.
+func startHTTPServer(s *server.MCPServer, cfg *config.Config, extraRoutes func(*http.ServeMux)) *http.Server {
 	mux := http.NewServeMux()
 
 	mcpHandler := server.NewStreamableHTTPServer(s)
@@ -219,15 +296,46 @@ func startHTTPServer(s *server.MCPServer, port int, extraRoutes func(*http.Serve
 		extraRoutes(mux)
 	}
 
-	httpSrv := &http.Server{Addr: addr, Handler: mux}
+	useTLS := cfg.Server.TLSCert != "" && cfg.Server.TLSKey != ""
+
+	var addr string
+	if useTLS {
+		// TLS: bind to all interfaces (Tailscale, LAN)
+		addr = fmt.Sprintf(":%d", cfg.Server.Port)
+	} else {
+		// Plain HTTP: localhost only
+		addr = fmt.Sprintf("127.0.0.1:%d", cfg.Server.Port)
+	}
+
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MB
+	}
 
 	go func() {
-		log.Printf("[mux] Starting MCP HTTP server on %s", addr)
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP server error: %v", err)
+		if useTLS {
+			certPath := config.ExpandHome(cfg.Server.TLSCert)
+			keyPath := config.ExpandHome(cfg.Server.TLSKey)
+			log.Printf("[mux] Starting HTTPS server on %s (TLS)", addr)
+			if err := httpSrv.ListenAndServeTLS(certPath, keyPath); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("HTTPS server error: %v", err)
+			}
+		} else {
+			log.Printf("[mux] Starting HTTP server on %s", addr)
+			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("HTTP server error: %v", err)
+			}
 		}
 	}()
 
-	log.Printf("[mux] MCP available at http://localhost:%d/mcp", port)
+	scheme := "http"
+	if useTLS {
+		scheme = "https"
+	}
+	log.Printf("[mux] MCP available at %s://localhost:%d/mcp", scheme, cfg.Server.Port)
 	return httpSrv
 }

@@ -9,8 +9,9 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/smnhffmnn/mux/internal/config"
+	"github.com/smnhffmnn/mux/internal/vault"
 )
 
-func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx context.Context, cancel context.CancelFunc) {
+func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx context.Context, cancel context.CancelFunc, _ *vault.Vault, _ *vault.WebAuthnServer, _ *vault.ApprovalQueue) {
 	log.Fatal("Desktop mode not available in headless build. This binary was built with -tags notray.")
 }

@@ -118,13 +118,26 @@ type ERPConfig struct {
 }
 
 type ServerConfig struct {
-	Port int `toml:"port"`
+	Port    int    `toml:"port"`
+	TLSCert string `toml:"tls_cert,omitempty" json:"tlsCert,omitempty"` // path to TLS certificate
+	TLSKey  string `toml:"tls_key,omitempty" json:"tlsKey,omitempty"`   // path to TLS private key
+}
+
+// VaultConfig holds settings for the encrypted secret vault.
+type VaultConfig struct {
+	Enabled           bool     `toml:"enabled,omitempty" json:"enabled,omitempty"`
+	Exclusive         bool     `toml:"exclusive,omitempty" json:"exclusive,omitempty"`                     // when true, vault-stored secrets skip legacy keyring/file
+	InactivityTimeout string   `toml:"inactivity_timeout,omitempty" json:"inactivityTimeout,omitempty"`   // e.g. "30m"
+	WebAuthnRPID      string   `toml:"webauthn_rp_id,omitempty" json:"webauthnRpId,omitempty"`            // e.g. "mux.local"
+	WebAuthnOrigins   []string `toml:"webauthn_origins,omitempty" json:"webauthnOrigins,omitempty"`        // e.g. ["https://mux.local:7700"]
+	BaseURL           string   `toml:"base_url,omitempty" json:"baseUrl,omitempty"`                        // public URL for approval links, e.g. "https://fedora.tailnet:7700"
 }
 
 // Config is the application configuration.
 type Config struct {
 	Server      ServerConfig   `toml:"server"`
 	ERP         ERPConfig      `toml:"erp,omitempty"`
+	Vault       VaultConfig    `toml:"vault,omitempty"`
 	Tunnels     []TunnelConfig `toml:"tunnels,omitempty"`
 	Connections []Connection `toml:"connections,omitempty"`
 
@@ -715,7 +728,7 @@ func DeleteSecret(key string) error {
 
 // ValidSecretKey checks that a keychain key matches known mux patterns.
 func ValidSecretKey(key string) bool {
-	if key == "provisioning-token" {
+	if key == "provisioning-token" || key == "vault-discord-webhook" {
 		return true
 	}
 	if strings.HasSuffix(key, "-password") ||
