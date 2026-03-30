@@ -972,7 +972,8 @@ func (mg *MicrosoftGraph) handleGetAttachment(ctx context.Context, req mcp.CallT
 		return mcp.NewToolResultError("message_id and attachment_id are required"), nil
 	}
 
-	data, status, err := mg.doGraph(ctx, http.MethodGet, "/me/messages/"+url.PathEscape(msgID)+"/attachments/"+url.PathEscape(attID)+"?$select=id,name,size,contentType,contentBytes", nil)
+	// No $select — contentBytes is on the derived fileAttachment type, not the base attachment type.
+	data, status, err := mg.doGraph(ctx, http.MethodGet, "/me/messages/"+url.PathEscape(msgID)+"/attachments/"+url.PathEscape(attID), nil)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -980,7 +981,7 @@ func (mg *MicrosoftGraph) handleGetAttachment(ctx context.Context, req mcp.CallT
 		return mcp.NewToolResultError(fmt.Sprintf("Graph API error (HTTP %d): %s", status, string(data))), nil
 	}
 	if len(data) >= graphMaxBody {
-		return mcp.NewToolResultError("attachment too large to retrieve (response exceeded 512KB limit)"), nil
+		return mcp.NewToolResultError("attachment too large to retrieve (response exceeded size limit)"), nil
 	}
 
 	var att struct {
