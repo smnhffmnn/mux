@@ -3,14 +3,14 @@
 ## Prerequisites
 
 - **Go 1.25+** (version from `go.mod`)
-- **CGO** (only for macOS desktop build with system tray)
+- **CGO** (required for macOS and Windows desktop builds with system tray/GUI)
 
 ## Build Variants
 
-| Mode | System Tray | CGO | Cross-compile | Use Case |
-|------|-------------|-----|---------------|----------|
-| Desktop | Yes | Required | No (macOS only) | Developer workstation |
-| Headless | No | Not needed | Yes (all platforms) | Servers, containers, CI |
+| Mode | System Tray | CGO | Platforms | Use Case |
+|------|-------------|-----|-----------|----------|
+| Desktop | Yes | Required | macOS, Windows | Developer workstation |
+| Headless | No | Not needed | All (cross-compilable) | Servers, containers, CI |
 
 The `notray` build tag disables the system tray, removing the CGO dependency.
 
@@ -55,8 +55,8 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -tags notray -o mux-windows-amd
 
 Pre-built binaries for all platforms are available on the [Releases page](https://github.com/smnhffmnn/mux/releases). Each release includes:
 
-- Headless binaries: Linux, macOS, Windows (amd64 + arm64)
-- Desktop binaries: macOS with system tray (Apple Silicon + Intel)
+- Headless binaries: Linux (amd64 + arm64)
+- Desktop binaries: macOS (Apple Silicon + Intel), Windows (amd64)
 - SHA-256 checksums
 
 ## Homebrew (macOS)
@@ -84,8 +84,8 @@ mux --version
 mux automatically selects the right mode — no flags needed:
 
 1. **stdin is a pipe** → stdio mode (for Claude Desktop, piped agents)
-2. **No DISPLAY/WAYLAND_DISPLAY** → headless HTTP mode (servers, containers)
-3. **Otherwise** → desktop GUI mode (macOS/Linux with display)
+2. **No DISPLAY/WAYLAND_DISPLAY** (Linux only) → headless HTTP mode (servers, containers)
+3. **Otherwise** → desktop GUI mode (macOS, Windows, Linux with display)
 
 ## Platform Notes
 
@@ -123,14 +123,37 @@ export MUX_PROVISIONING_TOKEN=my-token
 
 ### Windows
 
-Only headless builds are supported.
+**Desktop build** (recommended):
 
-```powershell
-$env:CGO_ENABLED=0; go build -tags notray -o mux.exe .
-.\mux.exe
+1. Download `mux_<version>_windows_amd64.zip` from the [Releases page](https://github.com/smnhffmnn/mux/releases)
+2. Extract the ZIP to a folder (e.g. `C:\Users\<you>\mux\`)
+3. Run `mux.exe` -- the desktop GUI opens with system tray icon
+4. Click the tray icon to open the web UI, manage connections, and configure settings
+5. Config file: `%USERPROFILE%\.mux\config.toml` (created on first run)
+
+**Requirements:**
+- Windows 10/11 (amd64)
+- [Microsoft WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (pre-installed on Windows 11, may need install on Windows 10)
+
+**Secrets** are stored in Windows Credential Manager (service: "mux").
+
+**SmartScreen:** The binary is not code-signed yet. Windows SmartScreen may show "Windows protected your PC" on first launch. Click "More info" → "Run anyway".
+
+**Self-update:** mux can update itself -- it downloads the latest `mux.exe` from GitHub Releases when a new version is available.
+
+**Claude Desktop integration:** Add to `%APPDATA%\Claude\claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "mux": {
+      "command": "C:\\Users\\<you>\\mux\\mux.exe"
+    }
+  }
+}
 ```
 
-Secrets are stored in Windows Credential Manager (service: "mux").
+When launched via Claude Desktop, mux detects the piped stdin and runs in stdio mode (no GUI window).
 
 ## Running as a Service
 
@@ -221,7 +244,9 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-GoReleaser creates a GitHub Release with headless binaries for all platforms. A separate macOS job builds desktop binaries with system tray support.
+The release workflow creates a GitHub Release with:
+- Desktop binaries for macOS (amd64 + arm64) and Windows (amd64)
+- Headless binaries for Linux (amd64 + arm64)
 
 ## Version Embedding
 
