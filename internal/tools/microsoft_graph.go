@@ -701,7 +701,7 @@ func (mg *MicrosoftGraph) getConversationMessages(ctx context.Context, convID, f
 
 		// Follow pagination
 		if resp.NextLink != "" {
-			after, ok := cutPrefix(resp.NextLink, graphBaseURL)
+			after, ok := strings.CutPrefix(resp.NextLink, graphBaseURL)
 			if !ok {
 				break
 			}
@@ -935,7 +935,7 @@ func (mg *MicrosoftGraph) handleListAttachments(ctx context.Context, req mcp.Cal
 		return mcp.NewToolResultError("message_id is required"), nil
 	}
 
-	data, status, err := mg.doGraph(ctx, http.MethodGet, "/me/messages/"+msgID+"/attachments?$select=id,name,size,contentType,isInline", nil)
+	data, status, err := mg.doGraph(ctx, http.MethodGet, "/me/messages/"+url.PathEscape(msgID)+"/attachments?$select=id,name,size,contentType,isInline", nil)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -967,7 +967,7 @@ func (mg *MicrosoftGraph) handleGetAttachment(ctx context.Context, req mcp.CallT
 		return mcp.NewToolResultError("message_id and attachment_id are required"), nil
 	}
 
-	data, status, err := mg.doGraph(ctx, http.MethodGet, "/me/messages/"+msgID+"/attachments/"+attID+"?$select=id,name,size,contentType,contentBytes", nil)
+	data, status, err := mg.doGraph(ctx, http.MethodGet, "/me/messages/"+url.PathEscape(msgID)+"/attachments/"+url.PathEscape(attID)+"?$select=id,name,size,contentType,contentBytes", nil)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1005,19 +1005,12 @@ func plainToHTML(s string) string {
 		return s
 	}
 	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
 	s = html.EscapeString(s)
 	return strings.ReplaceAll(s, "\n", "<br>")
 }
 
 // --- Utility ---
-
-// cutPrefix returns s without the leading prefix, and whether the prefix was found.
-func cutPrefix(s, prefix string) (string, bool) {
-	if len(s) >= len(prefix) && s[:len(prefix)] == prefix {
-		return s[len(prefix):], true
-	}
-	return s, false
-}
 
 func jsonResult(v any) (*mcp.CallToolResult, error) {
 	data, _ := json.MarshalIndent(v, "", "  ")

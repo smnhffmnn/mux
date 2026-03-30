@@ -124,7 +124,7 @@ func (mg *MicrosoftGraph) handleSPListItems(ctx context.Context, req mcp.CallToo
 
 	// Pagination: use page_token directly if provided
 	if pageToken, ok := req.GetArguments()["page_token"].(string); ok && pageToken != "" {
-		after, ok := cutPrefix(pageToken, graphBaseURL)
+		after, ok := strings.CutPrefix(pageToken, graphBaseURL)
 		if !ok {
 			return mcp.NewToolResultError("invalid page_token — must be a full Graph API URL"), nil
 		}

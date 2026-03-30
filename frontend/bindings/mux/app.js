@@ -28,12 +28,33 @@ export function AddConnection(name, typ) {
 }
 
 /**
+ * AddTunnel creates a new tunnel and returns its info.
+ * @param {string} name
+ * @param {string} typ
+ * @returns {$CancellablePromise<$models.TunnelInfo | null>}
+ */
+export function AddTunnel(name, typ) {
+    return $Call.ByID(1252415046, name, typ).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType22($result);
+    }));
+}
+
+/**
  * DeleteConnection removes a local connection.
  * @param {string} name
  * @returns {$CancellablePromise<void>}
  */
 export function DeleteConnection(name) {
     return $Call.ByID(3428926502, name);
+}
+
+/**
+ * DeleteTunnel removes a local tunnel.
+ * @param {string} name
+ * @returns {$CancellablePromise<void>}
+ */
+export function DeleteTunnel(name) {
+    return $Call.ByID(2127640780, name);
 }
 
 /**
@@ -108,6 +129,18 @@ export function GetServerInfo() {
 export function SaveConnection(name, fields) {
     return $Call.ByID(865625064, name, fields).then(/** @type {($result: any) => any} */(($result) => {
         return $$createType1($result);
+    }));
+}
+
+/**
+ * SaveTunnel saves tunnel fields and returns the updated info.
+ * @param {string} name
+ * @param {$models.SaveTunnelRequest} fields
+ * @returns {$CancellablePromise<$models.TunnelInfo | null>}
+ */
+export function SaveTunnel(name, fields) {
+    return $Call.ByID(814564682, name, fields).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType22($result);
     }));
 }
 
@@ -210,3 +243,5 @@ const $$createType17 = $Create.Nullable($$createType16);
 const $$createType18 = $Create.Nullable($$createType8);
 const $$createType19 = $models.TestResult.createFrom;
 const $$createType20 = $Create.Nullable($$createType19);
+const $$createType21 = $models.TunnelInfo.createFrom;
+const $$createType22 = $Create.Nullable($$createType21);

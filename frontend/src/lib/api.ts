@@ -43,22 +43,22 @@ export interface ERPInfo {
 export interface TunnelInfo {
   name: string
   type: string                  // "wireguard" or "ssh"
-  peerEndpoint: string
-  tunnelAddress: string
-  peerPublicKey: string
-  allowedIPs: string
-  dns: string
-  mtu: number
-  keepAlive: number
-  host: string
-  port: number
-  user: string
-  keyFile: string
-  insecureHostKey: boolean
-  source: string
+  peerEndpoint?: string
+  tunnelAddress?: string
+  peerPublicKey?: string
+  allowedIPs?: string
+  dns?: string
+  mtu?: number
+  keepAlive?: number
+  host?: string
+  port?: number
+  user?: string
+  keyFile?: string
+  insecureHostKey?: boolean
+  source: string                // "local" or "erp"
   connected: boolean
   privateKeySet: boolean
-  presharedKeySet: boolean
+  presharedKeySet?: boolean
 }
 
 export interface SaveTunnelRequest {

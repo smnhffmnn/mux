@@ -611,6 +611,128 @@ export class SaveConnectionRequest {
 }
 
 /**
+ * SaveTunnelRequest contains the fields to save for a tunnel.
+ */
+export class SaveTunnelRequest {
+    /**
+     * Creates a new SaveTunnelRequest instance.
+     * @param {Partial<SaveTunnelRequest>} [$$source = {}] - The source object to create the SaveTunnelRequest.
+     */
+    constructor($$source = {}) {
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["peerPublicKey"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["peerEndpoint"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["allowedIPs"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["tunnelAddress"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["dns"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["mtu"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["keepAlive"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["privateKey"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["presharedKey"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["host"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["port"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["user"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["keyFile"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {boolean | undefined}
+             */
+            this["insecureHostKey"] = undefined;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new SaveTunnelRequest instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {SaveTunnelRequest}
+     */
+    static createFrom($$source = {}) {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new SaveTunnelRequest(/** @type {Partial<SaveTunnelRequest>} */($$parsedSource));
+    }
+}
+
+/**
  * ServerInfo contains version/uptime metadata shown in the header.
  */
 export class ServerInfo {
@@ -715,7 +837,7 @@ export class TestResult {
 }
 
 /**
- * TunnelInfo describes a WireGuard tunnel.
+ * TunnelInfo describes a WireGuard or SSH tunnel.
  */
 export class TunnelInfo {
     /**
@@ -730,19 +852,96 @@ export class TunnelInfo {
              */
             this["name"] = "";
         }
-        if (!("peerEndpoint" in $$source)) {
+        if (!("type" in $$source)) {
             /**
              * @member
              * @type {string}
              */
-            this["peerEndpoint"] = "";
+            this["type"] = "";
         }
-        if (!("tunnelAddress" in $$source)) {
+        if (/** @type {any} */(false)) {
             /**
              * @member
-             * @type {string}
+             * @type {string | undefined}
              */
-            this["tunnelAddress"] = "";
+            this["peerEndpoint"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["tunnelAddress"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["peerPublicKey"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["allowedIPs"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["dns"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {number | undefined}
+             */
+            this["mtu"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {number | undefined}
+             */
+            this["keepAlive"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["host"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {number | undefined}
+             */
+            this["port"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["user"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["keyFile"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {boolean | undefined}
+             */
+            this["insecureHostKey"] = undefined;
         }
         if (!("source" in $$source)) {
             /**
@@ -757,6 +956,20 @@ export class TunnelInfo {
              * @type {boolean}
              */
             this["connected"] = false;
+        }
+        if (!("privateKeySet" in $$source)) {
+            /**
+             * @member
+             * @type {boolean}
+             */
+            this["privateKeySet"] = false;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {boolean | undefined}
+             */
+            this["presharedKeySet"] = undefined;
         }
 
         Object.assign(this, $$source);
