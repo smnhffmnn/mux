@@ -26,7 +26,7 @@ const (
 	graphAuthURL   = "https://login.microsoftonline.com/common/oauth2/v2.0"
 	GraphClientID  = "9e5f94bc-e8a4-4e73-b8be-63364c29d753" // Exported for UI test handler
 	graphDefScopes = "https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access"
-	graphMaxBody    = 512 * 1024
+	graphMaxBody    = 8 * 1024 * 1024 // 8 MB — needed when body (full HTML) is in $select
 	graphRefreshBuf = 5 * time.Minute
 )
 
@@ -664,7 +664,12 @@ func (mg *MicrosoftGraph) getConversationMessages(ctx context.Context, convID, f
 	// and filter client-side. Paginates up to maxPages (~1000 messages) to find
 	// conversations that may be beyond the first page.
 	selectFields := fields + ",conversationId"
-	path := fmt.Sprintf("/me/mailFolders/inbox/messages?$orderby=receivedDateTime+desc&$select=%s&$top=250", selectFields)
+	// Reduce page size when fetching full body to avoid hitting response size limits.
+	pageSize := 250
+	if strings.Contains(fields, "body") {
+		pageSize = 25
+	}
+	path := fmt.Sprintf("/me/mailFolders/inbox/messages?$orderby=receivedDateTime+desc&$select=%s&$top=%d", selectFields, pageSize)
 
 	const maxPages = 4
 	var matched []graphRawMessage
