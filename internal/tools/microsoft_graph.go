@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -135,7 +137,7 @@ func (mg *MicrosoftGraph) Tools() []ToolDef {
 			Tool: mcp.NewTool("create_reply_draft",
 				mcp.WithDescription("Create a reply draft for the latest message in a conversation. Does NOT send."),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
-				mcp.WithString("body", mcp.Required(), mcp.Description("Reply text")),
+				mcp.WithString("body", mcp.Required(), mcp.Description("Reply body. Can be HTML or plain text (newlines are auto-converted to <br>).")),
 			),
 			Handler: mg.handleCreateReplyDraft,
 		},
@@ -144,9 +146,24 @@ func (mg *MicrosoftGraph) Tools() []ToolDef {
 				mcp.WithDescription("Create a forward draft for the latest message in a conversation. Does NOT send."),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
 				mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address")),
-				mcp.WithString("body", mcp.Description("Optional comment to include")),
+				mcp.WithString("body", mcp.Description("Optional comment. Can be HTML or plain text (newlines are auto-converted to <br>).")),
 			),
 			Handler: mg.handleCreateForwardDraft,
+		},
+		{
+			Tool: mcp.NewTool("list_attachments",
+				mcp.WithDescription("List attachments of a specific message. Returns name, size, content type, and ID for each attachment."),
+				mcp.WithString("message_id", mcp.Required(), mcp.Description("Message ID")),
+			),
+			Handler: mg.handleListAttachments,
+		},
+		{
+			Tool: mcp.NewTool("get_attachment",
+				mcp.WithDescription("Get the content of a specific attachment. Returns base64-encoded content (contentBytes). Only works for file attachments (#microsoft.graph.fileAttachment), not item or reference attachments. Max ~380KB file size due to response limits."),
+				mcp.WithString("message_id", mcp.Required(), mcp.Description("Message ID")),
+				mcp.WithString("attachment_id", mcp.Required(), mcp.Description("Attachment ID from list_attachments")),
+			),
+			Handler: mg.handleGetAttachment,
 		},
 	}
 	tools = append(tools, mg.sharePointTools()...)
@@ -369,7 +386,7 @@ func (mg *MicrosoftGraph) handleGetConversation(ctx context.Context, req mcp.Cal
 		return mcp.NewToolResultError("conversation_id is required"), nil
 	}
 
-	msgs, err := mg.getConversationMessages(ctx, convID, "id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,isRead,flag,bodyPreview")
+	msgs, err := mg.getConversationMessages(ctx, convID, "id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,isRead,flag,bodyPreview,body,hasAttachments")
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -448,7 +465,7 @@ func (mg *MicrosoftGraph) handleCreateReplyDraft(ctx context.Context, req mcp.Ca
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	payload := map[string]string{"comment": body}
+	payload := map[string]string{"comment": plainToHTML(body)}
 	data, status, err := mg.doGraph(ctx, http.MethodPost, "/me/messages/"+latest.ID+"/createReply", payload)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
@@ -485,7 +502,7 @@ func (mg *MicrosoftGraph) handleCreateForwardDraft(ctx context.Context, req mcp.
 	}
 
 	// Create forward draft
-	payload := map[string]string{"comment": comment}
+	payload := map[string]string{"comment": plainToHTML(comment)}
 	data, status, err := mg.doGraph(ctx, http.MethodPost, "/me/messages/"+latest.ID+"/createForward", payload)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
@@ -770,6 +787,11 @@ type graphRawMessage struct {
 		FlagStatus string `json:"flagStatus"`
 	} `json:"flag"`
 	BodyPreview string `json:"bodyPreview"`
+	Body        *struct {
+		ContentType string `json:"contentType"`
+		Content     string `json:"content"`
+	} `json:"body,omitempty"`
+	HasAttachments bool `json:"hasAttachments"`
 }
 
 type graphConversation struct {
@@ -903,6 +925,88 @@ func groupByConversation(messages []graphRawMessage, limit int) []graphConversat
 	}
 
 	return result
+}
+
+// --- Attachment handlers ---
+
+func (mg *MicrosoftGraph) handleListAttachments(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	msgID, _ := req.RequireString("message_id")
+	if msgID == "" {
+		return mcp.NewToolResultError("message_id is required"), nil
+	}
+
+	data, status, err := mg.doGraph(ctx, http.MethodGet, "/me/messages/"+msgID+"/attachments?$select=id,name,size,contentType,isInline", nil)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if status != http.StatusOK {
+		return mcp.NewToolResultError(fmt.Sprintf("Graph API error (HTTP %d): %s", status, string(data))), nil
+	}
+
+	var resp struct {
+		Value []struct {
+			ODataType   string `json:"@odata.type"`
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Size        int    `json:"size"`
+			ContentType string `json:"contentType"`
+			IsInline    bool   `json:"isInline"`
+		} `json:"value"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return mcp.NewToolResultError("parse attachments: " + err.Error()), nil
+	}
+
+	return jsonResult(resp.Value)
+}
+
+func (mg *MicrosoftGraph) handleGetAttachment(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	msgID, _ := req.RequireString("message_id")
+	attID, _ := req.RequireString("attachment_id")
+	if msgID == "" || attID == "" {
+		return mcp.NewToolResultError("message_id and attachment_id are required"), nil
+	}
+
+	data, status, err := mg.doGraph(ctx, http.MethodGet, "/me/messages/"+msgID+"/attachments/"+attID+"?$select=id,name,size,contentType,contentBytes", nil)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if status != http.StatusOK {
+		return mcp.NewToolResultError(fmt.Sprintf("Graph API error (HTTP %d): %s", status, string(data))), nil
+	}
+	if len(data) >= graphMaxBody {
+		return mcp.NewToolResultError("attachment too large to retrieve (response exceeded 512KB limit)"), nil
+	}
+
+	var att struct {
+		ODataType    string `json:"@odata.type"`
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		Size         int    `json:"size"`
+		ContentType  string `json:"contentType"`
+		ContentBytes string `json:"contentBytes"`
+	}
+	if err := json.Unmarshal(data, &att); err != nil {
+		return mcp.NewToolResultError("parse attachment: " + err.Error()), nil
+	}
+
+	return jsonResult(att)
+}
+
+// --- HTML helpers ---
+
+// reHTMLTag matches actual HTML tags (not bare < in plain text like "price < 10").
+var reHTMLTag = regexp.MustCompile(`<[a-zA-Z/!]`)
+
+// plainToHTML converts plain text to HTML if it doesn't already contain HTML tags.
+// This ensures that newlines render correctly in Outlook drafts.
+func plainToHTML(s string) string {
+	if s == "" || reHTMLTag.MatchString(s) {
+		return s
+	}
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = html.EscapeString(s)
+	return strings.ReplaceAll(s, "\n", "<br>")
 }
 
 // --- Utility ---
