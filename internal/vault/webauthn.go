@@ -104,12 +104,14 @@ func (s *WebAuthnServer) FinishRegistration(body []byte, name string) (*StoredCr
 	}
 
 	sc := StoredCredential{
-		ID:        b64Encode(credential.ID),
-		PublicKey: b64Encode(credential.PublicKey),
-		AAGUID:    hex.EncodeToString(credential.Authenticator.AAGUID),
-		SignCount: credential.Authenticator.SignCount,
-		Name:      name,
-		CreatedAt: time.Now().UTC(),
+		ID:             b64Encode(credential.ID),
+		PublicKey:      b64Encode(credential.PublicKey),
+		AAGUID:         hex.EncodeToString(credential.Authenticator.AAGUID),
+		SignCount:      credential.Authenticator.SignCount,
+		BackupEligible: credential.Flags.BackupEligible,
+		BackupState:    credential.Flags.BackupState,
+		Name:           name,
+		CreatedAt:      time.Now().UTC(),
 	}
 
 	if err := s.vault.AddCredential(sc); err != nil {
@@ -225,6 +227,10 @@ func (u *vaultUser) WebAuthnCredentials() []webauthn.Credential {
 			ID:              id,
 			PublicKey:        pk,
 			AttestationType: "none",
+			Flags: webauthn.CredentialFlags{
+				BackupEligible: sc.BackupEligible,
+				BackupState:    sc.BackupState,
+			},
 			Authenticator: webauthn.Authenticator{
 				AAGUID:    aaguidBytes,
 				SignCount: sc.SignCount,

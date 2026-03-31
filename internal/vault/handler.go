@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -195,7 +196,11 @@ func handleRegFinish(wa *WebAuthnServer) http.HandlerFunc {
 
 		// Extract credential name from header (body is the raw WebAuthn response).
 		// Header avoids log leakage that query params would cause.
-		name := r.Header.Get("X-Credential-Name")
+		// URL-decoded to support non-ASCII names (client encodes with encodeURIComponent).
+		name, _ := url.QueryUnescape(r.Header.Get("X-Credential-Name"))
+		if len(name) > 100 {
+			name = name[:100]
+		}
 		if name == "" {
 			name = "unnamed"
 		}

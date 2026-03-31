@@ -3,38 +3,50 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mux Vault — Manage</title>
+<title>Mux Vault</title>
 <style>
   :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --green: #3fb950; --orange: #d29922; --red: #f85149; --blue: #58a6ff; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 1rem; }
   .container { max-width: 480px; margin: 0 auto; }
-  h1 { font-size: 1.25rem; margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem; }
-  h2 { font-size: 1rem; margin: 1.5rem 0 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem; }
-  .status-row { display: flex; justify-content: space-between; align-items: center; padding: 0.4rem 0; }
-  .status-row:not(:last-child) { border-bottom: 1px solid var(--border); }
-  .status-label { color: var(--muted); font-size: 0.85rem; }
-  .status-value { font-family: "SF Mono", SFMono-Regular, Consolas, monospace; font-size: 0.85rem; }
+  h1 { font-size: 1.25rem; margin-bottom: 1.25rem; display: flex; align-items: center; gap: 0.5rem; }
+  h2 { font-size: 0.8rem; margin: 1.5rem 0 0.6rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; margin-bottom: 0.75rem; }
+  .row { display: flex; justify-content: space-between; align-items: center; padding: 0.4rem 0; }
+  .row:not(:last-child) { border-bottom: 1px solid var(--border); }
+  .label { color: var(--muted); font-size: 0.85rem; }
+  .value { font-family: "SF Mono", SFMono-Regular, Consolas, monospace; font-size: 0.85rem; }
   .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
   .badge-green { background: rgba(63,185,80,0.15); color: var(--green); }
   .badge-orange { background: rgba(210,153,34,0.15); color: var(--orange); }
   .badge-red { background: rgba(248,81,73,0.15); color: var(--red); }
+  .badge-blue { background: rgba(88,166,255,0.15); color: var(--blue); }
+  .timer { font-variant-numeric: tabular-nums; }
   .cred-item { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 0; }
   .cred-item:not(:last-child) { border-bottom: 1px solid var(--border); }
   .cred-info { flex: 1; min-width: 0; }
   .cred-name { font-weight: 600; font-size: 0.95rem; }
   .cred-meta { font-size: 0.75rem; color: var(--muted); margin-top: 0.2rem; }
-  .btn-delete { background: none; border: 1px solid var(--red); color: var(--red); padding: 0.3rem 0.6rem; border-radius: 6px; font-size: 0.75rem; cursor: pointer; flex-shrink: 0; margin-left: 0.75rem; }
-  .btn-delete:active { opacity: 0.7; }
+  .cred-badges { display: flex; gap: 0.3rem; margin-top: 0.3rem; }
+  .cred-badges .badge { font-size: 0.65rem; padding: 0.1rem 0.4rem; }
   .empty { color: var(--muted); font-size: 0.9rem; padding: 0.5rem 0; }
-  button.primary { width: 100%; padding: 0.85rem 1rem; border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: opacity 0.2s; background: var(--blue); color: #fff; }
-  button.primary:active { opacity: 0.8; }
-  button.primary:disabled { opacity: 0.4; cursor: not-allowed; }
-  .register-form { margin-bottom: 1rem; }
-  .register-form input { width: 100%; padding: 0.65rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.9rem; margin-bottom: 0.75rem; }
-  .register-form input::placeholder { color: var(--muted); }
-  .toast { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); padding: 0.75rem 1.25rem; border-radius: 8px; font-weight: 600; font-size: 0.9rem; opacity: 0; transition: opacity 0.3s; pointer-events: none; max-width: 90vw; text-align: center; }
+  button { border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: opacity 0.2s; padding: 0.85rem 1rem; width: 100%; }
+  button:active { opacity: 0.8; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-blue { background: var(--blue); color: #fff; }
+  .btn-green { background: var(--green); color: #000; }
+  .btn-red { background: rgba(248,81,73,0.15); color: var(--red); border: 1px solid var(--red); }
+  .btn-orange { background: rgba(210,153,34,0.15); color: var(--orange); border: 1px solid var(--orange); }
+  .btn-small { width: auto; padding: 0.3rem 0.6rem; font-size: 0.75rem; border-radius: 6px; }
+  .btn-row { display: flex; gap: 0.75rem; }
+  .btn-row button { flex: 1; }
+  input[type="text"], input[type="password"] { width: 100%; padding: 0.65rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.9rem; margin-bottom: 0.75rem; }
+  input::placeholder { color: var(--muted); }
+  .section { display: none; }
+  .section.visible { display: block; }
+  .divider { display: flex; align-items: center; gap: 0.75rem; margin: 1rem 0; color: var(--muted); font-size: 0.8rem; }
+  .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+  .toast { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); padding: 0.75rem 1.25rem; border-radius: 8px; font-weight: 600; font-size: 0.9rem; opacity: 0; transition: opacity 0.3s; pointer-events: none; max-width: 90vw; text-align: center; z-index: 10; }
   .toast.visible { opacity: 1; }
   .toast.success { background: rgba(63,185,80,0.9); color: #fff; }
   .toast.error { background: rgba(248,81,73,0.9); color: #fff; }
@@ -43,38 +55,66 @@
 <body>
 
 <div class="container">
-  <h1>&#x1f511; Vault Management</h1>
+  <h1 id="page-title">Mux Vault</h1>
 
-  <h2>Status</h2>
+  <!-- Status (always visible) -->
   <div class="card" id="status-card">
-    <div class="status-row">
-      <span class="status-label">State</span>
-      <span class="status-value" id="vault-state">—</span>
+    <div class="row">
+      <span class="label">State</span>
+      <span class="value" id="vault-state"></span>
     </div>
-    <div class="status-row">
-      <span class="status-label">Secrets</span>
-      <span class="status-value" id="vault-secrets">—</span>
+    <div class="row" id="secrets-row" style="display:none">
+      <span class="label">Secrets</span>
+      <span class="value" id="vault-secrets">0</span>
     </div>
-    <div class="status-row">
-      <span class="status-label">Credentials</span>
-      <span class="status-value" id="vault-creds">—</span>
+    <div class="row" id="creds-row" style="display:none">
+      <span class="label">Credentials</span>
+      <span class="value" id="vault-creds">0</span>
     </div>
-    <div class="status-row" id="timer-row" style="display:none">
-      <span class="status-label">Auto-lock in</span>
-      <span class="status-value" id="vault-timer">—</span>
+    <div class="row" id="timer-row" style="display:none">
+      <span class="label">Auto-lock in</span>
+      <span class="value timer" id="vault-timer"></span>
     </div>
   </div>
 
-  <h2>WebAuthn Credentials</h2>
-  <div class="card">
-    <div id="cred-list"><span class="empty">Loading...</span></div>
+  <!-- === UNINITIALIZED state === -->
+  <div class="section" id="section-init">
+    <h2>Initialize Vault</h2>
+    <div class="card">
+      <input type="password" id="init-pass" placeholder="Master passphrase (min. 8 characters)" autocomplete="new-password" />
+      <input type="password" id="init-pass-confirm" placeholder="Confirm passphrase" autocomplete="new-password" />
+      <button class="btn-green" id="btn-init" onclick="initVault()">Initialize Vault</button>
+    </div>
   </div>
 
-  <h2>Register New Credential</h2>
-  <div class="card">
-    <div class="register-form">
-      <input type="text" id="cred-name" placeholder="Credential name (e.g. iPhone FaceID)" autocomplete="off" />
-      <button class="primary" id="btn-register" onclick="register()">Register with WebAuthn</button>
+  <!-- === SEALED state === -->
+  <div class="section" id="section-unlock">
+    <h2>Unlock</h2>
+    <div class="card">
+      <div id="unlock-webauthn" style="display:none">
+        <button class="btn-green" id="btn-webauthn-unlock" onclick="unlockWebAuthn()">Unlock with FaceID / YubiKey</button>
+        <div class="divider">or</div>
+      </div>
+      <input type="password" id="unlock-pass" placeholder="Passphrase" autocomplete="current-password" />
+      <button class="btn-blue" id="btn-passphrase-unlock" onclick="unlockPassphrase()">Unlock with Passphrase</button>
+    </div>
+  </div>
+
+  <!-- === UNLOCKED state === -->
+  <div class="section" id="section-unlocked">
+    <div style="margin-bottom: 1rem;">
+      <button class="btn-orange" id="btn-lock" onclick="lockVault()">Lock Vault</button>
+    </div>
+
+    <h2>WebAuthn Credentials</h2>
+    <div class="card">
+      <div id="cred-list"></div>
+    </div>
+
+    <h2>Register New Credential</h2>
+    <div class="card">
+      <input type="text" id="cred-name" placeholder="Name (e.g. iPhone FaceID, YubiKey NFC)" autocomplete="off" />
+      <button class="btn-blue" id="btn-register" onclick="register()">Register with WebAuthn</button>
     </div>
   </div>
 </div>
@@ -83,53 +123,237 @@
 
 <script>
 // --- State ---
+let currentState = null;
 let refreshInterval;
+let countdownInterval;
+let lockTimeRemaining = 0;
 
 // --- Init ---
-loadStatus();
-loadCredentials();
-refreshInterval = setInterval(loadStatus, 10000);
+refresh();
+refreshInterval = setInterval(refresh, 15000);
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     clearInterval(refreshInterval);
+    clearInterval(countdownInterval);
   } else {
-    loadStatus();
-    refreshInterval = setInterval(loadStatus, 10000);
+    clearInterval(refreshInterval);
+    refresh();
+    refreshInterval = setInterval(refresh, 15000);
   }
 });
 
-// --- Vault status ---
+// Enter key support for forms
+document.getElementById('init-pass-confirm').addEventListener('keydown', e => { if (e.key === 'Enter') initVault(); });
+document.getElementById('unlock-pass').addEventListener('keydown', e => { if (e.key === 'Enter') unlockPassphrase(); });
+
+// --- Main refresh ---
+async function refresh() {
+  await loadStatus();
+  if (currentState === 'unlocked') loadCredentials();
+}
+
+// --- Vault status + UI state ---
 async function loadStatus() {
   try {
     const resp = await fetch('/vault/status');
     const data = await resp.json();
+    currentState = data.state;
 
+    // State badge
     const stateEl = document.getElementById('vault-state');
-    stateEl.textContent = data.state;
-    stateEl.className = 'status-value';
-
+    stateEl.textContent = '';
     const badge = document.createElement('span');
     badge.className = 'badge';
     if (data.state === 'unlocked') badge.className += ' badge-green';
     else if (data.state === 'sealed') badge.className += ' badge-orange';
     else badge.className += ' badge-red';
     badge.textContent = data.state;
-    stateEl.textContent = '';
     stateEl.appendChild(badge);
 
+    // Conditional rows
+    const show = (id, visible) => document.getElementById(id).style.display = visible ? '' : 'none';
+    const isActive = data.state === 'unlocked' || data.state === 'sealed';
+    show('secrets-row', isActive);
+    show('creds-row', isActive);
     document.getElementById('vault-secrets').textContent = data.secret_count;
     document.getElementById('vault-creds').textContent = data.credential_count;
 
-    const timerRow = document.getElementById('timer-row');
+    // Timer
     if (data.inactivity_left) {
-      timerRow.style.display = '';
-      document.getElementById('vault-timer').textContent = data.inactivity_left;
+      show('timer-row', true);
+      const serverSeconds = parseDuration(data.inactivity_left);
+      // Only reset countdown if server value differs significantly (avoids visible jumps)
+      if (Math.abs(serverSeconds - lockTimeRemaining) > 5) startCountdown(serverSeconds);
     } else {
-      timerRow.style.display = 'none';
+      show('timer-row', false);
+      clearInterval(countdownInterval);
+    }
+
+    // Section visibility
+    const sections = ['section-init', 'section-unlock', 'section-unlocked'];
+    sections.forEach(s => document.getElementById(s).classList.remove('visible'));
+
+    if (data.state === 'uninitialized') {
+      document.getElementById('section-init').classList.add('visible');
+    } else if (data.state === 'sealed') {
+      document.getElementById('section-unlock').classList.add('visible');
+      // Show WebAuthn unlock button only if credentials exist
+      show('unlock-webauthn', data.credential_count > 0);
+    } else if (data.state === 'unlocked') {
+      document.getElementById('section-unlocked').classList.add('visible');
     }
   } catch (err) {
-    document.getElementById('vault-state').textContent = 'error';
+    const stateEl = document.getElementById('vault-state');
+    stateEl.textContent = '';
+    const badge = document.createElement('span');
+    badge.className = 'badge badge-red';
+    badge.textContent = 'unreachable';
+    stateEl.appendChild(badge);
+  }
+}
+
+// --- Countdown timer ---
+function parseDuration(str) {
+  let total = 0;
+  const h = str.match(/(\d+)h/);
+  const m = str.match(/(\d+)m/);
+  const s = str.match(/([\d.]+)s/);
+  if (h) total += parseInt(h[1]) * 3600;
+  if (m) total += parseInt(m[1]) * 60;
+  if (s) total += Math.round(parseFloat(s[1]));
+  return total;
+}
+
+function formatDuration(secs) {
+  if (secs <= 0) return '0s';
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  if (m > 0) return m + 'm ' + String(s).padStart(2, '0') + 's';
+  return s + 's';
+}
+
+function startCountdown(seconds) {
+  lockTimeRemaining = seconds;
+  clearInterval(countdownInterval);
+  document.getElementById('vault-timer').textContent = formatDuration(lockTimeRemaining);
+  countdownInterval = setInterval(() => {
+    lockTimeRemaining--;
+    if (lockTimeRemaining <= 0) {
+      clearInterval(countdownInterval);
+      refresh(); // State has likely changed to sealed
+      return;
+    }
+    document.getElementById('vault-timer').textContent = formatDuration(lockTimeRemaining);
+  }, 1000);
+}
+
+// --- Initialize vault ---
+async function initVault() {
+  const pass = document.getElementById('init-pass').value;
+  const confirm = document.getElementById('init-pass-confirm').value;
+  const btn = document.getElementById('btn-init');
+
+  if (!pass || pass.length < 8) { showToast('error', 'Passphrase must be at least 8 characters'); return; }
+  if (pass !== confirm) { showToast('error', 'Passphrases do not match'); return; }
+
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/vault/init', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ passphrase: pass }) });
+    if (!resp.ok) { const err = await resp.json(); throw new Error(err.error || 'Init failed'); }
+    showToast('success', 'Vault initialized and unlocked');
+    document.getElementById('init-pass').value = '';
+    document.getElementById('init-pass-confirm').value = '';
+    refresh();
+  } catch (err) {
+    showToast('error', err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// --- Unlock: Passphrase ---
+async function unlockPassphrase() {
+  const pass = document.getElementById('unlock-pass').value;
+  const btn = document.getElementById('btn-passphrase-unlock');
+  if (!pass) { showToast('error', 'Enter passphrase'); return; }
+
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/vault/unlock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ passphrase: pass }) });
+    if (!resp.ok) { const err = await resp.json(); throw new Error(err.error || 'Unlock failed'); }
+    showToast('success', 'Vault unlocked');
+    document.getElementById('unlock-pass').value = '';
+    refresh();
+  } catch (err) {
+    showToast('error', err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// --- Unlock: WebAuthn ---
+async function unlockWebAuthn() {
+  const btn = document.getElementById('btn-webauthn-unlock');
+  btn.disabled = true;
+  btn.textContent = 'Waiting for authenticator...';
+
+  try {
+    const beginResp = await fetch('/vault/webauthn/login/begin', { method: 'POST' });
+    if (!beginResp.ok) { const err = await beginResp.json(); throw new Error(err.error || 'WebAuthn begin failed'); }
+    const options = await beginResp.json();
+
+    const credential = await navigator.credentials.get({
+      publicKey: {
+        challenge: base64urlToBuffer(options.publicKey.challenge),
+        timeout: options.publicKey.timeout,
+        rpId: options.publicKey.rpId,
+        allowCredentials: (options.publicKey.allowCredentials || []).map(c => ({
+          id: base64urlToBuffer(c.id), type: c.type, transports: c.transports,
+        })),
+        userVerification: options.publicKey.userVerification || 'preferred',
+      }
+    });
+
+    const body = JSON.stringify({
+      id: credential.id,
+      rawId: bufferToBase64url(credential.rawId),
+      type: credential.type,
+      response: {
+        authenticatorData: bufferToBase64url(credential.response.authenticatorData),
+        clientDataJSON: bufferToBase64url(credential.response.clientDataJSON),
+        signature: bufferToBase64url(credential.response.signature),
+        userHandle: credential.response.userHandle ? bufferToBase64url(credential.response.userHandle) : null,
+      }
+    });
+
+    const finishResp = await fetch('/vault/webauthn/login/finish', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+    if (!finishResp.ok) { const err = await finishResp.json(); throw new Error(err.error || 'WebAuthn failed'); }
+
+    showToast('success', 'Vault unlocked via WebAuthn');
+    refresh();
+  } catch (err) {
+    if (err.name === 'NotAllowedError') showToast('error', 'Authentication cancelled');
+    else showToast('error', err.message || 'WebAuthn failed');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Unlock with FaceID / YubiKey';
+  }
+}
+
+// --- Lock ---
+async function lockVault() {
+  const btn = document.getElementById('btn-lock');
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/vault/lock', { method: 'POST' });
+    if (!resp.ok) { const err = await resp.json(); throw new Error(err.error || 'Lock failed'); }
+    showToast('success', 'Vault locked');
+    refresh();
+  } catch (err) {
+    showToast('error', err.message);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -138,15 +362,9 @@ async function loadCredentials() {
   const listEl = document.getElementById('cred-list');
   try {
     const resp = await fetch('/vault/webauthn/credentials');
-    if (!resp.ok) {
-      setEmpty(listEl, 'Vault must be unlocked to view credentials.');
-      return;
-    }
+    if (!resp.ok) { setEmpty(listEl, 'Could not load credentials.'); return; }
     const creds = await resp.json();
-    if (!creds || creds.length === 0) {
-      setEmpty(listEl, 'No credentials registered yet.');
-      return;
-    }
+    if (!creds || creds.length === 0) { setEmpty(listEl, 'No credentials registered yet.'); return; }
     listEl.textContent = '';
     for (const c of creds) {
       const item = document.createElement('div');
@@ -162,17 +380,18 @@ async function loadCredentials() {
 
       const meta = document.createElement('div');
       meta.className = 'cred-meta';
-      const date = c.created_at ? new Date(c.created_at).toLocaleDateString() : '—';
-      meta.textContent = `Registered ${date} · ${c.sign_count} uses`;
+      const date = c.created_at ? new Date(c.created_at).toLocaleDateString() : 'unknown';
+      meta.textContent = 'Registered ' + date + ' \u00b7 ' + c.sign_count + ' uses';
       info.appendChild(meta);
 
+      item.appendChild(info);
+
       const del = document.createElement('button');
-      del.className = 'btn-delete';
+      del.className = 'btn-red btn-small';
       del.textContent = 'Delete';
       del.onclick = () => deleteCredential(c.id, c.name);
-
-      item.appendChild(info);
       item.appendChild(del);
+
       listEl.appendChild(item);
     }
   } catch (err) {
@@ -190,29 +409,18 @@ async function register() {
   btn.textContent = 'Waiting for authenticator...';
 
   try {
-    // Step 1: Get registration options from server
     const beginResp = await fetch('/vault/webauthn/register/begin', { method: 'POST' });
-    if (!beginResp.ok) {
-      const err = await beginResp.json();
-      throw new Error(err.error || 'Registration begin failed');
-    }
+    if (!beginResp.ok) { const err = await beginResp.json(); throw new Error(err.error || 'Registration begin failed'); }
     const options = await beginResp.json();
 
-    // Step 2: Create credential via browser WebAuthn API (triggers FaceID / YubiKey)
-    const publicKeyOptions = options.publicKey;
-    publicKeyOptions.challenge = base64urlToBuffer(publicKeyOptions.challenge);
-    publicKeyOptions.user.id = base64urlToBuffer(publicKeyOptions.user.id);
-    if (publicKeyOptions.excludeCredentials) {
-      publicKeyOptions.excludeCredentials = publicKeyOptions.excludeCredentials.map(c => ({
-        ...c,
-        id: base64urlToBuffer(c.id),
-      }));
-    }
+    const pk = options.publicKey;
+    pk.challenge = base64urlToBuffer(pk.challenge);
+    pk.user.id = base64urlToBuffer(pk.user.id);
+    if (pk.excludeCredentials) pk.excludeCredentials = pk.excludeCredentials.map(c => ({ ...c, id: base64urlToBuffer(c.id) }));
 
-    const credential = await navigator.credentials.create({ publicKey: publicKeyOptions });
+    const credential = await navigator.credentials.create({ publicKey: pk });
 
-    // Step 3: Send attestation to server
-    const attestationBody = JSON.stringify({
+    const body = JSON.stringify({
       id: credential.id,
       rawId: bufferToBase64url(credential.rawId),
       type: credential.type,
@@ -224,27 +432,19 @@ async function register() {
 
     const finishResp = await fetch('/vault/webauthn/register/finish', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Credential-Name': credName },
-      body: attestationBody,
+      headers: { 'Content-Type': 'application/json', 'X-Credential-Name': encodeURIComponent(credName) },
+      body,
     });
-
-    if (!finishResp.ok) {
-      const err = await finishResp.json();
-      throw new Error(err.error || 'Registration finish failed');
-    }
+    if (!finishResp.ok) { const err = await finishResp.json(); throw new Error(err.error || 'Registration failed'); }
 
     const result = await finishResp.json();
-    showToast('success', `Registered: ${result.name}`);
+    showToast('success', 'Registered: ' + result.name);
     nameInput.value = '';
     loadCredentials();
     loadStatus();
-
   } catch (err) {
-    if (err.name === 'NotAllowedError') {
-      showToast('error', 'Authentication cancelled');
-    } else {
-      showToast('error', err.message || 'Registration failed');
-    }
+    if (err.name === 'NotAllowedError') showToast('error', 'Cancelled');
+    else showToast('error', err.message || 'Registration failed');
   } finally {
     btn.disabled = false;
     btn.textContent = 'Register with WebAuthn';
@@ -253,18 +453,15 @@ async function register() {
 
 // --- Delete credential ---
 async function deleteCredential(id, name) {
-  if (!confirm(`Delete credential "${name || id}"?`)) return;
-
+  const displayName = (name || 'Unnamed').slice(0, 50).replace(/[\n\r]/g, ' ');
+  if (!confirm('Delete credential "' + displayName + '"?')) return;
   try {
     const resp = await fetch('/vault/webauthn/credentials/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id }),
     });
-    if (!resp.ok) {
-      const err = await resp.json();
-      throw new Error(err.error || 'Delete failed');
-    }
+    if (!resp.ok) { const err = await resp.json(); throw new Error(err.error || 'Delete failed'); }
     showToast('success', 'Credential deleted');
     loadCredentials();
     loadStatus();
@@ -291,21 +488,21 @@ function setEmpty(el, text) {
 }
 
 // --- base64url helpers ---
-function base64urlToBuffer(base64url) {
-  const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+function base64urlToBuffer(b64) {
+  const base64 = b64.replace(/-/g, '+').replace(/_/g, '/');
   const pad = base64.length % 4;
   const padded = pad ? base64 + '='.repeat(4 - pad) : base64;
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const bin = atob(padded);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return bytes.buffer;
 }
 
-function bufferToBase64url(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+function bufferToBase64url(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
 </script>
 </body>
