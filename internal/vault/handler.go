@@ -40,6 +40,7 @@ func (h *VaultHandlers) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /vault/migrate", handleMigrate(h.v))
 
 	if h.wa != nil {
+		mux.HandleFunc("GET /vault/manage", handleManagePage())
 		mux.HandleFunc("POST /vault/webauthn/register/begin", handleRegBegin(h.wa))
 		mux.HandleFunc("POST /vault/webauthn/register/finish", handleRegFinish(h.wa))
 		mux.HandleFunc("POST /vault/webauthn/login/begin", handleLoginBegin(h.wa))
@@ -57,6 +58,19 @@ func (h *VaultHandlers) Mount(mux *http.ServeMux) {
 // For mounting on multiple muxes, use NewVaultHandlers + Mount instead.
 func RegisterHandlers(mux *http.ServeMux, v *Vault, wa *WebAuthnServer, queue *ApprovalQueue) {
 	NewVaultHandlers(v, wa, queue).Mount(mux)
+}
+
+// --- Page handlers ---
+
+func handleManagePage() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'")
+		io.WriteString(w, managePageHTML)
+	}
 }
 
 // --- Vault core handlers ---
@@ -152,6 +166,10 @@ func handleMigrate(v *Vault) http.HandlerFunc {
 
 func handleRegBegin(wa *WebAuthnServer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if wa.vault.State() != StateUnlocked {
+			writeError(w, http.StatusForbidden, "vault must be unlocked to register credentials")
+			return
+		}
 		options, err := wa.BeginRegistration()
 		if err != nil {
 			writeError(w, http.StatusConflict, err.Error())
@@ -165,14 +183,19 @@ func handleRegBegin(wa *WebAuthnServer) http.HandlerFunc {
 
 func handleRegFinish(wa *WebAuthnServer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if wa.vault.State() != StateUnlocked {
+			writeError(w, http.StatusForbidden, "vault must be unlocked to register credentials")
+			return
+		}
 		body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "read body: "+err.Error())
 			return
 		}
 
-		// Extract credential name from query param (body is the raw WebAuthn response)
-		name := r.URL.Query().Get("name")
+		// Extract credential name from header (body is the raw WebAuthn response).
+		// Header avoids log leakage that query params would cause.
+		name := r.Header.Get("X-Credential-Name")
 		if name == "" {
 			name = "unnamed"
 		}
@@ -228,6 +251,10 @@ func handleLoginFinish(wa *WebAuthnServer) http.HandlerFunc {
 
 func handleCredentials(v *Vault) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if v.State() != StateUnlocked {
+			writeError(w, http.StatusForbidden, "vault must be unlocked")
+			return
+		}
 		creds := v.Credentials()
 		// Strip public key from response (not needed by frontend)
 		type credInfo struct {
@@ -256,6 +283,10 @@ func handleCredentials(v *Vault) http.HandlerFunc {
 
 func handleDeleteCredential(v *Vault) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if v.State() != StateUnlocked {
+			writeError(w, http.StatusForbidden, "vault must be unlocked")
+			return
+		}
 		var req struct {
 			ID string `json:"id"`
 		}

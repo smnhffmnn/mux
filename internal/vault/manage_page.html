@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mux Vault — Manage</title>
+<style>
+  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --green: #3fb950; --orange: #d29922; --red: #f85149; --blue: #58a6ff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 1rem; }
+  .container { max-width: 480px; margin: 0 auto; }
+  h1 { font-size: 1.25rem; margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem; }
+  h2 { font-size: 1rem; margin: 1.5rem 0 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem; }
+  .status-row { display: flex; justify-content: space-between; align-items: center; padding: 0.4rem 0; }
+  .status-row:not(:last-child) { border-bottom: 1px solid var(--border); }
+  .status-label { color: var(--muted); font-size: 0.85rem; }
+  .status-value { font-family: "SF Mono", SFMono-Regular, Consolas, monospace; font-size: 0.85rem; }
+  .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+  .badge-green { background: rgba(63,185,80,0.15); color: var(--green); }
+  .badge-orange { background: rgba(210,153,34,0.15); color: var(--orange); }
+  .badge-red { background: rgba(248,81,73,0.15); color: var(--red); }
+  .cred-item { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 0; }
+  .cred-item:not(:last-child) { border-bottom: 1px solid var(--border); }
+  .cred-info { flex: 1; min-width: 0; }
+  .cred-name { font-weight: 600; font-size: 0.95rem; }
+  .cred-meta { font-size: 0.75rem; color: var(--muted); margin-top: 0.2rem; }
+  .btn-delete { background: none; border: 1px solid var(--red); color: var(--red); padding: 0.3rem 0.6rem; border-radius: 6px; font-size: 0.75rem; cursor: pointer; flex-shrink: 0; margin-left: 0.75rem; }
+  .btn-delete:active { opacity: 0.7; }
+  .empty { color: var(--muted); font-size: 0.9rem; padding: 0.5rem 0; }
+  button.primary { width: 100%; padding: 0.85rem 1rem; border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: opacity 0.2s; background: var(--blue); color: #fff; }
+  button.primary:active { opacity: 0.8; }
+  button.primary:disabled { opacity: 0.4; cursor: not-allowed; }
+  .register-form { margin-bottom: 1rem; }
+  .register-form input { width: 100%; padding: 0.65rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.9rem; margin-bottom: 0.75rem; }
+  .register-form input::placeholder { color: var(--muted); }
+  .toast { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); padding: 0.75rem 1.25rem; border-radius: 8px; font-weight: 600; font-size: 0.9rem; opacity: 0; transition: opacity 0.3s; pointer-events: none; max-width: 90vw; text-align: center; }
+  .toast.visible { opacity: 1; }
+  .toast.success { background: rgba(63,185,80,0.9); color: #fff; }
+  .toast.error { background: rgba(248,81,73,0.9); color: #fff; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1>&#x1f511; Vault Management</h1>
+
+  <h2>Status</h2>
+  <div class="card" id="status-card">
+    <div class="status-row">
+      <span class="status-label">State</span>
+      <span class="status-value" id="vault-state">—</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Secrets</span>
+      <span class="status-value" id="vault-secrets">—</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Credentials</span>
+      <span class="status-value" id="vault-creds">—</span>
+    </div>
+    <div class="status-row" id="timer-row" style="display:none">
+      <span class="status-label">Auto-lock in</span>
+      <span class="status-value" id="vault-timer">—</span>
+    </div>
+  </div>
+
+  <h2>WebAuthn Credentials</h2>
+  <div class="card">
+    <div id="cred-list"><span class="empty">Loading...</span></div>
+  </div>
+
+  <h2>Register New Credential</h2>
+  <div class="card">
+    <div class="register-form">
+      <input type="text" id="cred-name" placeholder="Credential name (e.g. iPhone FaceID)" autocomplete="off" />
+      <button class="primary" id="btn-register" onclick="register()">Register with WebAuthn</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// --- State ---
+let refreshInterval;
+
+// --- Init ---
+loadStatus();
+loadCredentials();
+refreshInterval = setInterval(loadStatus, 10000);
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    clearInterval(refreshInterval);
+  } else {
+    loadStatus();
+    refreshInterval = setInterval(loadStatus, 10000);
+  }
+});
+
+// --- Vault status ---
+async function loadStatus() {
+  try {
+    const resp = await fetch('/vault/status');
+    const data = await resp.json();
+
+    const stateEl = document.getElementById('vault-state');
+    stateEl.textContent = data.state;
+    stateEl.className = 'status-value';
+
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    if (data.state === 'unlocked') badge.className += ' badge-green';
+    else if (data.state === 'sealed') badge.className += ' badge-orange';
+    else badge.className += ' badge-red';
+    badge.textContent = data.state;
+    stateEl.textContent = '';
+    stateEl.appendChild(badge);
+
+    document.getElementById('vault-secrets').textContent = data.secret_count;
+    document.getElementById('vault-creds').textContent = data.credential_count;
+
+    const timerRow = document.getElementById('timer-row');
+    if (data.inactivity_left) {
+      timerRow.style.display = '';
+      document.getElementById('vault-timer').textContent = data.inactivity_left;
+    } else {
+      timerRow.style.display = 'none';
+    }
+  } catch (err) {
+    document.getElementById('vault-state').textContent = 'error';
+  }
+}
+
+// --- Credentials list ---
+async function loadCredentials() {
+  const listEl = document.getElementById('cred-list');
+  try {
+    const resp = await fetch('/vault/webauthn/credentials');
+    if (!resp.ok) {
+      setEmpty(listEl, 'Vault must be unlocked to view credentials.');
+      return;
+    }
+    const creds = await resp.json();
+    if (!creds || creds.length === 0) {
+      setEmpty(listEl, 'No credentials registered yet.');
+      return;
+    }
+    listEl.textContent = '';
+    for (const c of creds) {
+      const item = document.createElement('div');
+      item.className = 'cred-item';
+
+      const info = document.createElement('div');
+      info.className = 'cred-info';
+
+      const name = document.createElement('div');
+      name.className = 'cred-name';
+      name.textContent = c.name || 'Unnamed';
+      info.appendChild(name);
+
+      const meta = document.createElement('div');
+      meta.className = 'cred-meta';
+      const date = c.created_at ? new Date(c.created_at).toLocaleDateString() : '—';
+      meta.textContent = `Registered ${date} · ${c.sign_count} uses`;
+      info.appendChild(meta);
+
+      const del = document.createElement('button');
+      del.className = 'btn-delete';
+      del.textContent = 'Delete';
+      del.onclick = () => deleteCredential(c.id, c.name);
+
+      item.appendChild(info);
+      item.appendChild(del);
+      listEl.appendChild(item);
+    }
+  } catch (err) {
+    setEmpty(listEl, 'Failed to load credentials.');
+  }
+}
+
+// --- Register credential ---
+async function register() {
+  const btn = document.getElementById('btn-register');
+  const nameInput = document.getElementById('cred-name');
+  const credName = nameInput.value.trim() || 'unnamed';
+
+  btn.disabled = true;
+  btn.textContent = 'Waiting for authenticator...';
+
+  try {
+    // Step 1: Get registration options from server
+    const beginResp = await fetch('/vault/webauthn/register/begin', { method: 'POST' });
+    if (!beginResp.ok) {
+      const err = await beginResp.json();
+      throw new Error(err.error || 'Registration begin failed');
+    }
+    const options = await beginResp.json();
+
+    // Step 2: Create credential via browser WebAuthn API (triggers FaceID / YubiKey)
+    const publicKeyOptions = options.publicKey;
+    publicKeyOptions.challenge = base64urlToBuffer(publicKeyOptions.challenge);
+    publicKeyOptions.user.id = base64urlToBuffer(publicKeyOptions.user.id);
+    if (publicKeyOptions.excludeCredentials) {
+      publicKeyOptions.excludeCredentials = publicKeyOptions.excludeCredentials.map(c => ({
+        ...c,
+        id: base64urlToBuffer(c.id),
+      }));
+    }
+
+    const credential = await navigator.credentials.create({ publicKey: publicKeyOptions });
+
+    // Step 3: Send attestation to server
+    const attestationBody = JSON.stringify({
+      id: credential.id,
+      rawId: bufferToBase64url(credential.rawId),
+      type: credential.type,
+      response: {
+        attestationObject: bufferToBase64url(credential.response.attestationObject),
+        clientDataJSON: bufferToBase64url(credential.response.clientDataJSON),
+      },
+    });
+
+    const finishResp = await fetch('/vault/webauthn/register/finish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Credential-Name': credName },
+      body: attestationBody,
+    });
+
+    if (!finishResp.ok) {
+      const err = await finishResp.json();
+      throw new Error(err.error || 'Registration finish failed');
+    }
+
+    const result = await finishResp.json();
+    showToast('success', `Registered: ${result.name}`);
+    nameInput.value = '';
+    loadCredentials();
+    loadStatus();
+
+  } catch (err) {
+    if (err.name === 'NotAllowedError') {
+      showToast('error', 'Authentication cancelled');
+    } else {
+      showToast('error', err.message || 'Registration failed');
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Register with WebAuthn';
+  }
+}
+
+// --- Delete credential ---
+async function deleteCredential(id, name) {
+  if (!confirm(`Delete credential "${name || id}"?`)) return;
+
+  try {
+    const resp = await fetch('/vault/webauthn/credentials/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.error || 'Delete failed');
+    }
+    showToast('success', 'Credential deleted');
+    loadCredentials();
+    loadStatus();
+  } catch (err) {
+    showToast('error', err.message);
+  }
+}
+
+// --- Toast ---
+function showToast(type, message) {
+  const el = document.getElementById('toast');
+  el.textContent = message;
+  el.className = 'toast visible ' + type;
+  setTimeout(() => { el.className = 'toast'; }, 3000);
+}
+
+// --- DOM helpers ---
+function setEmpty(el, text) {
+  el.textContent = '';
+  const span = document.createElement('span');
+  span.className = 'empty';
+  span.textContent = text;
+  el.appendChild(span);
+}
+
+// --- base64url helpers ---
+function base64urlToBuffer(base64url) {
+  const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = base64.length % 4;
+  const padded = pad ? base64 + '='.repeat(4 - pad) : base64;
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function bufferToBase64url(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+</script>
+</body>
+</html>
