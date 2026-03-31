@@ -356,7 +356,9 @@ func startHTTPServer(s *server.MCPServer, cfg *config.Config, localRoutes, tlsRo
 	go func() {
 		log.Printf("[mux] Starting HTTP server on %s", httpAddr)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP server error: %v", err)
+			log.Printf("[mux] HTTP server error: %v", err)
+			p, _ := os.FindProcess(os.Getpid())
+			p.Signal(syscall.SIGTERM)
 		}
 	}()
 	log.Printf("[mux] MCP available at http://localhost:%d/mcp", cfg.Server.Port)
@@ -388,7 +390,9 @@ func startHTTPServer(s *server.MCPServer, cfg *config.Config, localRoutes, tlsRo
 			keyPath := config.ExpandHome(cfg.Server.TLSKey)
 			log.Printf("[mux] Starting HTTPS server on %s (TLS)", httpsAddr)
 			if err := httpsSrv.ListenAndServeTLS(certPath, keyPath); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("HTTPS server error: %v", err)
+				log.Printf("[mux] HTTPS server error: %v", err)
+				p, _ := os.FindProcess(os.Getpid())
+				p.Signal(syscall.SIGTERM)
 			}
 		}()
 		servers.https = httpsSrv
