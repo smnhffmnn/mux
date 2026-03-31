@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 
@@ -154,7 +155,11 @@ More info: https://github.com/smnhffmnn/mux
 
 			baseURL := cfg.Vault.BaseURL
 			if baseURL == "" {
-				baseURL = fmt.Sprintf("http://localhost:%d", cfg.Server.Port)
+				if cfg.Server.TLSCert != "" && cfg.Server.TLSKey != "" {
+					baseURL = fmt.Sprintf("https://localhost:%d", cfg.Server.EffectiveTLSPort())
+				} else {
+					baseURL = fmt.Sprintf("http://localhost:%d", cfg.Server.Port)
+				}
 			}
 			approvalQueue = vault.NewApprovalQueue(notifier, baseURL)
 			log.Println("[vault] Approval queue initialized")
@@ -250,12 +255,13 @@ More info: https://github.com/smnhffmnn/mux
 
 		registerConfigTools(s, cfg, tm)
 
-		httpSrv := startHTTPServer(s, cfg, func(mux *http.ServeMux) {
-			if vlt != nil {
-				vault.RegisterHandlers(mux, vlt, waServer, approvalQueue)
-				log.Println("[mux] Vault HTTP endpoints registered on /vault/*")
-			}
-		})
+		var vaultRoutes func(*http.ServeMux)
+		if vlt != nil {
+			vh := vault.NewVaultHandlers(vlt, waServer, approvalQueue)
+			vaultRoutes = func(mux *http.ServeMux) { vh.Mount(mux) }
+			log.Println("[mux] Vault HTTP endpoints registered on /vault/*")
+		}
+		servers := startHTTPServer(s, cfg, vaultRoutes, vaultRoutes)
 
 		// Block until SIGINT/SIGTERM
 		sigCh := make(chan os.Signal, 1)
@@ -264,7 +270,7 @@ More info: https://github.com/smnhffmnn/mux
 		log.Println("[mux] Shutting down...")
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
-		httpSrv.Shutdown(shutdownCtx)
+		servers.Shutdown(shutdownCtx)
 		cancel()
 		return
 	}
@@ -283,59 +289,110 @@ func registerConfigTools(s *server.MCPServer, cfg *config.Config, tm *tunnelMana
 	}
 }
 
-// startHTTPServer creates and starts the MCP HTTP server.
-// If TLS cert+key are configured, serves HTTPS on 0.0.0.0 (for Tailscale access).
-// Otherwise, serves plain HTTP on localhost only.
-func startHTTPServer(s *server.MCPServer, cfg *config.Config, extraRoutes func(*http.ServeMux)) *http.Server {
-	mux := http.NewServeMux()
+// httpServers holds one or two HTTP servers for coordinated shutdown.
+type httpServers struct {
+	http  *http.Server // always present: plain HTTP on localhost
+	https *http.Server // nil when TLS is not configured
+}
 
-	mcpHandler := server.NewStreamableHTTPServer(s)
-	mux.Handle("/mcp", mcpHandler)
-
-	if extraRoutes != nil {
-		extraRoutes(mux)
+// Shutdown gracefully shuts down all servers in parallel.
+func (s *httpServers) Shutdown(ctx context.Context) {
+	var wg sync.WaitGroup
+	n := 1
+	if s.https != nil {
+		n = 2
 	}
-
-	useTLS := cfg.Server.TLSCert != "" && cfg.Server.TLSKey != ""
-
-	var addr string
-	if useTLS {
-		// TLS: bind to all interfaces (Tailscale, LAN)
-		addr = fmt.Sprintf(":%d", cfg.Server.Port)
-	} else {
-		// Plain HTTP: localhost only
-		addr = fmt.Sprintf("127.0.0.1:%d", cfg.Server.Port)
-	}
-
-	httpSrv := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		MaxHeaderBytes:    1 << 20, // 1 MB
-	}
-
+	wg.Add(n)
 	go func() {
-		if useTLS {
-			certPath := config.ExpandHome(cfg.Server.TLSCert)
-			keyPath := config.ExpandHome(cfg.Server.TLSKey)
-			log.Printf("[mux] Starting HTTPS server on %s (TLS)", addr)
-			if err := httpSrv.ListenAndServeTLS(certPath, keyPath); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("HTTPS server error: %v", err)
-			}
-		} else {
-			log.Printf("[mux] Starting HTTP server on %s", addr)
-			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("HTTP server error: %v", err)
-			}
+		defer wg.Done()
+		if err := s.http.Shutdown(ctx); err != nil {
+			log.Printf("[mux] HTTP shutdown error: %v", err)
 		}
 	}()
-
-	scheme := "http"
-	if useTLS {
-		scheme = "https"
+	if s.https != nil {
+		go func() {
+			defer wg.Done()
+			if err := s.https.Shutdown(ctx); err != nil {
+				log.Printf("[mux] HTTPS shutdown error: %v", err)
+			}
+		}()
 	}
-	log.Printf("[mux] MCP available at %s://localhost:%d/mcp", scheme, cfg.Server.Port)
-	return httpSrv
+	wg.Wait()
+}
+
+// startHTTPServer creates and starts the MCP HTTP server(s).
+//
+// Plain HTTP always listens on localhost:port for local MCP clients (including /mcp).
+// When TLS is configured, a second HTTPS server listens on 0.0.0.0:tls_port
+// for external endpoints (reachable via Tailscale/LAN). /mcp is NOT exposed externally.
+//
+// localRoutes are mounted on the HTTP server (localhost only).
+// tlsRoutes are mounted on the HTTPS server (all interfaces). May be nil.
+func startHTTPServer(s *server.MCPServer, cfg *config.Config, localRoutes, tlsRoutes func(*http.ServeMux)) *httpServers {
+	httpMux := http.NewServeMux()
+
+	mcpHandler := server.NewStreamableHTTPServer(s)
+	httpMux.Handle("/mcp", mcpHandler)
+
+	if localRoutes != nil {
+		localRoutes(httpMux)
+	}
+
+	timeouts := func() (time.Duration, time.Duration, time.Duration) {
+		return 10 * time.Second, 30 * time.Second, 60 * time.Second
+	}
+
+	// Plain HTTP: always localhost-only (MCP + local routes)
+	httpAddr := fmt.Sprintf("127.0.0.1:%d", cfg.Server.Port)
+	rht, rt, wt := timeouts()
+	httpSrv := &http.Server{
+		Addr:              httpAddr,
+		Handler:           httpMux,
+		ReadHeaderTimeout: rht,
+		ReadTimeout:       rt,
+		WriteTimeout:      wt,
+		MaxHeaderBytes:    1 << 20,
+	}
+	go func() {
+		log.Printf("[mux] Starting HTTP server on %s", httpAddr)
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HTTP server error: %v", err)
+		}
+	}()
+	log.Printf("[mux] MCP available at http://localhost:%d/mcp", cfg.Server.Port)
+
+	servers := &httpServers{http: httpSrv}
+
+	// HTTPS: only when TLS is configured, on all interfaces.
+	// Separate mux with tlsRoutes only — /mcp is NOT exposed.
+	if cfg.Server.TLSCert != "" && cfg.Server.TLSKey != "" {
+		tlsPort := cfg.Server.EffectiveTLSPort()
+
+		httpsMux := http.NewServeMux()
+		if tlsRoutes != nil {
+			tlsRoutes(httpsMux)
+		}
+
+		httpsAddr := fmt.Sprintf(":%d", tlsPort)
+		rht, rt, wt := timeouts()
+		httpsSrv := &http.Server{
+			Addr:              httpsAddr,
+			Handler:           httpsMux,
+			ReadHeaderTimeout: rht,
+			ReadTimeout:       rt,
+			WriteTimeout:      wt,
+			MaxHeaderBytes:    1 << 20,
+		}
+		go func() {
+			certPath := config.ExpandHome(cfg.Server.TLSCert)
+			keyPath := config.ExpandHome(cfg.Server.TLSKey)
+			log.Printf("[mux] Starting HTTPS server on %s (TLS)", httpsAddr)
+			if err := httpsSrv.ListenAndServeTLS(certPath, keyPath); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("HTTPS server error: %v", err)
+			}
+		}()
+		servers.https = httpsSrv
+	}
+
+	return servers
 }

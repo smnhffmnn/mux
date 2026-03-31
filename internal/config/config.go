@@ -121,6 +121,15 @@ type ServerConfig struct {
 	Port    int    `toml:"port"`
 	TLSCert string `toml:"tls_cert,omitempty" json:"tlsCert,omitempty"` // path to TLS certificate
 	TLSKey  string `toml:"tls_key,omitempty" json:"tlsKey,omitempty"`   // path to TLS private key
+	TLSPort int    `toml:"tls_port,omitempty" json:"tlsPort,omitempty"` // HTTPS port for WebAuthn/Vault (default: port + 1)
+}
+
+// EffectiveTLSPort returns the configured TLS port, defaulting to Port + 1.
+func (s ServerConfig) EffectiveTLSPort() int {
+	if s.TLSPort != 0 {
+		return s.TLSPort
+	}
+	return s.Port + 1
 }
 
 // VaultConfig holds settings for the encrypted secret vault.

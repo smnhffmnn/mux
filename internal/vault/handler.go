@@ -8,32 +8,55 @@ import (
 	"time"
 )
 
-// RegisterHandlers mounts all vault HTTP endpoints on the given mux.
-// The approval queue is optional (nil = no approval endpoints).
+// VaultHandlers holds pre-built HTTP handlers with shared rate limiters.
+// Create once with NewVaultHandlers, then mount on one or more muxes.
+type VaultHandlers struct {
+	v     *Vault
+	wa    *WebAuthnServer
+	queue *ApprovalQueue
+
+	passphraseLimiter *RateLimiter
+	webauthnLimiter   *RateLimiter
+}
+
+// NewVaultHandlers creates handlers with shared rate limiters.
+func NewVaultHandlers(v *Vault, wa *WebAuthnServer, queue *ApprovalQueue) *VaultHandlers {
+	return &VaultHandlers{
+		v:                 v,
+		wa:                wa,
+		queue:             queue,
+		passphraseLimiter: NewRateLimiter(5, 1*time.Minute),
+		webauthnLimiter:   NewRateLimiter(5, 1*time.Minute),
+	}
+}
+
+// Mount registers all vault HTTP endpoints on the given mux.
+// Safe to call on multiple muxes — rate limiters are shared.
+func (h *VaultHandlers) Mount(mux *http.ServeMux) {
+	mux.HandleFunc("GET /vault/status", handleStatus(h.v))
+	mux.HandleFunc("POST /vault/init", handleInit(h.v))
+	mux.HandleFunc("POST /vault/unlock", h.passphraseLimiter.Wrap(handleUnlock(h.v)))
+	mux.HandleFunc("POST /vault/lock", handleLock(h.v))
+	mux.HandleFunc("POST /vault/migrate", handleMigrate(h.v))
+
+	if h.wa != nil {
+		mux.HandleFunc("POST /vault/webauthn/register/begin", handleRegBegin(h.wa))
+		mux.HandleFunc("POST /vault/webauthn/register/finish", handleRegFinish(h.wa))
+		mux.HandleFunc("POST /vault/webauthn/login/begin", handleLoginBegin(h.wa))
+		mux.HandleFunc("POST /vault/webauthn/login/finish", h.webauthnLimiter.Wrap(handleLoginFinish(h.wa)))
+		mux.HandleFunc("GET /vault/webauthn/credentials", handleCredentials(h.v))
+		mux.HandleFunc("POST /vault/webauthn/credentials/delete", handleDeleteCredential(h.v))
+	}
+
+	if h.queue != nil {
+		RegisterApprovalHandlers(mux, h.queue, h.v)
+	}
+}
+
+// RegisterHandlers is a convenience wrapper that creates handlers and mounts them.
+// For mounting on multiple muxes, use NewVaultHandlers + Mount instead.
 func RegisterHandlers(mux *http.ServeMux, v *Vault, wa *WebAuthnServer, queue *ApprovalQueue) {
-	// Separate rate limiters for passphrase and WebAuthn auth (5 attempts per minute each)
-	passphraseLimiter := NewRateLimiter(5, 1*time.Minute)
-	webauthnLimiter := NewRateLimiter(5, 1*time.Minute)
-
-	mux.HandleFunc("GET /vault/status", handleStatus(v))
-	mux.HandleFunc("POST /vault/init", handleInit(v))
-	mux.HandleFunc("POST /vault/unlock", passphraseLimiter.Wrap(handleUnlock(v)))
-	mux.HandleFunc("POST /vault/lock", handleLock(v))
-	mux.HandleFunc("POST /vault/migrate", handleMigrate(v))
-
-	if wa != nil {
-		mux.HandleFunc("POST /vault/webauthn/register/begin", handleRegBegin(wa))
-		mux.HandleFunc("POST /vault/webauthn/register/finish", handleRegFinish(wa))
-		mux.HandleFunc("POST /vault/webauthn/login/begin", handleLoginBegin(wa))
-		mux.HandleFunc("POST /vault/webauthn/login/finish", webauthnLimiter.Wrap(handleLoginFinish(wa)))
-		mux.HandleFunc("GET /vault/webauthn/credentials", handleCredentials(v))
-		mux.HandleFunc("POST /vault/webauthn/credentials/delete", handleDeleteCredential(v))
-	}
-
-	if queue != nil {
-		RegisterApprovalHandlers(mux, queue, v)
-		log.Println("[vault] Approval endpoints registered on /vault/approval/*")
-	}
+	NewVaultHandlers(v, wa, queue).Mount(mux)
 }
 
 // --- Vault core handlers ---

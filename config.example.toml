@@ -4,9 +4,10 @@
 # or set as environment variables — they are NOT stored in this file.
 
 [server]
-port = 7700
-# tls_cert = "/path/to/cert.pem"           # TLS certificate (required for WebAuthn)
+port = 7700                                  # HTTP port (always localhost, for MCP clients)
+# tls_cert = "/path/to/cert.pem"           # TLS certificate — enables HTTPS server for WebAuthn/Vault
 # tls_key = "/path/to/key.pem"             # TLS private key
+# tls_port = 7701                          # HTTPS port (default: port + 1), binds to all interfaces
 
 # --- Encrypted Vault (optional) ---
 # Hardware-security-grade secret storage with WebAuthn/FIDO2 unlock.
@@ -16,8 +17,8 @@ port = 7700
 # exclusive = true                          # skip legacy keyring/file writes
 # inactivity_timeout = "30m"               # auto-lock after inactivity
 # webauthn_rp_id = "mux.example.com"       # WebAuthn Relying Party ID (your hostname)
-# webauthn_origins = ["https://mux.example.com:7700"]
-# base_url = "https://mux.example.com:7700" # public URL for approval links
+# webauthn_origins = ["https://mux.example.com:7701"]
+# base_url = "https://mux.example.com:7701" # public URL for approval links
 # Discord webhook for approval notifications:
 #   secret_set key=vault-discord-webhook value=https://discord.com/api/webhooks/...
 

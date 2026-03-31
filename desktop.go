@@ -31,13 +31,23 @@ func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx 
 		log.Printf("[mux] Registered: %s", t.Tool.Name)
 	}
 
-	httpSrv := startHTTPServer(s, cfg, func(mux *http.ServeMux) {
+	var vh *vault.VaultHandlers
+	if vlt != nil {
+		vh = vault.NewVaultHandlers(vlt, waServer, approvalQueue)
+		log.Println("[mux] Vault HTTP endpoints registered on /vault/*")
+	}
+
+	localRoutes := func(mux *http.ServeMux) {
 		mux.HandleFunc("/oauth/callback", app.oauthCallbackHandler())
-		if vlt != nil {
-			vault.RegisterHandlers(mux, vlt, waServer, approvalQueue)
-			log.Println("[mux] Vault HTTP endpoints registered on /vault/*")
+		if vh != nil {
+			vh.Mount(mux)
 		}
-	})
+	}
+	var tlsRoutes func(*http.ServeMux)
+	if vh != nil {
+		tlsRoutes = func(mux *http.ServeMux) { vh.Mount(mux) }
+	}
+	servers := startHTTPServer(s, cfg, localRoutes, tlsRoutes)
 
 	// Create Wails v3 application
 	wailsApp := application.New(application.Options{
@@ -66,7 +76,7 @@ func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx 
 		log.Println("[mux] Shutting down...")
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
-		httpSrv.Shutdown(shutdownCtx)
+		servers.Shutdown(shutdownCtx)
 		cancel()
 		wailsApp.Quit()
 	}()

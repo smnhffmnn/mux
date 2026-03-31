@@ -169,18 +169,21 @@ The vault is an opt-in feature that encrypts all secrets at rest using AES-256-G
 
 ```toml
 [server]
-port = 7700
-tls_cert = "/path/to/cert.pem"   # required for WebAuthn (HTTPS)
+port = 7700                        # HTTP (localhost only, for MCP clients)
+tls_cert = "/path/to/cert.pem"    # enables HTTPS server for WebAuthn/Vault
 tls_key = "/path/to/key.pem"
+tls_port = 7701                    # HTTPS port (default: port + 1), all interfaces
 
 [vault]
 enabled = true
-exclusive = true                  # secrets only in vault, not in legacy keyring/file
+exclusive = true                   # secrets only in vault, not in legacy keyring/file
 inactivity_timeout = "30m"
 webauthn_rp_id = "mux.example.com"
-webauthn_origins = ["https://mux.example.com:7700"]
-base_url = "https://mux.example.com:7700"
+webauthn_origins = ["https://mux.example.com:7701"]
+base_url = "https://mux.example.com:7701"
 ```
+
+The dual-port architecture keeps MCP clients (`.mcp.json`) on plain HTTP localhost — unchanged across machines. The HTTPS port is only needed for browser-based WebAuthn and Vault unlock, reachable via Tailscale or LAN.
 
 ### Unlock Methods
 
