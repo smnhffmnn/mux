@@ -958,11 +958,21 @@ func (a *App) StartOAuth(name string) (*OAuthStartResult, error) {
 	adapter := proxy.NewKeychainTokenAdapter(tokenStore)
 	clientID, clientSecret := config.LoadOAuthClientID(conn.Name)
 
+	var scopes []string
+	if conn.Scopes != "" {
+		for _, s := range strings.Split(conn.Scopes, " ") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				scopes = append(scopes, s)
+			}
+		}
+	}
+
 	oauthCfg := transport.OAuthConfig{
 		ClientID:              clientID,
 		ClientSecret:          clientSecret,
 		RedirectURI:           redirectURI,
-		Scopes:                []string{},
+		Scopes:                scopes,
 		TokenStore:            adapter,
 		PKCEEnabled:           true,
 		AuthServerMetadataURL: metadataURL,
