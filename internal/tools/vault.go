@@ -31,6 +31,29 @@ func (vt *VaultTools) Tools() []ToolDef {
 		vt.unlockTool(),
 		vt.lockTool(),
 		vt.migrateTool(),
+		vt.sshStatusTool(),
+		vt.sshLoadTool(),
+	}
+}
+
+func (vt *VaultTools) sshStatusTool() ToolDef {
+	return ToolDef{
+		Tool: mcp.NewTool("vault_ssh_status",
+			mcp.WithDescription("Show SSH key status: whether a key is stored in the vault and whether it's currently loaded in the ssh-agent."),
+		),
+		Handler: vt.handleSSHStatus,
+	}
+}
+
+func (vt *VaultTools) sshLoadTool() ToolDef {
+	return ToolDef{
+		Tool: mcp.NewTool("vault_ssh_load",
+			mcp.WithDescription("Load the SSH private key from the vault into the ssh-agent with a temporary lifetime. The key auto-expires from the agent after the specified duration. Vault must be unlocked."),
+			mcp.WithNumber("lifetime_secs",
+				mcp.Description("How long the key stays in the agent (seconds). Default: 120. Key is automatically removed after this time."),
+			),
+		),
+		Handler: vt.handleSSHLoad,
 	}
 }
 
@@ -130,6 +153,29 @@ func (vt *VaultTools) handleUnlock(_ context.Context, req mcp.CallToolRequest) (
 func (vt *VaultTools) handleLock(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	vt.vault.Lock()
 	return mcp.NewToolResultText("Vault locked. All secrets are now inaccessible."), nil
+}
+
+func (vt *VaultTools) handleSSHStatus(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	mgr := vault.NewSSHManager(vt.vault)
+	status := mgr.Status()
+	data, _ := json.MarshalIndent(status, "", "  ")
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+func (vt *VaultTools) handleSSHLoad(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	lifetime := uint32(req.GetFloat("lifetime_secs", 0))
+
+	mgr := vault.NewSSHManager(vt.vault)
+	fingerprint, err := mgr.Load(lifetime)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	effectiveLifetime := lifetime
+	if effectiveLifetime == 0 {
+		effectiveLifetime = 120 // default from ssh.go
+	}
+	return mcp.NewToolResultText(fmt.Sprintf("SSH key loaded into agent (fingerprint: %s). Auto-expires in %d seconds.", fingerprint, effectiveLifetime)), nil
 }
 
 func (vt *VaultTools) handleMigrate(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {

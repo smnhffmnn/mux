@@ -55,6 +55,18 @@ func (h *VaultHandlers) Mount(mux *http.ServeMux) {
 	}
 }
 
+// MountSSH registers SSH key management endpoints.
+// These are localhost-only — never expose on the external HTTPS server
+// (import can read files from disk, load injects keys into the agent).
+func (h *VaultHandlers) MountSSH(mux *http.ServeMux) {
+	sshMgr := NewSSHManager(h.v)
+	mux.HandleFunc("GET /vault/ssh/status", handleSSHStatus(sshMgr))
+	mux.HandleFunc("POST /vault/ssh/load", handleSSHLoad(sshMgr))
+	mux.HandleFunc("POST /vault/ssh/unload", handleSSHUnload(sshMgr))
+	mux.HandleFunc("POST /vault/ssh/import", handleSSHImport(sshMgr))
+	mux.HandleFunc("GET /vault/ssh/public-key", handleSSHPublicKey(sshMgr))
+}
+
 // RegisterHandlers is a convenience wrapper that creates handlers and mounts them.
 // For mounting on multiple muxes, use NewVaultHandlers + Mount instead.
 func RegisterHandlers(mux *http.ServeMux, v *Vault, wa *WebAuthnServer, queue *ApprovalQueue) {
@@ -306,6 +318,94 @@ func handleDeleteCredential(v *Vault) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	}
+}
+
+// --- SSH key handlers ---
+
+func handleSSHStatus(mgr *SSHManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, mgr.Status())
+	}
+}
+
+func handleSSHLoad(mgr *SSHManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			LifetimeSecs uint32 `json:"lifetime_secs"`
+		}
+		readJSON(r, &req) // optional body
+
+		fingerprint, err := mgr.Load(req.LifetimeSecs)
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+
+		log.Printf("[vault] SSH key loaded into agent (fingerprint: %s)", fingerprint)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":      "loaded",
+			"fingerprint": fingerprint,
+		})
+	}
+}
+
+func handleSSHUnload(mgr *SSHManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := mgr.Unload(); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		log.Println("[vault] SSH key removed from agent")
+		writeJSON(w, http.StatusOK, map[string]string{"status": "unloaded"})
+	}
+}
+
+func handleSSHImport(mgr *SSHManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			KeyPath    string `json:"key_path"`    // path to key file (must be under ~/.ssh/)
+			KeyData    string `json:"key_data"`    // raw PEM key content (alternative to key_path)
+			Passphrase string `json:"passphrase"`
+		}
+		if !readJSON(r, &req) {
+			writeError(w, http.StatusBadRequest, "invalid request")
+			return
+		}
+
+		input := req.KeyData
+		if input == "" {
+			input = req.KeyPath
+		}
+		if input == "" {
+			writeError(w, http.StatusBadRequest, "key_data or key_path required")
+			return
+		}
+
+		fingerprint, err := mgr.Import(input, req.Passphrase)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		log.Printf("[vault] SSH key imported (fingerprint: %s)", fingerprint)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":      "imported",
+			"fingerprint": fingerprint,
+		})
+	}
+}
+
+func handleSSHPublicKey(mgr *SSHManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pubKey, err := mgr.PublicKey()
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, pubKey)
 	}
 }
 

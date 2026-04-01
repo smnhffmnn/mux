@@ -268,13 +268,18 @@ More info: https://github.com/smnhffmnn/mux
 
 		registerConfigTools(s, cfg, tm)
 
-		var vaultRoutes func(*http.ServeMux)
+		var localRoutes, tlsRoutes func(*http.ServeMux)
 		if vlt != nil {
 			vh := vault.NewVaultHandlers(vlt, waServer, approvalQueue)
-			vaultRoutes = func(mux *http.ServeMux) { vh.Mount(mux) }
+			// Local: vault + SSH endpoints. TLS: vault only (SSH is localhost-only for security).
+			localRoutes = func(mux *http.ServeMux) {
+				vh.Mount(mux)
+				vh.MountSSH(mux)
+			}
+			tlsRoutes = func(mux *http.ServeMux) { vh.Mount(mux) }
 			log.Println("[mux] Vault HTTP endpoints registered on /vault/*")
 		}
-		servers := startHTTPServer(s, cfg, vaultRoutes, vaultRoutes)
+		servers := startHTTPServer(s, cfg, localRoutes, tlsRoutes)
 
 		// Block until SIGINT/SIGTERM
 		sigCh := make(chan os.Signal, 1)
