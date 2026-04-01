@@ -737,7 +737,11 @@ func DeleteSecret(key string) error {
 
 // ValidSecretKey checks that a keychain key matches known mux patterns.
 func ValidSecretKey(key string) bool {
-	if key == "provisioning-token" || key == "vault-discord-webhook" {
+	if key == "provisioning-token" {
+		return true
+	}
+	// Vault internal secrets (notification config, etc.)
+	if strings.HasPrefix(key, "vault-") {
 		return true
 	}
 	if strings.HasSuffix(key, "-password") ||
