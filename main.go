@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
@@ -125,6 +126,8 @@ More info: https://github.com/smnhffmnn/mux
 			if cfg.Vault.Exclusive {
 				config.SetVaultExclusive(true)
 				log.Println("[vault] Exclusive mode: secrets only in vault, not in legacy stores")
+			} else {
+				log.Println("[vault] Warning: exclusive mode is off — secrets are also written to plaintext secrets.toml")
 			}
 			log.Printf("[vault] State: %s (%d secrets stored)", vlt.State(), vlt.Status().SecretCount)
 
@@ -394,6 +397,9 @@ func startHTTPServer(s *server.MCPServer, cfg *config.Config, localRoutes, tlsRo
 			ReadTimeout:       rt,
 			WriteTimeout:      wt,
 			MaxHeaderBytes:    1 << 20,
+			TLSConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
 		}
 		go func() {
 			certPath := config.ExpandHome(cfg.Server.TLSCert)

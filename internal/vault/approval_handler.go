@@ -9,16 +9,22 @@ import (
 
 // RegisterApprovalHandlers mounts approval-related HTTP endpoints.
 func RegisterApprovalHandlers(mux *http.ServeMux, queue *ApprovalQueue, v *Vault) {
-	mux.HandleFunc("POST /vault/approval", handleCreateApproval(queue))
+	mux.HandleFunc("POST /vault/approval", handleCreateApproval(queue, v))
 	mux.HandleFunc("GET /vault/approval/{id}", handleGetApproval(queue))
 	mux.HandleFunc("POST /vault/approval/{id}/grant", handleGrantApproval(queue, v))
-	mux.HandleFunc("POST /vault/approval/{id}/deny", handleDenyApproval(queue))
+	mux.HandleFunc("POST /vault/approval/{id}/deny", handleDenyApproval(queue, v))
 	mux.HandleFunc("GET /vault/approve/{id}", handleApprovePage())
 	mux.HandleFunc("GET /vault/approvals", handleListApprovals(queue))
 }
 
-func handleCreateApproval(queue *ApprovalQueue) http.HandlerFunc {
+func handleCreateApproval(queue *ApprovalQueue, v *Vault) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Creating approvals requires the vault to be unlocked (prevents notification spam)
+		if v != nil && v.State() != StateUnlocked {
+			writeError(w, http.StatusForbidden, "vault must be unlocked to create approvals")
+			return
+		}
+
 		var req struct {
 			Action    string `json:"action"`
 			Context   string `json:"context"`
@@ -89,11 +95,17 @@ func handleGrantApproval(queue *ApprovalQueue, v *Vault) http.HandlerFunc {
 	}
 }
 
-func handleDenyApproval(queue *ApprovalQueue) http.HandlerFunc {
+func handleDenyApproval(queue *ApprovalQueue, v *Vault) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if id == "" {
 			writeError(w, http.StatusBadRequest, "approval id required")
+			return
+		}
+
+		// Require vault to be unlocked (prevents unauthenticated denial-of-service)
+		if v != nil && v.State() != StateUnlocked {
+			writeError(w, http.StatusUnauthorized, "vault must be unlocked to deny approvals")
 			return
 		}
 

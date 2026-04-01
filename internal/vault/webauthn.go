@@ -68,6 +68,8 @@ func (s *WebAuthnServer) BeginRegistration() ([]byte, error) {
 	}
 
 	s.sessionMu.Lock()
+	// Single-user vault: clear any stale sessions before adding new one
+	clear(s.regSessions)
 	s.regSessions[session.Challenge] = session
 	s.sessionMu.Unlock()
 
@@ -139,6 +141,8 @@ func (s *WebAuthnServer) BeginLogin() ([]byte, error) {
 	}
 
 	s.sessionMu.Lock()
+	// Single-user vault: clear any stale sessions before adding new one
+	clear(s.authSessions)
 	s.authSessions[session.Challenge] = session
 	s.sessionMu.Unlock()
 

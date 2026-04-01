@@ -555,7 +555,7 @@ func (v *Vault) IssueSessionToken() (string, error) {
 // Rejects tokens older than sessionTokenTTL.
 func (v *Vault) ValidateSessionToken(token string) bool {
 	current, ok := v.sessionToken.Load().(string)
-	if !ok || current == "" || len(current) != len(token) {
+	if !ok || current == "" {
 		return false
 	}
 	// Check TTL
