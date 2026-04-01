@@ -4,15 +4,7 @@
 
 If you discover a security vulnerability in mux, **please do not open a public issue.**
 
-Instead, report it privately via email to: **security@wvmd.de**
-
-Include:
-- A description of the vulnerability
-- Steps to reproduce
-- Potential impact
-- Suggested fix (if you have one)
-
-We aim to respond within 48 hours and will coordinate a fix before public disclosure.
+Instead, use [GitHub's private vulnerability reporting](https://github.com/smnhffmnn/mux/security/advisories/new) to submit a report. This allows coordinated discussion and fix preparation before public disclosure.
 
 ## Scope
 
