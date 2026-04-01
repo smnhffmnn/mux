@@ -143,12 +143,22 @@ More info: https://github.com/smnhffmnn/mux
 				}
 			}
 
-			// Approval queue + notifier
-			var notifier vault.Notifier
+			// Approval queue + notifier(s)
+			var notifiers []vault.Notifier
+			tgToken, _ := config.GetSecret("vault-telegram-bot-token")
+			tgChatID, _ := config.GetSecret("vault-telegram-chat-id")
+			if tgToken != "" && tgChatID != "" {
+				notifiers = append(notifiers, vault.NewTelegramNotifier(tgToken, tgChatID))
+				log.Println("[vault] Telegram notifier configured")
+			}
 			discordWebhook, _ := config.GetSecret("vault-discord-webhook")
 			if discordWebhook != "" {
-				notifier = vault.NewDiscordWebhookNotifier(discordWebhook)
+				notifiers = append(notifiers, vault.NewDiscordWebhookNotifier(discordWebhook))
 				log.Println("[vault] Discord webhook notifier configured")
+			}
+			var notifier vault.Notifier
+			if len(notifiers) > 0 {
+				notifier = vault.NewMultiNotifier(notifiers...)
 			} else {
 				notifier = &vault.LogNotifier{}
 			}

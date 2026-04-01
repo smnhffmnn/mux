@@ -19,8 +19,10 @@ port = 7700                                  # HTTP port (always localhost, for 
 # webauthn_rp_id = "mux.example.com"       # WebAuthn Relying Party ID (your hostname)
 # webauthn_origins = ["https://mux.example.com:7701"]
 # base_url = "https://mux.example.com:7701" # public URL for approval links
-# Discord webhook for approval notifications:
-#   secret_set key=vault-discord-webhook value=https://discord.com/api/webhooks/...
+# Approval notifications (set secrets via MCP secret_set tool):
+#   Telegram: secret_set key=vault-telegram-bot-token value=123:ABC...
+#             secret_set key=vault-telegram-chat-id value=-100123456789
+#   Discord:  secret_set key=vault-discord-webhook value=https://discord.com/api/webhooks/...
 
 # Remote Provisioning (optional)
 # Fetches connections and tunnels from a central provisioning server.

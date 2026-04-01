@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -72,6 +73,80 @@ func (n *DiscordWebhookNotifier) SendApprovalRequest(req ApprovalRequest, approv
 	log.Printf("[vault] Discord notification sent for approval %s", req.ID)
 	return nil
 }
+
+// --- Telegram Bot ---
+
+// TelegramNotifier sends approval requests via the Telegram Bot API.
+type TelegramNotifier struct {
+	BotToken string
+	ChatID   string // Group/channel ID to send notifications to
+	client   *http.Client
+}
+
+func NewTelegramNotifier(botToken, chatID string) *TelegramNotifier {
+	return &TelegramNotifier{
+		BotToken: botToken,
+		ChatID:   chatID,
+		client:   &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+func (n *TelegramNotifier) SendApprovalRequest(req ApprovalRequest, approvalURL string) error {
+	text := fmt.Sprintf(
+		"🔐 *Approval Required*\n\n*Action:* `%s`\n*Context:* %s\n*Requester:* %s\n*Expires:* %s\n\n[Approve / Deny](%s)",
+		escapeMarkdownV2(req.Action),
+		escapeMarkdownV2(req.Context),
+		escapeMarkdownV2(req.Requester),
+		escapeMarkdownV2(req.ExpiresAt.Format("15:04:05 UTC")),
+		approvalURL,
+	)
+
+	payload := map[string]any{
+		"chat_id":    n.ChatID,
+		"text":       text,
+		"parse_mode": "MarkdownV2",
+		"reply_markup": map[string]any{
+			"inline_keyboard": [][]map[string]any{
+				{
+					{"text": "✅ Approve (WebAuthn)", "url": approvalURL},
+				},
+			},
+		},
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal telegram payload: %w", err)
+	}
+
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", n.BotToken)
+	resp, err := n.client.Post(apiURL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("send telegram message: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("telegram API returned %d", resp.StatusCode)
+	}
+
+	log.Printf("[vault] Telegram notification sent for approval %s", req.ID)
+	return nil
+}
+
+// escapeMarkdownV2 escapes special characters for Telegram MarkdownV2.
+func escapeMarkdownV2(s string) string {
+	return telegramEscaper.Replace(s)
+}
+
+var telegramEscaper = strings.NewReplacer(
+	`\`, `\\`, // backslash first to avoid double-escaping
+	`_`, `\_`, `*`, `\*`, `[`, `\[`, `]`, `\]`,
+	`(`, `\(`, `)`, `\)`, `~`, `\~`, "`", "\\`",
+	`>`, `\>`, `#`, `\#`, `+`, `\+`, `-`, `\-`,
+	`=`, `\=`, `|`, `\|`, `{`, `\{`, `}`, `\}`,
+	`.`, `\.`, `!`, `\!`,
+)
 
 // --- Log Notifier (fallback / development) ---
 
