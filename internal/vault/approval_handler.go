@@ -14,7 +14,7 @@ func RegisterApprovalHandlers(mux *http.ServeMux, queue *ApprovalQueue, v *Vault
 	mux.HandleFunc("POST /vault/approval/{id}/grant", handleGrantApproval(queue, v))
 	mux.HandleFunc("POST /vault/approval/{id}/deny", handleDenyApproval(queue, v))
 	mux.HandleFunc("GET /vault/approve/{id}", handleApprovePage())
-	mux.HandleFunc("GET /vault/approvals", handleListApprovals(queue))
+	mux.HandleFunc("GET /vault/approvals", handleListApprovals(queue, v))
 }
 
 func handleCreateApproval(queue *ApprovalQueue, v *Vault) http.HandlerFunc {
@@ -82,6 +82,9 @@ func handleGrantApproval(queue *ApprovalQueue, v *Vault) http.HandlerFunc {
 			return
 		}
 
+		// Note: session token is intentionally NOT invalidated after grant.
+		// Multiple approvals may be pending simultaneously (e.g. commit + push).
+		// The 5-minute TTL and lock-invalidation provide sufficient bounds.
 		if err := queue.Grant(id); err != nil {
 			status := http.StatusConflict
 			if strings.Contains(err.Error(), "not found") {
@@ -138,8 +141,12 @@ func handleApprovePage() http.HandlerFunc {
 	}
 }
 
-func handleListApprovals(queue *ApprovalQueue) http.HandlerFunc {
+func handleListApprovals(queue *ApprovalQueue, v *Vault) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if v != nil && v.State() != StateUnlocked {
+			writeError(w, http.StatusForbidden, "vault must be unlocked")
+			return
+		}
 		pending := queue.Pending()
 		if pending == nil {
 			pending = []ApprovalRequest{}

@@ -44,7 +44,7 @@ register.go     # Connection registration and hot-reload
 
 1. Add the type name to `AllTypes` in `internal/config/types.go`
 2. Create a tool file in `internal/tools/` (see existing ones as examples)
-3. Add a case in `tools.RegisterConnection()` in `internal/tools/register.go`
+3. Add a case in `tools.RegisterConnection()` in `internal/tools/tools.go`
 4. Add a TOML example in `config.example.toml`
 5. Document in `docs/connections.md`
 
