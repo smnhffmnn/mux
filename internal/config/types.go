@@ -66,6 +66,7 @@ var AllTypes = []TypeDef{
 	{Type: "http", Label: "HTTP API", Fields: []TypeField{
 		{Key: "url", Label: "Base URL", Placeholder: "https://api.example.com"},
 		{Key: "token", Label: "API Token (optional)", Placeholder: "Bearer token", Secret: true},
+		{Key: "token_header", Label: "Token Header (optional)", Placeholder: "Authorization: Bearer (default)"},
 	}},
 	{Type: "firecrawl", Label: "Firecrawl", Fields: []TypeField{
 		{Key: "url", Label: "API URL", Placeholder: "https://api.firecrawl.dev (default)"},

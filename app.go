@@ -292,6 +292,8 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 					fi.Value = conn.URL
 				case "scopes":
 					fi.Value = conn.Scopes
+				case "token_header":
+					fi.Value = conn.TokenHeader
 				}
 			}
 			if fd.Secret {
@@ -473,6 +475,7 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 		}
 		conn.Tunnel = fields.Tunnel
 		conn.Instructions = fields.Instructions
+		conn.TokenHeader = fields.TokenHeader
 	}
 
 	if fields.Password != "" {

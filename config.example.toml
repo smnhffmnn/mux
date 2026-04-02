@@ -84,6 +84,14 @@ read_only = true
 # oauth = true
 # OAuth tokens stored in keychain (key: "sentry-oauth-token")
 
+# HTTP API (generic REST client)
+# [[connections]]
+# name = "gemini"
+# type = "http"
+# url = "https://generativelanguage.googleapis.com/v1beta"
+# token_header = "x-goog-api-key"          # custom auth header (default: Authorization: Bearer)
+# Token stored in keychain (key: "gemini-token")
+
 # --- WireGuard Tunnels ---
 # Connections can reference tunnels by name to route traffic through WireGuard.
 

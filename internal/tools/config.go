@@ -105,6 +105,9 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 			mcp.WithString("instructions",
 				mcp.Description("Instructions for AI agents describing when/how to use this connection."),
 			),
+			mcp.WithString("token_header",
+				mcp.Description("Custom header name for the API token (e.g. 'x-goog-api-key'). Default: sends as 'Authorization: Bearer {token}'."),
+			),
 		),
 		Handler: ct.handleConnectionAdd,
 	}
@@ -359,6 +362,12 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 	}
 	if v := req.GetString("instructions", ""); v != "" {
 		conn.Instructions = v
+	}
+	if v := req.GetString("token_header", ""); v != "" {
+		if !validHeaderName(v) {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid token_header %q: must be a valid HTTP header name (e.g. 'x-goog-api-key')", v)), nil
+		}
+		conn.TokenHeader = v
 	}
 
 	config.ApplyConnectionDefaults(&conn)
@@ -621,4 +630,17 @@ func (ct *ConfigTools) handleSecretCheck(_ context.Context, req mcp.CallToolRequ
 
 	data, _ := json.MarshalIndent(secrets, "", "  ")
 	return mcp.NewToolResultText(string(data)), nil
+}
+
+// validHeaderName checks that s is a valid HTTP header field name (RFC 7230 token).
+func validHeaderName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c <= ' ' || c >= 0x7f || strings.ContainsRune("\"(),/:;<=>?@[\\]{}", c) {
+			return false
+		}
+	}
+	return true
 }

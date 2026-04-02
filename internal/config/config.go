@@ -38,6 +38,7 @@ type Connection struct {
 	OAuth        bool   `toml:"oauth,omitempty" json:"oauth,omitempty"` // proxy: use OAuth instead of bearer token
 	Scopes       string `toml:"scopes,omitempty" json:"scopes,omitempty"`
 	Instructions string `toml:"instructions,omitempty" json:"instructions,omitempty"`
+	TokenHeader  string `toml:"token_header,omitempty" json:"tokenHeader,omitempty"` // custom header name for token (default: "Authorization: Bearer {token}")
 	Tunnel       string `toml:"tunnel,omitempty" json:"tunnel,omitempty"`             // name of a defined tunnel
 	MonthlyLimit int    `toml:"monthly_limit,omitempty" json:"monthlyLimit,omitempty"` // optional request limit per month
 	Source       string `toml:"-" json:"source,omitempty"`                             // "local" or "erp"

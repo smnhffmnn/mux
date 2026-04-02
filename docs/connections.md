@@ -376,13 +376,15 @@ Proxy-type aliases (`youtrack`, `sentry`, `netdata`, `notion`) behave identicall
 
 ### HTTP
 
-Generic HTTP GET client for any REST API. Useful for internal APIs or services without a dedicated connection type.
+Generic HTTP client for any REST API. Useful for internal APIs or services without a dedicated connection type.
 
 **Required fields**: `name`, `type`, `url`
 
-**Optional fields**: `tunnel`, `instructions`
+**Optional fields**: `token_header`, `tunnel`, `instructions`
 
-**Secret**: `{name}-token` in keychain (optional Bearer token)
+**Secret**: `{name}-token` in keychain (optional auth token)
+
+By default, the token is sent as `Authorization: Bearer {token}`. Set `token_header` to use a custom header name instead (e.g. `x-goog-api-key` for Google APIs).
 
 ```toml
 [[connections]]
@@ -390,13 +392,21 @@ name = "internal-api"
 type = "http"
 url = "https://api.internal.example.com"
 instructions = "Internal product API. Use /api/v1/products to list products."
+
+# Custom auth header example (Google Gemini API)
+# [[connections]]
+# name = "gemini"
+# type = "http"
+# url = "https://generativelanguage.googleapis.com/v1beta"
+# token_header = "x-goog-api-key"
 ```
 
 **MCP tools exposed**:
 
 | Tool | Description |
 |------|-------------|
-| `{name}_get` | HTTP GET request. Parameter: `path` (required, e.g. `/api/products`). Bearer token sent automatically if set. |
+| `{name}_get` | HTTP GET request. Parameter: `path` (required, e.g. `/api/products`). Auth token sent automatically if set. |
+| `{name}_request` | HTTP request with body (POST, PUT, PATCH, DELETE). Available unless `read_only = true`. |
 
 ## Built-in Tools
 

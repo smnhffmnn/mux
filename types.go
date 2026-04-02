@@ -163,4 +163,5 @@ type SaveConnectionRequest struct {
 	Scopes       string `json:"scopes,omitempty"`
 	Tunnel       string `json:"tunnel,omitempty"`
 	Instructions string `json:"instructions,omitempty"`
+	TokenHeader  string `json:"tokenHeader,omitempty"`
 }

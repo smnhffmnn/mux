@@ -23,6 +23,7 @@ type HTTP struct {
 	client       *http.Client
 	baseURL      string
 	token        string
+	tokenHeader  string // custom header name (e.g. "x-goog-api-key"); empty = "Authorization: Bearer"
 	readOnly     bool
 	instructions string
 }
@@ -53,6 +54,7 @@ func NewHTTP(conn config.Connection, dialer Dialer) (*HTTP, error) {
 		},
 		baseURL:      baseURL,
 		token:        conn.Token,
+		tokenHeader:  conn.TokenHeader,
 		readOnly:     conn.ReadOnly,
 		instructions: conn.Instructions,
 	}, nil
@@ -150,7 +152,11 @@ func (h *HTTP) doRequest(ctx context.Context, method string, req mcp.CallToolReq
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
 	if h.token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+h.token)
+		if h.tokenHeader != "" {
+			httpReq.Header.Set(h.tokenHeader, h.token)
+		} else {
+			httpReq.Header.Set("Authorization", "Bearer "+h.token)
+		}
 	}
 
 	resp, err := h.client.Do(httpReq)

@@ -162,6 +162,7 @@ export interface SaveConnectionRequest {
   scopes?: string
   tunnel?: string
   instructions?: string
+  tokenHeader?: string
 }
 
 // API functions
