@@ -104,6 +104,10 @@ var AllTypes = []TypeDef{
 	{Type: "asana-mcp", Label: "Asana MCP", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "https://mcp.asana.com/v2/mcp (default)"},
 	}},
+	{Type: "gemini", Label: "Google Gemini", Fields: []TypeField{
+		{Key: "url", Label: "API URL", Placeholder: "https://generativelanguage.googleapis.com/v1beta (default)"},
+		{Key: "token", Label: "API Key (x-goog-api-key)", Placeholder: "AIzaSy...", Secret: true},
+	}},
 	{Type: "imap", Label: "IMAP", Fields: []TypeField{
 		{Key: "host", Label: "IMAP Host", Placeholder: "imap.example.com"},
 		{Key: "port", Label: "Port", Placeholder: "993", Small: true},

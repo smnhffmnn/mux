@@ -254,7 +254,7 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 
 	var summary string
 	switch {
-	case config.IsProxyType(conn.Type), conn.Type == "http", conn.Type == "firecrawl", conn.Type == "brave", conn.Type == "openai", conn.Type == "elevenlabs", conn.Type == "recraft", conn.Type == "ideogram":
+	case config.IsProxyType(conn.Type), conn.Type == "http", conn.Type == "firecrawl", conn.Type == "brave", conn.Type == "openai", conn.Type == "elevenlabs", conn.Type == "recraft", conn.Type == "ideogram", conn.Type == "gemini":
 		summary = conn.URL
 	case conn.Type == "microsoft-graph":
 		summary = "Microsoft Graph API"

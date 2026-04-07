@@ -10,8 +10,8 @@ mux is a [Model Context Protocol](https://modelcontextprotocol.io) gateway that 
 
 - **Databases** -- MariaDB, PostgreSQL, ClickHouse with schema introspection and query tools
 - **MCP Proxy** -- forward tool calls to upstream MCP servers (YouTrack, Sentry, Notion, Netdata, etc.)
-- **API Integrations** -- Microsoft Graph (mail + SharePoint), Google Tag Manager, OpenAI, ElevenLabs, Brave Search, Firecrawl
-- **Generic HTTP** -- connect any REST API with optional Bearer auth
+- **API Integrations** -- Microsoft Graph (mail + SharePoint), Google Tag Manager, Google Gemini, OpenAI, ElevenLabs, Brave Search, Firecrawl
+- **Generic HTTP** -- connect any REST API with optional auth headers and file output
 - **WireGuard Tunnels** -- reach databases on private networks through userspace WireGuard (no root, no VPN client)
 - **Remote Provisioning** -- centrally manage connections and tunnels for your team from a single HTTP endpoint
 - **Two Transports, Three Modes** -- stdio (Claude Desktop) and Streamable HTTP (`/mcp`), with auto-detection of desktop, headless, and stdio modes

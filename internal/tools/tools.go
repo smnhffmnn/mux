@@ -112,6 +112,12 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		if err == nil {
 			toolDefs = ig.Tools()
 		}
+	case "gemini":
+		var gm *Gemini
+		gm, err = NewGemini(conn, dialer)
+		if err == nil {
+			toolDefs = gm.Tools()
+		}
 	case "microsoft-graph":
 		var mg *MicrosoftGraph
 		mg, err = NewMicrosoftGraph(conn, dialer)
@@ -175,6 +181,8 @@ func DefaultInstructions(connType string) string {
 		return DefaultAsanaInstructions
 	case "asana-mcp":
 		return DefaultAsanaMCPInstructions
+	case "gemini":
+		return DefaultGeminiInstructions
 	case "imap":
 		return DefaultIMAPInstructions
 	default:

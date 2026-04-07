@@ -53,7 +53,7 @@ func (c *Connection) Enabled() bool {
 		return true // auth is interactive via tools
 	case c.Type == "firecrawl", c.Type == "brave", c.Type == "google-tagmanager",
 		c.Type == "openai", c.Type == "elevenlabs", c.Type == "recraft", c.Type == "ideogram",
-		c.Type == "asana":
+		c.Type == "asana", c.Type == "gemini":
 		return c.Token != ""
 	case c.Type == "imap":
 		return c.Host != "" && c.User != "" && c.Password != ""
@@ -465,6 +465,10 @@ func ApplyConnectionDefaults(c *Connection) {
 		c.OAuth = true
 		if c.URL == "" {
 			c.URL = "https://mcp.asana.com/v2/mcp"
+		}
+	case "gemini":
+		if c.URL == "" {
+			c.URL = "https://generativelanguage.googleapis.com/v1beta"
 		}
 	case "imap":
 		if c.Port == 0 {
