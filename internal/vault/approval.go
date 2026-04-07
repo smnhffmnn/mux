@@ -55,7 +55,7 @@ type ApprovalQueue struct {
 	mu       sync.RWMutex
 	requests map[string]*ApprovalRequest
 	notifier Notifier // abstracted: Discord webhook now, APNs later
-	baseURL  string   // e.g. "https://fedora.tailnet:7700"
+	baseURL  string   // e.g. "https://mux.example.com:7701"
 	done     chan struct{}
 }
 

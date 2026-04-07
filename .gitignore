@@ -22,8 +22,11 @@ frontend/package.json.md5
 .DS_Store
 Thumbs.db
 
-# Config with secrets (the example is tracked)
+# Config and secrets (the example is tracked)
 config.toml
+secrets.toml
+*.pem
+*.key
 
 # Test
 coverage.out

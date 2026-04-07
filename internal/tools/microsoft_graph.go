@@ -142,11 +142,24 @@ func (mg *MicrosoftGraph) Tools() []ToolDef {
 			Handler: mg.handleCreateReplyDraft,
 		},
 		{
+			Tool: mcp.NewTool("create_draft",
+				mcp.WithDescription("Create a new email draft from scratch. Does NOT send."),
+				mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address(es), comma-separated for multiple")),
+				mcp.WithString("subject", mcp.Required(), mcp.Description("Email subject")),
+				mcp.WithString("body", mcp.Required(), mcp.Description("Email body. Can be HTML or plain text (newlines are auto-converted to <br>).")),
+				mcp.WithString("cc", mcp.Description("CC recipient(s), comma-separated (optional)")),
+				mcp.WithString("bcc", mcp.Description("BCC recipient(s), comma-separated (optional)")),
+			),
+			Handler: mg.handleCreateDraft,
+		},
+		{
 			Tool: mcp.NewTool("create_forward_draft",
 				mcp.WithDescription("Create a forward draft for the latest message in a conversation. Does NOT send."),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
-				mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address")),
+				mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address(es), comma-separated for multiple")),
 				mcp.WithString("body", mcp.Description("Optional comment. Can be HTML or plain text (newlines are auto-converted to <br>).")),
+				mcp.WithString("cc", mcp.Description("CC recipient(s), comma-separated (optional)")),
+				mcp.WithString("bcc", mcp.Description("BCC recipient(s), comma-separated (optional)")),
 			),
 			Handler: mg.handleCreateForwardDraft,
 		},
@@ -484,6 +497,52 @@ func (mg *MicrosoftGraph) handleCreateReplyDraft(ctx context.Context, req mcp.Ca
 	return jsonResult(map[string]any{"draft_id": draft.ID, "reply_to": latest.ID})
 }
 
+func (mg *MicrosoftGraph) handleCreateDraft(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	to, _ := req.RequireString("to")
+	subject, _ := req.RequireString("subject")
+	body, _ := req.RequireString("body")
+	if to == "" || subject == "" || body == "" {
+		return mcp.NewToolResultError("to, subject, and body are required"), nil
+	}
+
+	toRcpts := parseRecipients(to)
+	if len(toRcpts) == 0 {
+		return mcp.NewToolResultError("to must contain at least one valid email address"), nil
+	}
+
+	payload := map[string]any{
+		"subject": subject,
+		"body": map[string]string{
+			"contentType": "HTML",
+			"content":     plainToHTML(body),
+		},
+		"toRecipients": toRcpts,
+	}
+	if cc, ok := req.GetArguments()["cc"].(string); ok && cc != "" {
+		payload["ccRecipients"] = parseRecipients(cc)
+	}
+	if bcc, ok := req.GetArguments()["bcc"].(string); ok && bcc != "" {
+		payload["bccRecipients"] = parseRecipients(bcc)
+	}
+
+	data, status, err := mg.doGraph(ctx, http.MethodPost, "/me/messages", payload)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if status != http.StatusCreated {
+		return mcp.NewToolResultError(fmt.Sprintf("create draft failed (HTTP %d): %s", status, string(data))), nil
+	}
+
+	var draft struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(data, &draft); err != nil {
+		return mcp.NewToolResultError("parse draft: " + err.Error()), nil
+	}
+
+	return jsonResult(map[string]any{"draft_id": draft.ID, "to": to, "subject": subject})
+}
+
 func (mg *MicrosoftGraph) handleCreateForwardDraft(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	convID, _ := req.RequireString("conversation_id")
 	to, _ := req.RequireString("to")
@@ -518,18 +577,26 @@ func (mg *MicrosoftGraph) handleCreateForwardDraft(ctx context.Context, req mcp.
 		return mcp.NewToolResultError("parse forward draft: " + err.Error()), nil
 	}
 
-	// Set recipient on draft
+	// Set recipients on draft
+	toRcpts := parseRecipients(to)
+	if len(toRcpts) == 0 {
+		return mcp.NewToolResultError("to must contain at least one valid email address"), nil
+	}
 	rcptPayload := map[string]any{
-		"toRecipients": []map[string]any{
-			{"emailAddress": map[string]string{"address": to}},
-		},
+		"toRecipients": toRcpts,
+	}
+	if cc, ok := req.GetArguments()["cc"].(string); ok && cc != "" {
+		rcptPayload["ccRecipients"] = parseRecipients(cc)
+	}
+	if bcc, ok := req.GetArguments()["bcc"].(string); ok && bcc != "" {
+		rcptPayload["bccRecipients"] = parseRecipients(bcc)
 	}
 	_, status, err = mg.doGraph(ctx, http.MethodPatch, "/me/messages/"+draft.ID, rcptPayload)
 	if err != nil {
-		return mcp.NewToolResultError("set recipient: " + err.Error()), nil
+		return mcp.NewToolResultError("set recipients: " + err.Error()), nil
 	}
 	if status != http.StatusOK {
-		return mcp.NewToolResultError(fmt.Sprintf("set recipient failed (HTTP %d)", status)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("set recipients failed (HTTP %d)", status)), nil
 	}
 
 	return jsonResult(map[string]any{"draft_id": draft.ID, "forward_from": latest.ID, "to": to})
@@ -997,6 +1064,27 @@ func (mg *MicrosoftGraph) handleGetAttachment(ctx context.Context, req mcp.CallT
 	}
 
 	return jsonResult(att)
+}
+
+// --- Recipient helpers ---
+
+// parseRecipients splits a comma-separated list of email addresses into the
+// Graph API recipient format. Whitespace around addresses is trimmed.
+func parseRecipients(s string) []map[string]any {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	var out []map[string]any
+	for _, p := range parts {
+		addr := strings.TrimSpace(p)
+		if addr != "" {
+			out = append(out, map[string]any{
+				"emailAddress": map[string]string{"address": addr},
+			})
+		}
+	}
+	return out
 }
 
 // --- HTML helpers ---

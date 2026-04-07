@@ -27,7 +27,7 @@ type Connection struct {
 	Name         string `toml:"name" json:"name"`
 	Type         string `toml:"type" json:"type"` // "postgresql", "clickhouse", "mariadb", "proxy"
 	Host         string `toml:"host,omitempty" json:"host,omitempty"`
-	Port         int    `toml:"port,omitempty" json:"port,omitempty"`
+	Port         int    `toml:"port,omitzero" json:"port,omitempty"`
 	User         string `toml:"user,omitempty" json:"user,omitempty"`
 	Password     string `toml:"-" json:"password,omitempty"`
 	Database     string `toml:"database,omitempty" json:"database,omitempty"`
@@ -40,7 +40,7 @@ type Connection struct {
 	Instructions string `toml:"instructions,omitempty" json:"instructions,omitempty"`
 	TokenHeader  string `toml:"token_header,omitempty" json:"tokenHeader,omitempty"` // custom header name for token (default: "Authorization: Bearer {token}")
 	Tunnel       string `toml:"tunnel,omitempty" json:"tunnel,omitempty"`             // name of a defined tunnel
-	MonthlyLimit int    `toml:"monthly_limit,omitempty" json:"monthlyLimit,omitempty"` // optional request limit per month
+	MonthlyLimit int    `toml:"monthly_limit,omitzero" json:"monthlyLimit,omitempty"` // optional request limit per month
 	Source       string `toml:"-" json:"source,omitempty"`                             // "local" or "erp"
 }
 
@@ -83,12 +83,12 @@ type TunnelConfig struct {
 	TunnelAddress string `toml:"tunnel_address,omitempty" json:"tunnelAddress,omitempty"`
 	DNS           string `toml:"dns,omitempty" json:"dns,omitempty"`
 	PresharedKey  string `toml:"-" json:"-"` // never serialize
-	MTU           int    `toml:"mtu,omitempty" json:"mtu,omitempty"`
-	KeepAlive     int    `toml:"keepalive,omitempty" json:"keepalive,omitempty"`
+	MTU           int    `toml:"mtu,omitzero" json:"mtu,omitempty"`
+	KeepAlive     int    `toml:"keepalive,omitzero" json:"keepalive,omitempty"`
 
 	// SSH fields
 	Host              string `toml:"host,omitempty" json:"host,omitempty"`
-	Port              int    `toml:"port,omitempty" json:"port,omitempty"`
+	Port              int    `toml:"port,omitzero" json:"port,omitempty"`
 	User              string `toml:"user,omitempty" json:"user,omitempty"`
 	KeyFile           string `toml:"key_file,omitempty" json:"keyFile,omitempty"`                         // path to SSH private key file
 	InsecureHostKey   bool   `toml:"insecure_host_key,omitempty" json:"insecureHostKey,omitempty"`        // skip host key verification (default: false)
@@ -122,7 +122,7 @@ type ServerConfig struct {
 	Port    int    `toml:"port"`
 	TLSCert string `toml:"tls_cert,omitempty" json:"tlsCert,omitempty"` // path to TLS certificate
 	TLSKey  string `toml:"tls_key,omitempty" json:"tlsKey,omitempty"`   // path to TLS private key
-	TLSPort int    `toml:"tls_port,omitempty" json:"tlsPort,omitempty"` // HTTPS port for WebAuthn/Vault (default: port + 1)
+	TLSPort int    `toml:"tls_port,omitzero" json:"tlsPort,omitempty"` // HTTPS port for WebAuthn/Vault (default: port + 1)
 }
 
 // EffectiveTLSPort returns the configured TLS port, defaulting to Port + 1.
@@ -140,7 +140,7 @@ type VaultConfig struct {
 	InactivityTimeout string   `toml:"inactivity_timeout,omitempty" json:"inactivityTimeout,omitempty"`   // e.g. "30m"
 	WebAuthnRPID      string   `toml:"webauthn_rp_id,omitempty" json:"webauthnRpId,omitempty"`            // e.g. "mux.local"
 	WebAuthnOrigins   []string `toml:"webauthn_origins,omitempty" json:"webauthnOrigins,omitempty"`        // e.g. ["https://mux.local:7700"]
-	BaseURL           string   `toml:"base_url,omitempty" json:"baseUrl,omitempty"`                        // public URL for approval links, e.g. "https://fedora.tailnet:7700"
+	BaseURL           string   `toml:"base_url,omitempty" json:"baseUrl,omitempty"`                        // public URL for approval links, e.g. "https://mux.example.com:7701"
 }
 
 // Config is the application configuration.
