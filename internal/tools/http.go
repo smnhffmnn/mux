@@ -8,6 +8,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -67,6 +69,8 @@ func (h *HTTP) Tools() []ToolDef {
 		getDesc += "\n\n" + h.instructions
 	}
 
+	outputFileDesc := "Save response body to this file path instead of returning it inline (supports ~ for home directory). Useful for large responses (images, binary data). Returns only metadata (status, content-type, path, size). Only writes on 2xx responses; errors are returned inline."
+
 	tools := []ToolDef{
 		{
 			Tool: mcp.NewTool("get",
@@ -74,6 +78,9 @@ func (h *HTTP) Tools() []ToolDef {
 				mcp.WithString("path",
 					mcp.Required(),
 					mcp.Description("Path to append to the base URL, e.g. /api/products"),
+				),
+				mcp.WithString("output_file",
+					mcp.Description(outputFileDesc),
 				),
 			),
 			Handler: h.handleGet,
@@ -97,6 +104,9 @@ func (h *HTTP) Tools() []ToolDef {
 				),
 				mcp.WithString("body",
 					mcp.Description("JSON request body (optional)"),
+				),
+				mcp.WithString("output_file",
+					mcp.Description(outputFileDesc),
 				),
 			),
 			Handler: h.handleRequest,
@@ -165,11 +175,45 @@ func (h *HTTP) doRequest(ctx context.Context, method string, req mcp.CallToolReq
 	}
 	defer resp.Body.Close()
 
+	// If output_file is set and response is successful, stream to disk
+	if outputFile := req.GetString("output_file", ""); outputFile != "" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return h.saveToFile(resp, outputFile)
+	}
+
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("read response: %v", err)), nil
 	}
 
 	result := fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, resp.Status, string(body))
+	return mcp.NewToolResultText(result), nil
+}
+
+// saveToFile streams the response body to a file and returns metadata.
+func (h *HTTP) saveToFile(resp *http.Response, outputFile string) (*mcp.CallToolResult, error) {
+	outputFile = config.ExpandHome(outputFile)
+
+	if err := os.MkdirAll(filepath.Dir(outputFile), 0755); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("create directory: %v", err)), nil
+	}
+
+	f, err := os.Create(outputFile)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("create file: %v", err)), nil
+	}
+
+	n, err := io.Copy(f, resp.Body)
+	if err != nil {
+		f.Close()
+		os.Remove(outputFile)
+		return mcp.NewToolResultError(fmt.Sprintf("write file: %v", err)), nil
+	}
+	if err := f.Close(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("close file: %v", err)), nil
+	}
+
+	result := fmt.Sprintf("HTTP %d %s\n\nSaved to: %s\nContent-Type: %s\nSize: %d bytes",
+		resp.StatusCode, resp.Status, outputFile,
+		resp.Header.Get("Content-Type"), n)
 	return mcp.NewToolResultText(result), nil
 }

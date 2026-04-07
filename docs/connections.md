@@ -391,22 +391,43 @@ By default, the token is sent as `Authorization: Bearer {token}`. Set `token_hea
 name = "internal-api"
 type = "http"
 url = "https://api.internal.example.com"
+token_header = "x-api-key"
 instructions = "Internal product API. Use /api/v1/products to list products."
-
-# Custom auth header example (Google Gemini API)
-# [[connections]]
-# name = "gemini"
-# type = "http"
-# url = "https://generativelanguage.googleapis.com/v1beta"
-# token_header = "x-goog-api-key"
 ```
 
 **MCP tools exposed**:
 
 | Tool | Description |
 |------|-------------|
-| `{name}_get` | HTTP GET request. Parameter: `path` (required, e.g. `/api/products`). Auth token sent automatically if set. |
-| `{name}_request` | HTTP request with body (POST, PUT, PATCH, DELETE). Available unless `read_only = true`. |
+| `{name}_get` | HTTP GET request. Parameters: `path` (required), `output_file` (optional — save response to file). |
+| `{name}_request` | HTTP request with body (POST, PUT, PATCH, DELETE). Parameters: `path`, `method`, `body`, `output_file`. Available unless `read_only = true`. |
+
+Both tools support an optional `output_file` parameter. When set, the response body is streamed to the specified file path (no size limit) and only metadata (status, content-type, path, size) is returned. Useful for large responses like images or binary data.
+
+### Google Gemini
+
+Dedicated connector for the Google Gemini API with automatic image handling. Text responses are returned inline; generated images are decoded from base64 and saved to disk (`~/.mux/output/` by default).
+
+**Required fields**: `name`, `type`
+
+**Optional fields**: `url` (default: `https://generativelanguage.googleapis.com/v1beta`), `tunnel`, `instructions`
+
+**Secret**: `{name}-token` in keychain (API key, sent as `x-goog-api-key`)
+
+```toml
+[[connections]]
+name = "gemini"
+type = "gemini"
+# url defaults to https://generativelanguage.googleapis.com/v1beta
+# Token stored in keychain (key: "gemini-token")
+```
+
+**MCP tools exposed**:
+
+| Tool | Description |
+|------|-------------|
+| `{name}_list_models` | List available models with capabilities. Use to discover model IDs before generating. |
+| `{name}_generate` | Generate content (text/images). Parameters: `model` (required), `prompt` (required), `images` (optional, for editing), `response_modalities`, `aspect_ratio`, `image_size`, `output_dir`. |
 
 ## Built-in Tools
 
