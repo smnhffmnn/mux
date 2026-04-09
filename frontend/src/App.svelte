@@ -4,7 +4,7 @@
   import { GetPageData, GetServerInfo } from './lib/api'
   import type { PageData } from './lib/api'
   import Header from './lib/components/Header.svelte'
-  import ERPSection from './lib/components/ERPSection.svelte'
+  import ProvisioningSection from './lib/components/ProvisioningSection.svelte'
   import TunnelRow from './lib/components/TunnelRow.svelte'
   import ConnectionCard from './lib/components/ConnectionCard.svelte'
   import AddConnectionModal from './lib/components/AddConnectionModal.svelte'
@@ -63,7 +63,7 @@
   const navItems = [
     { id: 'connections' as const, label: 'Connections', icon: '⬡' },
     { id: 'tunnels' as const, label: 'Tunnels', icon: '◈' },
-    { id: 'erp' as const, label: 'Provisioning', icon: '⟐' },
+    { id: 'provisioning' as const, label: 'Provisioning', icon: '⟐' },
     { id: 'about' as const, label: 'About', icon: '◎' },
   ]
 </script>
@@ -133,8 +133,8 @@
           {/if}
         </div>
 
-      {:else if $activeView === 'erp'}
-        <ERPSection erp={$pageData.erp} onSync={refreshData} />
+      {:else if $activeView === 'provisioning'}
+        <ProvisioningSection provisioning={$pageData.provisioning} onSync={refreshData} />
 
       {:else if $activeView === 'about'}
         <div class="section">

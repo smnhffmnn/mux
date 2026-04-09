@@ -1,4 +1,4 @@
-package erp
+package provisioning
 
 import (
 	"context"
@@ -11,15 +11,15 @@ import (
 	"github.com/smnhffmnn/mux/internal/config"
 )
 
-// ProvisionResponse is the expected JSON structure from the ERP provisioning endpoint.
+// ProvisionResponse is the expected JSON structure from the provisioning endpoint.
 type ProvisionResponse struct {
 	Tunnels     []config.TunnelConfig `json:"tunnels,omitempty"`
 	Connections []config.Connection   `json:"connections"`
 }
 
-// Fetch retrieves the provisioning config from the ERP endpoint.
+// Fetch retrieves the provisioning config from the provisioning endpoint.
 // It sends a GET request with the bearer token and parses the JSON response.
-// All returned tunnels and connections are marked with Source = "erp".
+// All returned tunnels and connections are marked with Source = "provisioning".
 func Fetch(ctx context.Context, endpoint, token string) (*ProvisionResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -47,11 +47,11 @@ func Fetch(ctx context.Context, endpoint, token string) (*ProvisionResponse, err
 	// Redirect = auth problem
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		location := resp.Header.Get("Location")
-		return nil, fmt.Errorf("ERP returned redirect (%d → %s) — token is likely expired or invalid", resp.StatusCode, location)
+		return nil, fmt.Errorf("provisioning server returned redirect (%d → %s) — token is likely expired or invalid", resp.StatusCode, location)
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, fmt.Errorf("ERP authentication failed (HTTP %d) — check your token", resp.StatusCode)
+		return nil, fmt.Errorf("provisioning authentication failed (HTTP %d) — check your token", resp.StatusCode)
 	}
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB
@@ -61,12 +61,12 @@ func Fetch(ctx context.Context, endpoint, token string) (*ProvisionResponse, err
 		if json.Unmarshal(body, &jsonErr) == nil && jsonErr.Error != "" {
 			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, jsonErr.Error)
 		}
-		return nil, fmt.Errorf("ERP returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("provisioning server returned HTTP %d", resp.StatusCode)
 	}
 
 	// HTML instead of JSON = auth gateway intercepted the request
 	if len(body) > 0 && body[0] != '{' && body[0] != '[' {
-		return nil, fmt.Errorf("ERP returned HTML instead of JSON — token is likely expired or invalid")
+		return nil, fmt.Errorf("provisioning server returned HTML instead of JSON — token is likely expired or invalid")
 	}
 
 	var result ProvisionResponse
@@ -74,12 +74,12 @@ func Fetch(ctx context.Context, endpoint, token string) (*ProvisionResponse, err
 		return nil, fmt.Errorf("invalid JSON from %s: %w", endpoint, err)
 	}
 
-	// Mark all entries as ERP-sourced
+	// Mark all entries as provisioning-sourced
 	for i := range result.Tunnels {
-		result.Tunnels[i].Source = "erp"
+		result.Tunnels[i].Source = "provisioning"
 	}
 	for i := range result.Connections {
-		result.Connections[i].Source = "erp"
+		result.Connections[i].Source = "provisioning"
 	}
 
 	return &result, nil

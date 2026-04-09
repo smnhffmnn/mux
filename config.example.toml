@@ -1,7 +1,7 @@
 # mux (MCP Unified Exchange) Configuration
 # Copy to ~/.mux/config.toml and adjust values.
-# Secrets (passwords, tokens, keys) should be stored in OS keychain via the web UI
-# or set as environment variables — they are NOT stored in this file.
+# Secrets (passwords, tokens, keys) should be stored via the encrypted vault, OS keychain,
+# or the secret_set MCP tool — they are NOT stored in this file.
 
 [server]
 port = 7700                                  # HTTP port (always localhost, for MCP clients)
@@ -26,8 +26,8 @@ port = 7700                                  # HTTP port (always localhost, for 
 
 # Remote Provisioning (optional)
 # Fetches connections and tunnels from a central provisioning server.
-# Token is stored in OS keychain (key: "provisioning-token").
-# [erp]
+# Token stored as secret (key: "provisioning-token").
+# [provisioning]
 # endpoint = "https://provisioning.example.com/api/mux/config"
 
 # --- Connections ---
@@ -45,7 +45,7 @@ database = "mydb"
 read_only = true
 # tunnel = "office-vpn"                  # optional: route through WireGuard tunnel
 # instructions = "Production database."  # optional: added to MCP server instructions
-# Password stored in keychain (key: "production-password")
+# Password stored as secret (key: "production-password")
 
 # ClickHouse
 # [[connections]]
@@ -56,7 +56,7 @@ read_only = true
 # user = "default"
 # database = "default"
 # secure = false                         # TLS for HTTP protocol
-# Password stored in keychain (key: "analytics-password")
+# Password stored as secret (key: "analytics-password")
 
 # MariaDB
 # [[connections]]
@@ -67,14 +67,14 @@ read_only = true
 # user = "root"
 # database = "myapp"
 # read_only = false                      # false enables {name}_execute tool
-# Password stored in keychain (key: "local-dev-password")
+# Password stored as secret (key: "local-dev-password")
 
 # Proxy: Bearer token (e.g. YouTrack)
 # [[connections]]
 # name = "youtrack"
 # type = "proxy"
 # url = "https://instance.myjetbrains.com/mcp"
-# Token stored in keychain (key: "youtrack-token")
+# Token stored as secret (key: "youtrack-token")
 
 # Proxy: OAuth 2.0 + PKCE (e.g. Sentry)
 # [[connections]]
@@ -82,14 +82,14 @@ read_only = true
 # type = "proxy"
 # url = "https://mcp.sentry.dev/mcp"
 # oauth = true
-# OAuth tokens stored in keychain (key: "sentry-oauth-token")
+# OAuth tokens stored as secret (key: "sentry-oauth-token")
 
 # Google Gemini (image generation + multimodal AI)
 # [[connections]]
 # name = "gemini"
 # type = "gemini"
 # url = "https://generativelanguage.googleapis.com/v1beta"  # optional, this is the default
-# Token stored in keychain (key: "gemini-token")
+# Token stored as secret (key: "gemini-token")
 
 # HTTP API (generic REST client)
 # [[connections]]
@@ -97,7 +97,7 @@ read_only = true
 # type = "http"
 # url = "https://api.example.com"
 # token_header = "x-api-key"               # custom auth header (default: Authorization: Bearer)
-# Token stored in keychain (key: "my-api-token")
+# Token stored as secret (key: "my-api-token")
 
 # --- WireGuard Tunnels ---
 # Connections can reference tunnels by name to route traffic through WireGuard.
@@ -111,8 +111,8 @@ read_only = true
 # dns = "10.100.0.1"                     # optional
 # mtu = 1420                             # optional, default: 1420
 # keepalive = 25                         # optional, default: 25 seconds
-# Private key stored in keychain (key: "tunnel-office-vpn-private-key")
-# Preshared key stored in keychain (key: "tunnel-office-vpn-preshared-key")
+# Private key stored as secret (key: "tunnel-office-vpn-private-key")
+# Preshared key stored as secret (key: "tunnel-office-vpn-preshared-key")
 
 # --- Legacy Format ---
 # The old single-section format is still supported and auto-migrated:

@@ -85,12 +85,12 @@ export class ConnInfo {
              */
             this["oauthOK"] = false;
         }
-        if (!("isERP" in $$source)) {
+        if (!("isProvisioned" in $$source)) {
             /**
              * @member
              * @type {boolean}
              */
-            this["isERP"] = false;
+            this["isProvisioned"] = false;
         }
         if (!("isDeviceAuth" in $$source)) {
             /**
@@ -223,12 +223,12 @@ export class DeviceAuthStatus {
 }
 
 /**
- * ERPInfo describes ERP provisioning status.
+ * ProvisioningInfo describes Provisioning status.
  */
-export class ERPInfo {
+export class ProvisioningInfo {
     /**
-     * Creates a new ERPInfo instance.
-     * @param {Partial<ERPInfo>} [$$source = {}] - The source object to create the ERPInfo.
+     * Creates a new ProvisioningInfo instance.
+     * @param {Partial<ProvisioningInfo>} [$$source = {}] - The source object to create the ProvisioningInfo.
      */
     constructor($$source = {}) {
         if (!("configured" in $$source)) {
@@ -285,13 +285,13 @@ export class ERPInfo {
     }
 
     /**
-     * Creates a new ERPInfo instance from a string or object.
+     * Creates a new ProvisioningInfo instance from a string or object.
      * @param {any} [$$source = {}]
-     * @returns {ERPInfo}
+     * @returns {ProvisioningInfo}
      */
     static createFrom($$source = {}) {
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
-        return new ERPInfo(/** @type {Partial<ERPInfo>} */($$parsedSource));
+        return new ProvisioningInfo(/** @type {Partial<ProvisioningInfo>} */($$parsedSource));
     }
 }
 
@@ -453,12 +453,12 @@ export class PageData {
              */
             this["server"] = (new ServerInfo());
         }
-        if (!("erp" in $$source)) {
+        if (!("provisioning" in $$source)) {
             /**
              * @member
-             * @type {ERPInfo}
+             * @type {ProvisioningInfo}
              */
-            this["erp"] = (new ERPInfo());
+            this["provisioning"] = (new ProvisioningInfo());
         }
         if (!("tunnels" in $$source)) {
             /**
@@ -500,8 +500,8 @@ export class PageData {
         if ("server" in $$parsedSource) {
             $$parsedSource["server"] = $$createField0_0($$parsedSource["server"]);
         }
-        if ("erp" in $$parsedSource) {
-            $$parsedSource["erp"] = $$createField1_0($$parsedSource["erp"]);
+        if ("provisioning" in $$parsedSource) {
+            $$parsedSource["provisioning"] = $$createField1_0($$parsedSource["provisioning"]);
         }
         if ("tunnels" in $$parsedSource) {
             $$parsedSource["tunnels"] = $$createField2_0($$parsedSource["tunnels"]);
@@ -1066,7 +1066,7 @@ export class UpdateResult {
 const $$createType0 = FieldInfo.createFrom;
 const $$createType1 = $Create.Array($$createType0);
 const $$createType2 = ServerInfo.createFrom;
-const $$createType3 = ERPInfo.createFrom;
+const $$createType3 = ProvisioningInfo.createFrom;
 const $$createType4 = TunnelInfo.createFrom;
 const $$createType5 = $Create.Array($$createType4);
 const $$createType6 = ConnInfo.createFrom;

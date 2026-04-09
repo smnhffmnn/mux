@@ -50,8 +50,8 @@ tunnel_address = "10.100.0.42/32"
 dns = "10.100.0.1"            # optional, comma-separated
 mtu = 1420                     # optional, default: 1420
 keepalive = 25                 # optional, default: 25 seconds
-# Private key: stored in keychain (key: "tunnel-office-vpn-private-key")
-# Preshared key: stored in keychain (key: "tunnel-office-vpn-preshared-key"), optional
+# Private key: stored as secret (key: "tunnel-office-vpn-private-key")
+# Preshared key: stored as secret (key: "tunnel-office-vpn-preshared-key"), optional
 ```
 
 ### Via Remote Provisioning

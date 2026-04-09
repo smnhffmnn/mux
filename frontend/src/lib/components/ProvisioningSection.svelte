@@ -1,21 +1,21 @@
 <script lang="ts">
-  import type { ERPInfo } from '../api'
-  import { SetupERP, SyncERP } from '../api'
+  import type { ProvisioningInfo } from '../api'
+  import { SetupProvisioning, SyncProvisioning } from '../api'
 
-  let { erp, onSync }: { erp: ERPInfo; onSync: () => void } = $props()
+  let { provisioning, onSync }: { provisioning: ProvisioningInfo; onSync: () => void } = $props()
 
-  let endpoint = $state(erp.endpoint ?? '')
+  let endpoint = $state(provisioning.endpoint ?? '')
   let token = $state('')
   let saving = $state(false)
   let syncing = $state(false)
-  let resultMsg = $state(erp.resultMessage ?? '')
-  let resultSuccess = $state(erp.resultSuccess ?? false)
+  let resultMsg = $state(provisioning.resultMessage ?? '')
+  let resultSuccess = $state(provisioning.resultSuccess ?? false)
 
   async function handleSetup() {
     saving = true
     resultMsg = ''
     try {
-      const result = await SetupERP(endpoint, token)
+      const result = await SetupProvisioning(endpoint, token)
       resultMsg = result.resultMessage ?? 'Saved'
       resultSuccess = result.resultSuccess ?? true
       token = ''
@@ -31,7 +31,7 @@
     syncing = true
     resultMsg = ''
     try {
-      await SyncERP()
+      await SyncProvisioning()
       onSync()
       resultMsg = 'Sync complete'
       resultSuccess = true
@@ -49,7 +49,7 @@
     <h2>Provisioning</h2>
   </div>
 
-  <div class="erp-card">
+  <div class="provisioning-card">
     <div class="form-grid">
       <div class="field">
         <label for="provisioning-endpoint">Endpoint</label>
@@ -57,23 +57,23 @@
       </div>
       <div class="field">
         <label for="provisioning-token">Token</label>
-        <input id="provisioning-token" type="password" placeholder={erp.tokenSet ? '••••• (stored)' : 'Bearer token'} bind:value={token} />
+        <input id="provisioning-token" type="password" placeholder={provisioning.tokenSet ? '••••• (stored)' : 'Bearer token'} bind:value={token} />
       </div>
     </div>
 
-    <div class="erp-actions">
+    <div class="provisioning-actions">
       <button onclick={handleSetup} disabled={saving}>{saving ? 'Saving...' : 'Save'}</button>
-      <button class="primary" onclick={handleSync} disabled={syncing || !erp.configured}>{syncing ? 'Syncing...' : 'Sync'}</button>
+      <button class="primary" onclick={handleSync} disabled={syncing || !provisioning.configured}>{syncing ? 'Syncing...' : 'Sync'}</button>
     </div>
 
-    {#if erp.configured}
-      <div class="erp-status">
-        <span>{erp.tunnels} tunnels, {erp.connections} connections provisioned</span>
+    {#if provisioning.configured}
+      <div class="provisioning-status">
+        <span>{provisioning.tunnels} tunnels, {provisioning.connections} connections provisioned</span>
       </div>
     {/if}
 
     {#if resultMsg}
-      <div class="erp-result" class:success={resultSuccess} class:error={!resultSuccess}>
+      <div class="provisioning-result" class:success={resultSuccess} class:error={!resultSuccess}>
         {resultMsg}
       </div>
     {/if}
@@ -94,7 +94,7 @@
     font-weight: 600;
   }
 
-  .erp-card {
+  .provisioning-card {
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -126,28 +126,28 @@
     width: 100%;
   }
 
-  .erp-actions {
+  .provisioning-actions {
     display: flex;
     gap: 6px;
     margin-bottom: 10px;
   }
 
-  .erp-status {
+  .provisioning-status {
     font-size: 12px;
     color: var(--text-secondary);
   }
 
-  .erp-result {
+  .provisioning-result {
     margin-top: 8px;
     font-size: 12px;
     padding: 6px 10px;
     border-radius: 6px;
   }
-  .erp-result.success {
+  .provisioning-result.success {
     background: var(--green-bg);
     color: var(--green);
   }
-  .erp-result.error {
+  .provisioning-result.error {
     background: var(--red-bg);
     color: var(--red);
   }

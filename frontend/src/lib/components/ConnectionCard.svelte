@@ -49,8 +49,8 @@
         {conn.name}
       </button>
       <span class="badge">{conn.typeLabel}</span>
-      {#if conn.source === 'erp'}
-        <span class="badge erp">PROVISIONED</span>
+      {#if conn.source === 'provisioning'}
+        <span class="badge provisioned">PROVISIONED</span>
       {/if}
       {#if conn.tunnel}
         <span class="badge tunnel">🔒 {conn.tunnel}</span>
@@ -70,7 +70,7 @@
         {#if conn.isDeviceAuth && !conn.deviceAuthOK}
           <button class="primary" onclick={() => (showDeviceAuth = true)}>Authenticate</button>
         {/if}
-        {#if !conn.isERP}
+        {#if !conn.isProvisioned}
           <button class="danger" onclick={handleDelete}>×</button>
         {/if}
       </div>
@@ -155,7 +155,7 @@
     gap: 4px;
   }
 
-  .badge.erp {
+  .badge.provisioned {
     background: var(--yellow-bg);
     color: var(--yellow);
     border-color: var(--yellow);

@@ -12,8 +12,8 @@ import {
   AddTunnel as _AddTunnel,
   SaveTunnel as _SaveTunnel,
   DeleteTunnel as _DeleteTunnel,
-  SetupERP as _SetupERP,
-  SyncERP as _SyncERP,
+  SetupProvisioning as _SetupProvisioning,
+  SyncProvisioning as _SyncProvisioning,
   SelfUpdate as _SelfUpdate,
   StartOAuth as _StartOAuth,
   GetOAuthStatus as _GetOAuthStatus,
@@ -30,7 +30,7 @@ export interface ServerInfo {
   canSelfUpdate: boolean
 }
 
-export interface ERPInfo {
+export interface ProvisioningInfo {
   configured: boolean
   endpoint: string
   tokenSet: boolean
@@ -55,7 +55,7 @@ export interface TunnelInfo {
   user?: string
   keyFile?: string
   insecureHostKey?: boolean
-  source: string                // "local" or "erp"
+  source: string                // "local" or "provisioning"
   connected: boolean
   privateKeySet: boolean
   presharedKeySet?: boolean
@@ -99,7 +99,7 @@ export interface ConnInfo {
   isProxy: boolean
   isOAuth: boolean
   oauthOK: boolean
-  isERP: boolean
+  isProvisioned: boolean
   isDeviceAuth: boolean
   deviceAuthOK: boolean
   readOnly: boolean
@@ -114,7 +114,7 @@ export interface TypeListEntry {
 
 export interface PageData {
   server: ServerInfo
-  erp: ERPInfo
+  provisioning: ProvisioningInfo
   tunnels: TunnelInfo[]
   connections: ConnInfo[]
   types: TypeListEntry[]
@@ -177,8 +177,8 @@ export const TestConnection = _TestConnection as (name: string) => Promise<TestR
 export const AddTunnel = _AddTunnel as (name: string, type: string) => Promise<TunnelInfo>
 export const SaveTunnel = _SaveTunnel as (name: string, fields: SaveTunnelRequest) => Promise<TunnelInfo>
 export const DeleteTunnel = _DeleteTunnel as (name: string) => Promise<void>
-export const SetupERP = _SetupERP as (endpoint: string, token: string) => Promise<ERPInfo>
-export const SyncERP = _SyncERP as () => Promise<PageData>
+export const SetupProvisioning = _SetupProvisioning as (endpoint: string, token: string) => Promise<ProvisioningInfo>
+export const SyncProvisioning = _SyncProvisioning as () => Promise<PageData>
 export const SelfUpdate = _SelfUpdate as () => Promise<UpdateResult>
 export const StartOAuth = _StartOAuth as (name: string) => Promise<OAuthStartResult>
 export const GetOAuthStatus = _GetOAuthStatus as (name: string) => Promise<OAuthStatus>

@@ -41,8 +41,8 @@
         {tunnel.name}
       </button>
       <span class="badge">{tunnel.type === 'ssh' ? 'SSH' : 'WG'}</span>
-      {#if tunnel.source === 'erp'}
-        <span class="badge erp">PROVISIONED</span>
+      {#if tunnel.source === 'provisioning'}
+        <span class="badge provisioned">PROVISIONED</span>
       {/if}
     </div>
     <div class="card-right">
@@ -50,7 +50,7 @@
         <span class="summary">{tunnelSummary}</span>
       {/if}
       <div class="card-actions">
-        {#if tunnel.source !== 'erp'}
+        {#if tunnel.source !== 'provisioning'}
           <button class="danger" onclick={handleDelete}>&times;</button>
         {/if}
       </div>
@@ -123,7 +123,7 @@
     gap: 4px;
   }
 
-  .badge.erp {
+  .badge.provisioned {
     background: var(--yellow-bg);
     color: var(--yellow);
     border-color: var(--yellow);

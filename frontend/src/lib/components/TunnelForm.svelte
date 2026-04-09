@@ -35,7 +35,7 @@
     }
   })
 
-  const isERP = $derived(tunnel.source === 'erp')
+  const isProvisioned = $derived(tunnel.source === 'provisioning')
 
   async function handleSave() {
     saving = true
@@ -75,19 +75,19 @@
     <div class="form-grid">
       <div class="form-field">
         <label for="host">Host</label>
-        <input id="host" type="text" placeholder="bastion.example.com" bind:value={formValues.host} disabled={isERP} />
+        <input id="host" type="text" placeholder="bastion.example.com" bind:value={formValues.host} disabled={isProvisioned} />
       </div>
       <div class="form-field small">
         <label for="port">Port</label>
-        <input id="port" type="text" placeholder="22" bind:value={formValues.port} disabled={isERP} />
+        <input id="port" type="text" placeholder="22" bind:value={formValues.port} disabled={isProvisioned} />
       </div>
       <div class="form-field">
         <label for="user">User</label>
-        <input id="user" type="text" placeholder="ubuntu" bind:value={formValues.user} disabled={isERP} />
+        <input id="user" type="text" placeholder="ubuntu" bind:value={formValues.user} disabled={isProvisioned} />
       </div>
       <div class="form-field">
         <label for="keyFile">Key File</label>
-        <input id="keyFile" type="text" placeholder="~/.ssh/id_rsa" bind:value={formValues.keyFile} disabled={isERP} />
+        <input id="keyFile" type="text" placeholder="~/.ssh/id_rsa" bind:value={formValues.keyFile} disabled={isProvisioned} />
       </div>
       <div class="form-field">
         <label for="privateKey">Private Key (PEM)</label>
@@ -95,7 +95,7 @@
       </div>
       <div class="form-field checkbox-field">
         <label>
-          <input type="checkbox" bind:checked={insecureHostKey} disabled={isERP} />
+          <input type="checkbox" bind:checked={insecureHostKey} disabled={isProvisioned} />
           Skip host key verification
         </label>
       </div>
@@ -104,31 +104,31 @@
     <div class="form-grid">
       <div class="form-field">
         <label for="peerEndpoint">Peer Endpoint</label>
-        <input id="peerEndpoint" type="text" placeholder="vpn.example.com:51820" bind:value={formValues.peerEndpoint} disabled={isERP} />
+        <input id="peerEndpoint" type="text" placeholder="vpn.example.com:51820" bind:value={formValues.peerEndpoint} disabled={isProvisioned} />
       </div>
       <div class="form-field">
         <label for="tunnelAddress">Tunnel Address</label>
-        <input id="tunnelAddress" type="text" placeholder="10.100.0.42/32" bind:value={formValues.tunnelAddress} disabled={isERP} />
+        <input id="tunnelAddress" type="text" placeholder="10.100.0.42/32" bind:value={formValues.tunnelAddress} disabled={isProvisioned} />
       </div>
       <div class="form-field">
         <label for="peerPublicKey">Peer Public Key</label>
-        <input id="peerPublicKey" type="text" placeholder="base64 public key" bind:value={formValues.peerPublicKey} disabled={isERP} />
+        <input id="peerPublicKey" type="text" placeholder="base64 public key" bind:value={formValues.peerPublicKey} disabled={isProvisioned} />
       </div>
       <div class="form-field">
         <label for="allowedIPs">Allowed IPs</label>
-        <input id="allowedIPs" type="text" placeholder="10.100.0.0/16" bind:value={formValues.allowedIPs} disabled={isERP} />
+        <input id="allowedIPs" type="text" placeholder="10.100.0.0/16" bind:value={formValues.allowedIPs} disabled={isProvisioned} />
       </div>
       <div class="form-field">
         <label for="dns">DNS</label>
-        <input id="dns" type="text" placeholder="10.100.0.1 (optional)" bind:value={formValues.dns} disabled={isERP} />
+        <input id="dns" type="text" placeholder="10.100.0.1 (optional)" bind:value={formValues.dns} disabled={isProvisioned} />
       </div>
       <div class="form-field small">
         <label for="mtu">MTU</label>
-        <input id="mtu" type="text" placeholder="1420" bind:value={formValues.mtu} disabled={isERP} />
+        <input id="mtu" type="text" placeholder="1420" bind:value={formValues.mtu} disabled={isProvisioned} />
       </div>
       <div class="form-field small">
         <label for="keepAlive">Keep-Alive (s)</label>
-        <input id="keepAlive" type="text" placeholder="25" bind:value={formValues.keepAlive} disabled={isERP} />
+        <input id="keepAlive" type="text" placeholder="25" bind:value={formValues.keepAlive} disabled={isProvisioned} />
       </div>
       <div class="form-field">
         <label for="privateKey">Private Key</label>

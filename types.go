@@ -8,7 +8,7 @@ package main
 // PageData is the top-level structure returned by GetPageData().
 type PageData struct {
 	Server      ServerInfo      `json:"server"`
-	ERP         ERPInfo         `json:"erp"`
+	Provisioning ProvisioningInfo `json:"provisioning"`
 	Tunnels     []TunnelInfo    `json:"tunnels"`
 	Connections []ConnInfo      `json:"connections"`
 	Types       []TypeListEntry `json:"types"`
@@ -23,8 +23,8 @@ type ServerInfo struct {
 	CanSelfUpdate  bool   `json:"canSelfUpdate"`
 }
 
-// ERPInfo describes ERP provisioning status.
-type ERPInfo struct {
+// ProvisioningInfo describes provisioning status.
+type ProvisioningInfo struct {
 	Configured    bool   `json:"configured"`
 	Endpoint      string `json:"endpoint"`
 	TokenSet      bool   `json:"tokenSet"`
@@ -68,7 +68,7 @@ type ConnInfo struct {
 	IsProxy      bool        `json:"isProxy"`
 	IsOAuth      bool        `json:"isOAuth"`
 	OAuthOK      bool        `json:"oauthOK"`
-	IsERP        bool        `json:"isERP"`
+	IsProvisioned bool       `json:"isProvisioned"`
 	IsDeviceAuth bool        `json:"isDeviceAuth"`
 	DeviceAuthOK bool        `json:"deviceAuthOK"`
 	ReadOnly     bool        `json:"readOnly"`

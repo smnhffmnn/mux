@@ -28,7 +28,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/smnhffmnn/mux/internal/config"
-	"github.com/smnhffmnn/mux/internal/erp"
+	"github.com/smnhffmnn/mux/internal/provisioning"
 	"github.com/smnhffmnn/mux/internal/proxy"
 	"github.com/smnhffmnn/mux/internal/tools"
 )
@@ -334,7 +334,7 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 		IsProxy:      config.IsProxyType(conn.Type),
 		IsOAuth:      isOAuth,
 		OAuthOK:      oauthOK,
-		IsERP:        conn.Source == "erp",
+		IsProvisioned:        conn.Source == "provisioning",
 		IsDeviceAuth: isDeviceAuth,
 		DeviceAuthOK: deviceAuthOK,
 		ReadOnly:     conn.ReadOnly,
@@ -345,7 +345,7 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 
 // ========== Read Bindings ==========
 
-// GetPageData returns the full page state (connections, tunnels, ERP, server info).
+// GetPageData returns the full page state (connections, tunnels, provisioning, server info).
 func (a *App) GetPageData() PageData {
 	data := PageData{
 		Server: ServerInfo{
@@ -358,13 +358,13 @@ func (a *App) GetPageData() PageData {
 		Types: allTypes(),
 	}
 
-	erpT, erpC := a.cfg.ERPStatus()
-	data.ERP = ERPInfo{
-		Configured:  a.cfg.HasERP(),
-		Endpoint:    a.cfg.ERP.Endpoint,
-		TokenSet:    a.cfg.ERP.Token != "",
-		Tunnels:     erpT,
-		Connections: erpC,
+	provT, provC := a.cfg.ProvisioningStatus()
+	data.Provisioning = ProvisioningInfo{
+		Configured:  a.cfg.HasProvisioning(),
+		Endpoint:    a.cfg.Provisioning.Endpoint,
+		TokenSet:    a.cfg.Provisioning.Token != "",
+		Tunnels:     provT,
+		Connections: provC,
 	}
 
 	for _, t := range a.cfg.AllTunnels() {
@@ -452,9 +452,9 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 	if conn == nil {
 		return nil, fmt.Errorf("connection not found: %s", name)
 	}
-	isERP := conn.Source == "erp"
+	isProvisioned := conn.Source == "provisioning"
 
-	if !isERP {
+	if !isProvisioned {
 		if fields.Host != "" {
 			conn.Host = fields.Host
 		}
@@ -494,7 +494,7 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 		}
 	}
 
-	if !isERP {
+	if !isProvisioned {
 		if err := a.cfg.Save(); err != nil {
 			log.Printf("[app] Warning: could not save config file: %v", err)
 		}
@@ -512,8 +512,8 @@ func (a *App) DeleteConnection(name string) error {
 	var newConns []config.Connection
 	for _, c := range a.cfg.Connections {
 		if c.Name == name {
-			if c.Source == "erp" {
-				return fmt.Errorf("ERP-managed connections cannot be deleted")
+			if c.Source == "provisioning" {
+				return fmt.Errorf("provisioned connections cannot be deleted")
 			}
 			found = true
 			continue
@@ -575,9 +575,9 @@ func (a *App) SaveTunnel(name string, fields SaveTunnelRequest) (*TunnelInfo, er
 	if t == nil {
 		return nil, fmt.Errorf("tunnel not found: %s", name)
 	}
-	isERP := t.Source == "erp"
+	isProvisioned := t.Source == "provisioning"
 
-	if !isERP {
+	if !isProvisioned {
 		// WireGuard fields
 		if fields.PeerPublicKey != "" {
 			t.PeerPublicKey = fields.PeerPublicKey
@@ -619,7 +619,7 @@ func (a *App) SaveTunnel(name string, fields SaveTunnelRequest) (*TunnelInfo, er
 		}
 	}
 
-	// Secrets — always saveable (even for ERP tunnels, to allow local key override)
+	// Secrets — always saveable (even for provisioned tunnels, to allow local key override)
 	if fields.PrivateKey != "" {
 		t.PrivateKey = fields.PrivateKey
 		if err := config.SaveSecret("tunnel-"+name+"-private-key", fields.PrivateKey); err != nil {
@@ -633,7 +633,7 @@ func (a *App) SaveTunnel(name string, fields SaveTunnelRequest) (*TunnelInfo, er
 		}
 	}
 
-	if !isERP {
+	if !isProvisioned {
 		if err := a.cfg.Save(); err != nil {
 			log.Printf("[app] Warning: could not save config file: %v", err)
 		}
@@ -653,8 +653,8 @@ func (a *App) DeleteTunnel(name string) error {
 	var newTunnels []config.TunnelConfig
 	for _, t := range a.cfg.Tunnels {
 		if t.Name == name {
-			if t.Source == "erp" {
-				return fmt.Errorf("ERP-managed tunnels cannot be deleted")
+			if t.Source == "provisioning" {
+				return fmt.Errorf("provisioned tunnels cannot be deleted")
 			}
 			found = true
 			continue
@@ -791,67 +791,67 @@ func (a *App) TestConnection(name string) *TestResult {
 	}
 }
 
-// SetupERP saves ERP endpoint and token.
-func (a *App) SetupERP(endpoint, token string) (*ERPInfo, error) {
+// SetupProvisioning saves provisioning endpoint and token.
+func (a *App) SetupProvisioning(endpoint, token string) (*ProvisioningInfo, error) {
 	if endpoint == "" && token == "" {
 		return nil, fmt.Errorf("enter at least an endpoint or token")
 	}
 
 	if endpoint != "" {
-		a.cfg.ERP.Endpoint = endpoint
+		a.cfg.Provisioning.Endpoint = endpoint
 	}
 	if token != "" {
-		a.cfg.ERP.Token = token
+		a.cfg.Provisioning.Token = token
 		if err := config.SaveSecret("provisioning-token", token); err != nil {
-			log.Printf("[app] Warning: could not save ERP token to keychain: %v", err)
+			log.Printf("[app] Warning: could not save provisioning token to keychain: %v", err)
 		}
 	}
 	if err := a.cfg.Save(); err != nil {
 		log.Printf("[app] Warning: could not save config file: %v", err)
 	}
 
-	erpT, erpC := a.cfg.ERPStatus()
-	return &ERPInfo{
-		Configured:    a.cfg.HasERP(),
-		Endpoint:      a.cfg.ERP.Endpoint,
-		TokenSet:      a.cfg.ERP.Token != "",
-		Tunnels:       erpT,
-		Connections:   erpC,
-		ResultMessage: "ERP settings saved.",
+	provT, provC := a.cfg.ProvisioningStatus()
+	return &ProvisioningInfo{
+		Configured:    a.cfg.HasProvisioning(),
+		Endpoint:      a.cfg.Provisioning.Endpoint,
+		TokenSet:      a.cfg.Provisioning.Token != "",
+		Tunnels:       provT,
+		Connections:   provC,
+		ResultMessage: "Provisioning settings saved.",
 		ResultSuccess: true,
 	}, nil
 }
 
-// SyncERP fetches config from the ERP and returns updated page data.
-func (a *App) SyncERP() (*PageData, error) {
-	if !a.cfg.HasERP() {
-		return nil, fmt.Errorf("ERP not configured (endpoint or token missing)")
+// SyncProvisioning fetches config from the provisioning server and returns updated page data.
+func (a *App) SyncProvisioning() (*PageData, error) {
+	if !a.cfg.HasProvisioning() {
+		return nil, fmt.Errorf("provisioning not configured (endpoint or token missing)")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	resp, err := erp.Fetch(ctx, a.cfg.ERP.Endpoint, a.cfg.ERP.Token)
+	resp, err := provisioning.Fetch(ctx, a.cfg.Provisioning.Endpoint, a.cfg.Provisioning.Token)
 	if err != nil {
-		return nil, fmt.Errorf("ERP sync failed: %w", err)
+		return nil, fmt.Errorf("provisioning sync failed: %w", err)
 	}
 
-	// Collect old ERP connection names before overwriting
-	oldERP := make(map[string]bool)
+	// Collect old provisioned connection names before overwriting
+	oldProvisioned := make(map[string]bool)
 	for _, c := range a.cfg.AllConnections() {
-		if c.Source == "erp" {
-			oldERP[c.Name] = true
+		if c.Source == "provisioning" {
+			oldProvisioned[c.Name] = true
 		}
 	}
 
-	a.cfg.SetERP(resp.Tunnels, resp.Connections)
-	log.Printf("[app] ERP sync: %d tunnels, %d connections", len(resp.Tunnels), len(resp.Connections))
+	a.cfg.SetProvisioned(resp.Tunnels, resp.Connections)
+	log.Printf("[app] Provisioning sync: %d tunnels, %d connections", len(resp.Tunnels), len(resp.Connections))
 
-	// Unregister connections that were removed from ERP
+	// Unregister connections that were removed from provisioning
 	for _, c := range resp.Connections {
-		delete(oldERP, c.Name)
+		delete(oldProvisioned, c.Name)
 	}
-	for name := range oldERP {
+	for name := range oldProvisioned {
 		a.unregisterConnectionTools(name)
 	}
 
@@ -861,8 +861,8 @@ func (a *App) SyncERP() (*PageData, error) {
 	}
 
 	data := a.GetPageData()
-	data.ERP.ResultMessage = fmt.Sprintf("Synced: %d tunnels, %d connections", len(resp.Tunnels), len(resp.Connections))
-	data.ERP.ResultSuccess = true
+	data.Provisioning.ResultMessage = fmt.Sprintf("Synced: %d tunnels, %d connections", len(resp.Tunnels), len(resp.Connections))
+	data.Provisioning.ResultSuccess = true
 	return &data, nil
 }
 
@@ -1392,8 +1392,8 @@ func (a *App) testHTTP(conn config.Connection) testResponse {
 	}
 
 	testURL := conn.URL
-	if conn.Source == "erp" && a.cfg.ERP.Endpoint != "" {
-		testURL = a.cfg.ERP.Endpoint
+	if conn.Source == "provisioning" && a.cfg.Provisioning.Endpoint != "" {
+		testURL = a.cfg.Provisioning.Endpoint
 	}
 
 	httpClient := &http.Client{

@@ -101,7 +101,7 @@ export function GetOAuthStatus(name) {
 }
 
 /**
- * GetPageData returns the full page state (connections, tunnels, ERP, server info).
+ * GetPageData returns the full page state (connections, tunnels, provisioning, server info).
  * @returns {$CancellablePromise<$models.PageData>}
  */
 export function GetPageData() {
@@ -155,12 +155,12 @@ export function SelfUpdate() {
 }
 
 /**
- * SetupERP saves ERP endpoint and token.
+ * SetupProvisioning saves provisioning endpoint and token.
  * @param {string} endpoint
  * @param {string} token
- * @returns {$CancellablePromise<$models.ERPInfo | null>}
+ * @returns {$CancellablePromise<$models.ProvisioningInfo | null>}
  */
-export function SetupERP(endpoint, token) {
+export function SetupProvisioning(endpoint, token) {
     return $Call.ByID(2707197963, endpoint, token).then(/** @type {($result: any) => any} */(($result) => {
         return $$createType13($result);
     }));
@@ -189,10 +189,10 @@ export function StartOAuth(name) {
 }
 
 /**
- * SyncERP fetches config from the ERP and returns updated page data.
+ * SyncProvisioning fetches config from the provisioning server and returns updated page data.
  * @returns {$CancellablePromise<$models.PageData | null>}
  */
-export function SyncERP() {
+export function SyncProvisioning() {
     return $Call.ByID(1919373343).then(/** @type {($result: any) => any} */(($result) => {
         return $$createType18($result);
     }));
@@ -234,7 +234,7 @@ const $$createType8 = $models.PageData.createFrom;
 const $$createType9 = $models.ServerInfo.createFrom;
 const $$createType10 = $models.UpdateResult.createFrom;
 const $$createType11 = $Create.Nullable($$createType10);
-const $$createType12 = $models.ERPInfo.createFrom;
+const $$createType12 = $models.ProvisioningInfo.createFrom;
 const $$createType13 = $Create.Nullable($$createType12);
 const $$createType14 = $models.DeviceAuthStart.createFrom;
 const $$createType15 = $Create.Nullable($$createType14);

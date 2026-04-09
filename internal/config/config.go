@@ -41,7 +41,7 @@ type Connection struct {
 	TokenHeader  string `toml:"token_header,omitempty" json:"tokenHeader,omitempty"` // custom header name for token (default: "Authorization: Bearer {token}")
 	Tunnel       string `toml:"tunnel,omitempty" json:"tunnel,omitempty"`             // name of a defined tunnel
 	MonthlyLimit int    `toml:"monthly_limit,omitzero" json:"monthlyLimit,omitempty"` // optional request limit per month
-	Source       string `toml:"-" json:"source,omitempty"`                             // "local" or "erp"
+	Source       string `toml:"-" json:"source,omitempty"`                             // "local" or "provisioning"
 }
 
 // Enabled reports whether the connection has enough config to attempt a connection.
@@ -95,7 +95,7 @@ type TunnelConfig struct {
 
 	// Shared
 	PrivateKey string `toml:"-" json:"-"` // WG: base64 key; SSH: PEM key content — never serialize
-	Source     string `toml:"-" json:"source,omitempty"` // "local" or "erp"
+	Source     string `toml:"-" json:"source,omitempty"` // "local" or "provisioning"
 }
 
 // IsSSH reports whether the tunnel is an SSH tunnel.
@@ -112,8 +112,8 @@ func (t *TunnelConfig) Enabled() bool {
 	return t.PrivateKey != "" && t.PeerPublicKey != "" && t.PeerEndpoint != ""
 }
 
-// ERPConfig holds the ERP provisioning endpoint settings.
-type ERPConfig struct {
+// ProvisioningConfig holds the remote provisioning endpoint settings.
+type ProvisioningConfig struct {
 	Endpoint string `toml:"endpoint,omitempty" json:"endpoint,omitempty"`
 	Token    string `toml:"-" json:"-"`
 }
@@ -146,25 +146,25 @@ type VaultConfig struct {
 // Config is the application configuration.
 type Config struct {
 	Server      ServerConfig   `toml:"server"`
-	ERP         ERPConfig      `toml:"erp,omitempty"`
+	Provisioning ProvisioningConfig `toml:"provisioning,omitempty"`
 	Vault       VaultConfig    `toml:"vault,omitempty"`
 	Tunnels     []TunnelConfig `toml:"tunnels,omitempty"`
 	Connections []Connection `toml:"connections,omitempty"`
 
 	// Runtime fields (not persisted)
-	erpTunnels     []TunnelConfig
-	erpConnections []Connection
+	provisionedTunnels     []TunnelConfig
+	provisionedConnections []Connection
 	path           string
 }
 
-// AllTunnels returns local + ERP tunnels. On name collision, ERP wins.
+// AllTunnels returns local + provisioned tunnels. On name collision, provisioned wins.
 func (cfg *Config) AllTunnels() []TunnelConfig {
-	if len(cfg.erpTunnels) == 0 {
+	if len(cfg.provisionedTunnels) == 0 {
 		return cfg.Tunnels
 	}
 	seen := make(map[string]bool)
 	var all []TunnelConfig
-	for _, t := range cfg.erpTunnels {
+	for _, t := range cfg.provisionedTunnels {
 		seen[t.Name] = true
 		all = append(all, t)
 	}
@@ -176,36 +176,36 @@ func (cfg *Config) AllTunnels() []TunnelConfig {
 	return all
 }
 
-// AllConnections returns local + ERP connections.
+// AllConnections returns local + provisioned connections.
 func (cfg *Config) AllConnections() []Connection {
-	if len(cfg.erpConnections) == 0 {
+	if len(cfg.provisionedConnections) == 0 {
 		return cfg.Connections
 	}
 	var all []Connection
-	all = append(all, cfg.erpConnections...)
+	all = append(all, cfg.provisionedConnections...)
 	all = append(all, cfg.Connections...)
 	return all
 }
 
-// SetERP stores provisioned tunnels and connections from an ERP response.
-// It applies defaults to ERP connections so they are ready to use.
-// HTTP connections without a token inherit the ERP bearer token when their URL
-// points to the same host as the ERP endpoint (same API, same credentials).
-func (cfg *Config) SetERP(tunnels []TunnelConfig, connections []Connection) {
-	erpHost := hostFromURL(cfg.ERP.Endpoint)
+// SetProvisioned stores provisioned tunnels and connections from a provisioning response.
+// It applies defaults to provisioned connections so they are ready to use.
+// HTTP connections without a token inherit the provisioning bearer token when their URL
+// points to the same host as the provisioning endpoint (same API, same credentials).
+func (cfg *Config) SetProvisioned(tunnels []TunnelConfig, connections []Connection) {
+	provHost := hostFromURL(cfg.Provisioning.Endpoint)
 	for i := range connections {
 		if connections[i].Source == "" {
-			connections[i].Source = "erp"
+			connections[i].Source = "provisioning"
 		}
-		// ERP http connections without their own token reuse the ERP token
-		// if they point to the same host as the ERP endpoint
-		if connections[i].Type == "http" && connections[i].Token == "" && cfg.ERP.Token != "" {
-			if erpHost != "" && hostFromURL(connections[i].URL) == erpHost {
-				connections[i].Token = cfg.ERP.Token
+		// Provisioned http connections without their own token reuse the provisioning token
+		// if they point to the same host as the provisioning endpoint
+		if connections[i].Type == "http" && connections[i].Token == "" && cfg.Provisioning.Token != "" {
+			if provHost != "" && hostFromURL(connections[i].URL) == provHost {
+				connections[i].Token = cfg.Provisioning.Token
 			}
 		}
 		// Supplement with locally stored secrets from keychain/file.
-		// Only fills in gaps — if ERP provides a secret, it wins.
+		// Only fills in gaps — if the provisioning server provides a secret, it wins.
 		if connections[i].Password == "" {
 			if v, err := getSecret(connections[i].Name + "-password"); err == nil {
 				connections[i].Password = v
@@ -220,7 +220,7 @@ func (cfg *Config) SetERP(tunnels []TunnelConfig, connections []Connection) {
 	}
 	for i := range tunnels {
 		if tunnels[i].Source == "" {
-			tunnels[i].Source = "erp"
+			tunnels[i].Source = "provisioning"
 		}
 		if tunnels[i].IsSSH() {
 			if tunnels[i].Port == 0 {
@@ -246,18 +246,18 @@ func (cfg *Config) SetERP(tunnels []TunnelConfig, connections []Connection) {
 			}
 		}
 	}
-	cfg.erpTunnels = tunnels
-	cfg.erpConnections = connections
+	cfg.provisionedTunnels = tunnels
+	cfg.provisionedConnections = connections
 }
 
-// HasERP reports whether ERP provisioning is configured (endpoint + token present).
-func (cfg *Config) HasERP() bool {
-	return cfg.ERP.Endpoint != "" && cfg.ERP.Token != ""
+// HasProvisioning reports whether remote provisioning is configured (endpoint + token present).
+func (cfg *Config) HasProvisioning() bool {
+	return cfg.Provisioning.Endpoint != "" && cfg.Provisioning.Token != ""
 }
 
-// ERPStatus reports whether ERP provisioning has loaded data.
-func (cfg *Config) ERPStatus() (tunnels, connections int) {
-	return len(cfg.erpTunnels), len(cfg.erpConnections)
+// ProvisioningStatus reports whether remote provisioning has loaded data.
+func (cfg *Config) ProvisioningStatus() (tunnels, connections int) {
+	return len(cfg.provisionedTunnels), len(cfg.provisionedConnections)
 }
 
 func DefaultConfigPath() string {
@@ -526,7 +526,7 @@ func (cfg *Config) Save() error {
 func loadKeychain(cfg *Config) {
 	// Provisioning token
 	if v, err := getSecret("provisioning-token"); err == nil {
-		cfg.ERP.Token = v
+		cfg.Provisioning.Token = v
 	}
 
 	// Connection secrets (password or token, keyed by connection name)
@@ -562,10 +562,10 @@ func loadEnv(cfg *Config) {
 
 	// Provisioning
 	if v := os.Getenv("MUX_PROVISIONING_ENDPOINT"); v != "" {
-		cfg.ERP.Endpoint = v
+		cfg.Provisioning.Endpoint = v
 	}
 	if v := os.Getenv("MUX_PROVISIONING_TOKEN"); v != "" {
-		cfg.ERP.Token = v
+		cfg.Provisioning.Token = v
 	}
 
 	// Legacy env vars: create or update connections by name
@@ -680,16 +680,16 @@ func (cfg *Config) FindTunnel(name string) *TunnelConfig {
 }
 
 // FindAnyTunnel returns the tunnel with the given name from
-// local or ERP tunnels. Returns a pointer to the actual element.
+// local or provisioned tunnels. Returns a pointer to the actual element.
 func (cfg *Config) FindAnyTunnel(name string) *TunnelConfig {
 	for i := range cfg.Tunnels {
 		if cfg.Tunnels[i].Name == name {
 			return &cfg.Tunnels[i]
 		}
 	}
-	for i := range cfg.erpTunnels {
-		if cfg.erpTunnels[i].Name == name {
-			return &cfg.erpTunnels[i]
+	for i := range cfg.provisionedTunnels {
+		if cfg.provisionedTunnels[i].Name == name {
+			return &cfg.provisionedTunnels[i]
 		}
 	}
 	return nil
@@ -707,7 +707,7 @@ func (cfg *Config) FindConnection(name string) *Connection {
 }
 
 // FindAnyConnection returns the connection with the given name from
-// local or ERP connections. Returns a pointer to the actual element
+// local or provisioned connections. Returns a pointer to the actual element
 // (not a copy), so mutations persist in memory.
 func (cfg *Config) FindAnyConnection(name string) *Connection {
 	for i := range cfg.Connections {
@@ -715,9 +715,9 @@ func (cfg *Config) FindAnyConnection(name string) *Connection {
 			return &cfg.Connections[i]
 		}
 	}
-	for i := range cfg.erpConnections {
-		if cfg.erpConnections[i].Name == name {
-			return &cfg.erpConnections[i]
+	for i := range cfg.provisionedConnections {
+		if cfg.provisionedConnections[i].Name == name {
+			return &cfg.provisionedConnections[i]
 		}
 	}
 	return nil

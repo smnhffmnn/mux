@@ -4,7 +4,7 @@ Single-binary MCP gateway for databases, APIs, and tunnels.
 
 ## What is mux?
 
-mux is a [Model Context Protocol](https://modelcontextprotocol.io) gateway that gives AI agents unified access to databases, upstream MCP servers, and API services through one endpoint. It connects to private networks via built-in WireGuard tunnels (no root required), runs as a desktop app with system tray or headless for servers and CI, and stores secrets in your OS keychain. No Docker, no Python, no runtime dependencies.
+mux is a [Model Context Protocol](https://modelcontextprotocol.io) gateway that gives AI agents unified access to databases, upstream MCP servers, and API services through one endpoint. It connects to private networks via built-in WireGuard tunnels (no root required), runs as a desktop app with system tray or headless for servers and CI, and stores secrets in an encrypted vault or your OS keychain. No Docker, no Python, no runtime dependencies.
 
 ## Features
 
@@ -16,9 +16,9 @@ mux is a [Model Context Protocol](https://modelcontextprotocol.io) gateway that 
 - **Remote Provisioning** -- centrally manage connections and tunnels for your team from a single HTTP endpoint
 - **Two Transports, Three Modes** -- stdio (Claude Desktop) and Streamable HTTP (`/mcp`), with auto-detection of desktop, headless, and stdio modes
 - **Desktop App** -- Wails v3 + Svelte 5 with system tray, web UI, OAuth flows, and connection testing
-- **OS Keychain** -- secrets stored in macOS Keychain, GNOME Keyring, or Windows Credential Manager
-- **Encrypted Vault** -- optional hardware-security-grade secret storage with AES-256-GCM, Argon2id key derivation, inactivity auto-lock, and WebAuthn/FIDO2 unlock (FaceID, YubiKey)
-- **Approval Flow** -- human-in-the-loop approval for privileged agent actions (git push, etc.) with Discord notifications and browser-based WebAuthn approval page
+- **Encrypted Vault** -- hardware-security-grade secret storage with AES-256-GCM, Argon2id key derivation, inactivity auto-lock, and WebAuthn/FIDO2 unlock (FaceID, YubiKey)
+- **OS Keychain** -- alternative secret storage via macOS Keychain, GNOME Keyring, or Windows Credential Manager
+- **Approval Flow** -- human-in-the-loop approval for privileged agent actions (git push, etc.) with configurable notifications (Telegram, Discord) and browser-based WebAuthn approval page
 - **Dynamic Config** -- add, remove, and manage connections at runtime via MCP tools
 - **Cross-Platform** -- macOS, Linux, Windows (amd64 + arm64)
 
@@ -45,11 +45,11 @@ Download the latest binary from [Releases](https://github.com/smnhffmnn/mux/rele
 
 ```bash
 # Headless (all platforms, no CGO required)
-go install github.com/smnhffmnn/mux@latest
+git clone https://github.com/smnhffmnn/mux.git
+cd mux && CGO_ENABLED=0 go build -tags notray -ldflags "-s -w" -o mux .
 
 # Desktop (macOS, requires CGO + Wails v3)
-git clone https://github.com/smnhffmnn/mux.git
-cd mux && make build
+make build
 ```
 
 ## Quick Start
@@ -64,7 +64,6 @@ host = "localhost"
 port = 3306
 user = "root"
 database = "myapp"
-# Store password: run mux, then use the secret_set tool or web UI
 ```
 
 Run mux:
@@ -74,6 +73,12 @@ mux
 ```
 
 mux auto-detects the mode: piped stdin = stdio mode, no display = headless HTTP server, terminal with display = desktop app + HTTP server on port 7700.
+
+Set the database password (via your MCP client or the web UI):
+
+```
+secret_set key=mydb-password value=<your-password>
+```
 
 ## Usage
 
@@ -125,7 +130,9 @@ mux --port 8080 --config ./my-config.toml  # custom port and config
 
 Config file: `~/.mux/config.toml`
 
-Priority (highest wins): **Environment variables > OS Keychain > TOML file > Defaults**
+Connection settings are loaded with this priority (highest wins): **Environment variables > TOML file > Defaults**
+
+Secrets (passwords, tokens, keys) have their own resolution chain: **Encrypted Vault > OS Keychain > File fallback** (`~/.mux/secrets.toml`)
 
 ```toml
 [server]
@@ -141,13 +148,13 @@ database = "production"
 read_only = true
 tunnel = "office-vpn"
 instructions = "Production database. Read-only access."
-# Password stored in keychain (key: "production-password")
+# Password stored as secret (key: "production-password")
 
 [[connections]]
 name = "youtrack"
 type = "proxy"
 url = "https://instance.myjetbrains.com/mcp"
-# Token stored in keychain (key: "youtrack-token")
+# Token stored as secret (key: "youtrack-token")
 
 [[tunnels]]
 name = "office-vpn"
@@ -156,14 +163,14 @@ peer_endpoint = "vpn.example.com:51820"
 allowed_ips = "10.100.0.0/16"
 tunnel_address = "10.100.0.42/32"
 dns = "10.100.0.1"
-# Private key stored in keychain (key: "tunnel-office-vpn-private-key")
+# Private key stored as secret (key: "tunnel-office-vpn-private-key")
 ```
 
 See [docs/configuration.md](docs/configuration.md) for the full reference.
 
 ## Vault (Encrypted Secret Store)
 
-The vault is an opt-in feature that encrypts all secrets at rest using AES-256-GCM with Argon2id key derivation. It replaces the plaintext `secrets.toml` fallback with a hardware-security model: secrets are only accessible in memory while the vault is unlocked, and automatically wiped after a configurable inactivity timeout.
+The vault encrypts all secrets at rest using AES-256-GCM with Argon2id key derivation. Secrets are only accessible in memory while the vault is unlocked, and automatically wiped after a configurable inactivity timeout. The vault is the recommended secret backend for headless deployments; without it, mux falls back to the OS keychain or a plaintext `secrets.toml` file.
 
 ### Setup
 
@@ -202,18 +209,24 @@ The dual-port architecture keeps MCP clients (`.mcp.json`) on plain HTTP localho
 
 ### Approval Flow
 
-When agents need to perform privileged actions (e.g., `git push`), the approval system creates a request, notifies the user via Discord webhook, and blocks until the user approves via WebAuthn in their browser.
+The approval flow requires the vault to be enabled. When agents need to perform privileged actions (e.g., `git push`), the approval system creates a request, notifies the user via configured notification channels, and blocks until the user approves via WebAuthn in their browser.
 
 ```
-Agent wants to push → Approval created → Discord notification with link
-→ User opens link on phone → FaceID/YubiKey → Approved → Agent proceeds
+Agent wants to push → POST /vault/approval → Notification sent
+→ User opens approval link on phone → FaceID/YubiKey → Approved → Agent proceeds
 ```
 
-Configure the Discord webhook as a secret:
+Configure notification channels via secrets (one or both):
 ```
-# Via MCP tool:
+# Telegram Bot API:
+secret_set key=vault-telegram-bot-token value=<bot-token>
+secret_set key=vault-telegram-chat-id value=<chat-id>
+
+# Discord Webhook:
 secret_set key=vault-discord-webhook value=https://discord.com/api/webhooks/...
 ```
+
+If multiple channels are configured, notifications are sent to all of them. If none are configured, approval requests are logged to stdout.
 
 A PreToolUse hook script for Claude Code is included at `scripts/approval-hook.sh`.
 

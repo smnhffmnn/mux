@@ -18,7 +18,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/smnhffmnn/mux/internal/config"
-	"github.com/smnhffmnn/mux/internal/erp"
+	"github.com/smnhffmnn/mux/internal/provisioning"
 	"github.com/smnhffmnn/mux/internal/tools"
 	"github.com/smnhffmnn/mux/internal/vault"
 	"github.com/smnhffmnn/mux/internal/wireguard"
@@ -87,17 +87,17 @@ More info: https://github.com/smnhffmnn/mux
 		cfg.Server.Port = flagPort
 	}
 
-	// ERP Provisioning: fetch tunnels + connections from ERP API
-	if cfg.HasERP() {
-		log.Printf("[mux] Fetching config from ERP: %s", cfg.ERP.Endpoint)
-		erpCtx, erpCancel := context.WithTimeout(context.Background(), 20*time.Second)
-		erpResp, erpErr := erp.Fetch(erpCtx, cfg.ERP.Endpoint, cfg.ERP.Token)
-		erpCancel()
-		if erpErr != nil {
-			log.Printf("[mux] ERP provisioning failed: %v (continuing with local config)", erpErr)
+	// Remote Provisioning: fetch tunnels + connections from provisioning API
+	if cfg.HasProvisioning() {
+		log.Printf("[mux] Fetching config from provisioning: %s", cfg.Provisioning.Endpoint)
+		provCtx, provCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		provResp, provErr := provisioning.Fetch(provCtx, cfg.Provisioning.Endpoint, cfg.Provisioning.Token)
+		provCancel()
+		if provErr != nil {
+			log.Printf("[mux] Provisioning failed: %v (continuing with local config)", provErr)
 		} else {
-			cfg.SetERP(erpResp.Tunnels, erpResp.Connections)
-			log.Printf("[mux] ERP provisioned: %d tunnels, %d connections", len(erpResp.Tunnels), len(erpResp.Connections))
+			cfg.SetProvisioned(provResp.Tunnels, provResp.Connections)
+			log.Printf("[mux] Provisioned: %d tunnels, %d connections", len(provResp.Tunnels), len(provResp.Connections))
 		}
 	}
 

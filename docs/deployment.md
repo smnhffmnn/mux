@@ -32,11 +32,7 @@ Requires Xcode Command Line Tools (`xcode-select --install`) for CGO.
 CGO_ENABLED=0 go build -tags notray -ldflags "-s -w" -o mux .
 ```
 
-Or via `go install`:
-
-```bash
-go install github.com/smnhffmnn/mux@latest
-```
+> **Note:** `go install` is not recommended for headless builds — it cannot pass the `-tags notray` flag and will attempt to build the desktop variant, which requires CGO.
 
 ### Cross-compile
 
@@ -99,8 +95,8 @@ mux automatically selects the right mode — no flags needed:
 
 **Headless build**:
 - Works without Xcode
-- No tray icon, no web UI — MCP endpoint only (`http://localhost:7700/mcp`)
-- Secrets stored in macOS Keychain Access (service: "mux")
+- No tray icon — MCP endpoint only (`http://localhost:7700/mcp`)
+- Secrets stored in macOS Keychain Access (service: "mux"), or in the encrypted vault
 
 ### Linux
 
@@ -113,13 +109,16 @@ CGO_ENABLED=0 go build -tags notray -o mux .
 
 mux detects the absence of `DISPLAY`/`WAYLAND_DISPLAY` and starts in headless HTTP mode automatically.
 
-**Keychain**: Secrets use the Secret Service API (GNOME Keyring or KWallet). For headless servers without a desktop environment, use environment variables instead:
+**Secrets**: On Linux with a desktop environment, secrets use the Secret Service API (GNOME Keyring or KWallet). For headless servers, the recommended options are:
 
-```bash
-export POSTGRESQL_DB_PASSWORD=secret
-export MUX_PROVISIONING_TOKEN=my-token
-./mux
-```
+1. **Encrypted Vault** (recommended) -- hardware-grade encryption with WebAuthn unlock. See [Configuration: Vault](configuration.md#vault-encrypted-secret-store).
+2. **File fallback** -- `~/.mux/secrets.toml` (chmod 600), used automatically when no keyring is available.
+3. **Environment variables** -- override connection settings for containerized deployments:
+   ```bash
+   export POSTGRESQL_DB_PASSWORD=secret
+   export MUX_PROVISIONING_TOKEN=my-token
+   ./mux
+   ```
 
 ### Windows
 
@@ -167,16 +166,36 @@ After=network.target
 [Service]
 Type=simple
 User=mux
+Group=mux
 ExecStart=/usr/local/bin/mux
 Restart=on-failure
 RestartSec=5
-Environment=MUX_PORT=7700
-# Add secrets as environment variables if no keyring is available:
+# Secrets: use the encrypted vault (recommended), or set environment overrides:
 # EnvironmentFile=/etc/mux/secrets.env
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+For user-level services (recommended for workstation setups with vault + WebAuthn):
+
+```ini
+# ~/.config/systemd/user/mux.service
+[Unit]
+Description=mux MCP gateway
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/mux
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+Enable with `systemctl --user enable --now mux.service`. Requires `loginctl enable-linger <user>` for the service to survive logout.
 
 ### Windows Service
 
@@ -190,21 +209,21 @@ nssm start mux
 ## Docker
 
 ```dockerfile
-FROM golang:1.25-alpine AS builder
+FROM golang:1-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -tags notray -ldflags "-s -w" -o mux .
 
-FROM alpine:latest
+FROM alpine:3
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /app/mux /usr/local/bin/mux
 EXPOSE 7700
 ENTRYPOINT ["mux"]
 ```
 
-Docker containers have no OS keychain. Use environment variables for all secrets:
+Docker containers have no OS keychain or vault. Use environment variables to override connection settings:
 
 ```bash
 docker run -p 7700:7700 \

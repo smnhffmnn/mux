@@ -11,7 +11,7 @@ export {
     ConnInfo,
     DeviceAuthStart,
     DeviceAuthStatus,
-    ERPInfo,
+    ProvisioningInfo,
     FieldInfo,
     OAuthStartResult,
     OAuthStatus,

@@ -12,7 +12,7 @@ Connects to a MariaDB/MySQL server via the Go `mysql` driver.
 
 **Optional fields**: `port` (default: 3306), `database`, `read_only` (default: false), `tunnel`, `instructions`
 
-**Secret**: `{name}-password` in keychain
+**Secret**: `{name}-password` in secret store
 
 ```toml
 [[connections]]
@@ -42,7 +42,7 @@ Connects to a PostgreSQL server via `lib/pq`.
 
 **Optional fields**: `port` (default: 5432), `database`, `tunnel`, `instructions`
 
-**Secret**: `{name}-password` in keychain
+**Secret**: `{name}-password` in secret store
 
 ```toml
 [[connections]]
@@ -73,7 +73,7 @@ Connects to a ClickHouse server via `clickhouse-go`. Protocol is auto-detected f
 
 **Optional fields**: `port` (default: 8123), `database` (default: `"default"`), `secure` (TLS for HTTP, default: false), `tunnel`, `instructions`
 
-**Secret**: `{name}-password` in keychain
+**Secret**: `{name}-password` in secret store
 
 ```toml
 [[connections]]
@@ -106,7 +106,7 @@ Accesses Microsoft 365 mail and SharePoint via the Microsoft Graph REST API. Aut
 
 **Optional fields**: `scopes` (override default scopes), `tunnel`, `instructions`
 
-**Secret**: `{name}-oauth-refresh-token` in keychain (stored automatically after first login)
+**Secret**: `{name}-oauth-refresh-token` in secret store (stored automatically after first login)
 
 Default scopes: `Mail.Read Mail.ReadWrite Mail.Send offline_access`
 
@@ -145,7 +145,7 @@ HTTP client for the OpenAI REST API with automatic Bearer authentication.
 
 **Optional fields**: `url` (default: `https://api.openai.com`), `instructions`
 
-**Secret**: `{name}-token` in keychain (API key)
+**Secret**: `{name}-token` in secret store (API key)
 
 ```toml
 [[connections]]
@@ -169,7 +169,7 @@ HTTP client for the ElevenLabs audio API with automatic `xi-api-key` authenticat
 
 **Optional fields**: `url` (default: `https://api.elevenlabs.io`), `instructions`
 
-**Secret**: `{name}-token` in keychain (API key)
+**Secret**: `{name}-token` in secret store (API key)
 
 ```toml
 [[connections]]
@@ -193,7 +193,7 @@ HTTP client for the Recraft image generation API with automatic Bearer authentic
 
 **Optional fields**: `url` (default: `https://external.api.recraft.ai/v1`), `instructions`
 
-**Secret**: `{name}-token` in keychain (API key)
+**Secret**: `{name}-token` in secret store (API key)
 
 ```toml
 [[connections]]
@@ -231,7 +231,7 @@ HTTP client for the Ideogram image generation API with automatic `Api-Key` heade
 
 **Optional fields**: `url` (default: `https://api.ideogram.ai`), `instructions`
 
-**Secret**: `{name}-token` in keychain (API key)
+**Secret**: `{name}-token` in secret store (API key)
 
 ```toml
 [[connections]]
@@ -265,7 +265,7 @@ Web and local search via the Brave Search API. Includes client-side request coun
 
 **Optional fields**: `url` (default: `https://api.search.brave.com`), `monthly_limit` (0 = unlimited), `instructions`
 
-**Secret**: `{name}-token` in keychain (API key)
+**Secret**: `{name}-token` in secret store (API key)
 
 ```toml
 [[connections]]
@@ -290,7 +290,7 @@ Web scraping, searching, and crawling via the Firecrawl API.
 
 **Optional fields**: `url` (default: `https://api.firecrawl.dev`), `instructions`
 
-**Secret**: `{name}-token` in keychain (API key)
+**Secret**: `{name}-token` in secret store (API key)
 
 ```toml
 [[connections]]
@@ -315,7 +315,7 @@ Full GTM management via the Tag Manager API v2. Authentication uses a Google ser
 
 **Required fields**: `name`, `type`
 
-**Secret**: `{name}-token` in keychain (the entire service account JSON key file content)
+**Secret**: `{name}-token` in secret store (the entire service account JSON key file content)
 
 ```toml
 [[connections]]
@@ -351,7 +351,7 @@ Connects to an upstream MCP server, discovers its tools, and re-exposes them wit
 
 **Optional fields**: `oauth` (default: false), `tunnel`, `instructions`
 
-**Secret**: `{name}-token` in keychain (Bearer token) or `{name}-oauth-token` (OAuth)
+**Secret**: `{name}-token` in secret store (Bearer token) or `{name}-oauth-token` (OAuth)
 
 ```toml
 # Bearer token proxy
@@ -382,7 +382,7 @@ Generic HTTP client for any REST API. Useful for internal APIs or services witho
 
 **Optional fields**: `token_header`, `tunnel`, `instructions`
 
-**Secret**: `{name}-token` in keychain (optional auth token)
+**Secret**: `{name}-token` in secret store (optional auth token)
 
 By default, the token is sent as `Authorization: Bearer {token}`. Set `token_header` to use a custom header name instead (e.g. `x-goog-api-key` for Google APIs).
 
@@ -412,14 +412,14 @@ Dedicated connector for the Google Gemini API with automatic image handling. Tex
 
 **Optional fields**: `url` (default: `https://generativelanguage.googleapis.com/v1beta`), `tunnel`, `instructions`
 
-**Secret**: `{name}-token` in keychain (API key, sent as `x-goog-api-key`)
+**Secret**: `{name}-token` in secret store (API key, sent as `x-goog-api-key`)
 
 ```toml
 [[connections]]
 name = "gemini"
 type = "gemini"
 # url defaults to https://generativelanguage.googleapis.com/v1beta
-# Token stored in keychain (key: "gemini-token")
+# Token stored as secret (key: "gemini-token")
 ```
 
 **MCP tools exposed**:
@@ -451,5 +451,5 @@ These tools allow AI agents to inspect and modify the mux configuration at runti
 | `connection_list` | List all connections and tunnels with type, source, and whether secrets are set. |
 | `connection_add` | Add a new connection. Parameters: `name`, `type` (required), plus type-specific fields. |
 | `connection_delete` | Delete a local connection. Provisioned connections cannot be deleted. |
-| `secret_set` | Store a secret in the OS keychain. Write-only. Parameters: `key`, `value` (required). |
-| `secret_check` | Check which secrets are set in the keychain (true/false per key, never reveals values). Parameter: `connection` (optional filter). |
+| `secret_set` | Store a secret (vault or keychain, depending on configuration). Write-only. Parameters: `key`, `value` (required). |
+| `secret_check` | Check which secrets are set (true/false per key, never reveals values). Parameter: `connection` (optional filter). |

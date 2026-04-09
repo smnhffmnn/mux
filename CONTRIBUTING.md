@@ -28,7 +28,7 @@ go test ./internal/...
 ```
 internal/
 ├── config/     # Configuration loading, secret management, keychain
-├── erp/        # Remote provisioning client
+├── provisioning/ # Remote provisioning client
 ├── proxy/      # MCP proxy mounts (OAuth, bearer token)
 ├── tools/      # MCP tool implementations (DB, API, config management)
 ├── tunnel/     # SSH tunnel transport

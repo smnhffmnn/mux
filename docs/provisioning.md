@@ -8,10 +8,10 @@ This is useful for teams: set up one provisioning server, give each developer a 
 
 ## How mux Uses It
 
-1. On startup, mux checks if both `endpoint` and `token` are configured (via TOML, keychain, or environment variables)
+1. On startup, mux checks if both `endpoint` and `token` are configured (via TOML, secret store, or environment variables)
 2. If yes, it sends a GET request to the endpoint with the token as a Bearer header
 3. The JSON response is parsed into connections and tunnels
-4. These are merged with local config (provisioned items are marked with `source: "erp"`)
+4. These are merged with local config (provisioned items are marked with `source: "provisioning"`)
 5. Connections and tunnels from the provisioning server are available alongside local ones
 
 Provisioned data is fetched fresh on every startup and is not cached between restarts.
@@ -21,9 +21,9 @@ Provisioned data is fetched fresh on every startup and is not cached between res
 ### Via TOML
 
 ```toml
-[erp]
+[provisioning]
 endpoint = "https://provisioning.example.com/api/mux/config"
-# Token stored in keychain (key: "provisioning-token")
+# Token stored as secret (key: "provisioning-token")
 ```
 
 ### Via Environment Variables
@@ -35,7 +35,7 @@ export MUX_PROVISIONING_TOKEN="your-provisioning-token"
 
 ### Via Web UI
 
-Open the mux web UI, navigate to the Provisioning section, enter the endpoint URL and token, and click Save. The token is stored in the OS keychain. Click "Sync" to fetch immediately.
+Open the mux web UI, navigate to the Provisioning section, enter the endpoint URL and token, and click Save. The token is stored in the secret store (vault, keychain, or file). Click "Sync" to fetch immediately.
 
 ## API Contract
 
@@ -114,12 +114,12 @@ All fields use **camelCase** JSON keys.
 | `host` | string | databases | Database hostname or IP |
 | `port` | integer | no | Port number (defaults applied per type: MariaDB 3306, PostgreSQL 5432, ClickHouse 8123) |
 | `user` | string | databases | Database username |
-| `password` | string | no | Database password. If omitted, mux checks the keychain for `{name}-password`. |
+| `password` | string | no | Database password. If omitted, mux checks the secret store for `{name}-password`. |
 | `database` | string | no | Database name (ClickHouse defaults to `"default"`) |
 | `readOnly` | boolean | no | Restrict to read-only queries (default: false) |
 | `secure` | boolean | no | TLS for ClickHouse HTTP (default: false) |
 | `url` | string | proxy/http/api | Endpoint URL |
-| `token` | string | no | API key or Bearer token. If omitted, mux checks the keychain for `{name}-token`. |
+| `token` | string | no | API key or Bearer token. If omitted, mux checks the secret store for `{name}-token`. |
 | `oauth` | boolean | no | Use OAuth 2.0 + PKCE for proxy connections (default: false) |
 | `scopes` | string | no | OAuth scopes override (microsoft-graph only) |
 | `tunnel` | string | no | Name of a tunnel to route through |
@@ -136,17 +136,17 @@ All fields use **camelCase** JSON keys.
 | `allowedIPs` | string | yes | Allowed IP ranges (CIDR, comma-separated) |
 | `tunnelAddress` | string | yes | Local tunnel IP address (CIDR, e.g. `10.100.0.42/32`) |
 | `dns` | string | no | DNS servers (comma-separated IPs) |
-| `privateKey` | string | no | WireGuard private key (base64). If omitted, mux checks the keychain for `tunnel-{name}-private-key`. |
-| `presharedKey` | string | no | WireGuard preshared key (base64). If omitted, mux checks keychain. |
+| `privateKey` | string | no | WireGuard private key (base64). If omitted, mux checks the secret store for `tunnel-{name}-private-key`. |
+| `presharedKey` | string | no | WireGuard preshared key (base64). If omitted, mux checks the secret store. |
 | `mtu` | integer | no | MTU (default: 1420) |
 | `keepalive` | integer | no | Persistent keepalive in seconds (default: 25) |
 
 ## How Secrets Are Handled
 
-Passwords and keys can be provided in the JSON response or stored in the OS keychain on the client. mux applies this precedence:
+Passwords and keys can be provided in the JSON response or stored locally on the client. mux applies this precedence:
 
 1. **JSON response** -- if the provisioning server includes `password`, `token`, or `privateKey`, those values are used
-2. **OS keychain** -- if a field is empty in the JSON, mux checks the keychain (e.g., `{name}-password` or `tunnel-{name}-private-key`)
+2. **Local secret store** -- if a field is empty in the JSON, mux checks the local secret store (Vault → OS Keychain → File fallback, see [configuration.md](configuration.md#secrets))
 3. **Neither** -- the connection/tunnel is skipped as incomplete
 
 This means you can choose: distribute secrets from the server (simpler setup) or have users store secrets locally (the server never knows them).
@@ -155,7 +155,7 @@ For HTTP connections without their own token: if the connection URL points to th
 
 ## How Provisioned and Local Config Interact
 
-- Provisioned items are marked with `source: "erp"`, local items with `source: "local"`
+- Provisioned items are marked with `source: "provisioning"`, local items with `source: "local"`
 - **Tunnels**: On name collision, the provisioned tunnel wins (local tunnel with the same name is hidden)
 - **Connections**: Both provisioned and local connections are included; no deduplication by name
 - **UI protection**: Provisioned connections and tunnels cannot be edited or deleted in the web UI or via MCP tools

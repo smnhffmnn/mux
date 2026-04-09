@@ -116,7 +116,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 func (ct *ConfigTools) connectionDeleteTool() ToolDef {
 	return ToolDef{
 		Tool: mcp.NewTool("connection_delete",
-			mcp.WithDescription("Delete a local connection. ERP-managed connections cannot be deleted."),
+			mcp.WithDescription("Delete a local connection. Provisioned connections cannot be deleted."),
 			mcp.WithString("name", mcp.Required(),
 				mcp.Description("Connection name to delete."),
 			),
@@ -172,7 +172,7 @@ func (ct *ConfigTools) tunnelAddTool() ToolDef {
 func (ct *ConfigTools) tunnelDeleteTool() ToolDef {
 	return ToolDef{
 		Tool: mcp.NewTool("tunnel_delete",
-			mcp.WithDescription("Delete a local tunnel. ERP-managed tunnels cannot be deleted."),
+			mcp.WithDescription("Delete a local tunnel. Provisioned tunnels cannot be deleted."),
 			mcp.WithString("name", mcp.Required(),
 				mcp.Description("Tunnel name to delete."),
 			),
@@ -394,8 +394,8 @@ func (ct *ConfigTools) handleConnectionDelete(_ context.Context, req mcp.CallToo
 	var newConns []config.Connection
 	for _, c := range ct.cfg.Connections {
 		if c.Name == name {
-			if c.Source == "erp" {
-				return mcp.NewToolResultError(fmt.Sprintf("connection %q is ERP-managed and cannot be deleted", name)), nil
+			if c.Source == "provisioning" {
+				return mcp.NewToolResultError(fmt.Sprintf("connection %q is provisioned and cannot be deleted", name)), nil
 			}
 			found = true
 			continue
@@ -491,8 +491,8 @@ func (ct *ConfigTools) handleTunnelDelete(_ context.Context, req mcp.CallToolReq
 	var newTunnels []config.TunnelConfig
 	for _, t := range ct.cfg.Tunnels {
 		if t.Name == name {
-			if t.Source == "erp" {
-				return mcp.NewToolResultError(fmt.Sprintf("tunnel %q is ERP-managed and cannot be deleted", name)), nil
+			if t.Source == "provisioning" {
+				return mcp.NewToolResultError(fmt.Sprintf("tunnel %q is provisioned and cannot be deleted", name)), nil
 			}
 			found = true
 			continue
