@@ -234,6 +234,13 @@ More info: https://github.com/smnhffmnn/mux
 	defer cancel()
 	registerProxies(ctx, s, cfg)
 
+	// Wire up vault unlock → retry skipped connections
+	if vlt != nil {
+		vlt.SetOnUnlock(func() {
+			retryAfterVaultUnlock(ctx, s, cfg, tm)
+		})
+	}
+
 	// Always register the datetime tool
 	s.AddTool(tools.DateTimeTool.Tool, tools.DateTimeTool.Handler)
 	log.Println("[mux] Registered: get_datetime")

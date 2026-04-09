@@ -150,6 +150,101 @@ func registerProxies(ctx context.Context, s *server.MCPServer, cfg *config.Confi
 	}
 }
 
+// retryAfterVaultUnlock re-resolves secrets from the now-unlocked vault
+// and registers connections that were skipped at startup.
+// Runs in a goroutine — must be safe for concurrent access.
+var retryMu sync.Mutex
+
+func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config.Config, tm *tunnelManager) {
+	// Prevent concurrent retries (e.g. rapid lock/unlock cycles)
+	if !retryMu.TryLock() {
+		log.Printf("[vault] Retry already in progress, skipping")
+		return
+	}
+	defer retryMu.Unlock()
+
+	// Build set of already-registered tool prefixes
+	registered := make(map[string]bool)
+	for name := range s.ListTools() {
+		if idx := strings.Index(name, "_"); idx > 0 {
+			registered[name[:idx]] = true
+		}
+	}
+
+	count := 0
+
+	// Retry bearer-token proxy connections (not OAuth — OAuth tokens are
+	// stored in the keychain token store, not the vault, so they don't
+	// benefit from vault unlock)
+	for _, conn := range cfg.AllConnections() {
+		if !config.IsProxyType(conn.Type) || !conn.Enabled() {
+			continue
+		}
+		if registered[conn.Name] {
+			continue
+		}
+		if conn.OAuth {
+			continue
+		}
+
+		// Resolve token from vault without mutating the shared config
+		token, _ := config.GetSecret(conn.Name + "-token")
+		if token == "" {
+			continue
+		}
+
+		mount := proxy.Mount{
+			Name:  conn.Name,
+			URL:   conn.URL,
+			Token: proxy.NewTokenProvider(token),
+		}
+		mountCtx, mountCancel := context.WithTimeout(ctx, 30*time.Second)
+		if err := proxy.RegisterMount(mountCtx, s, mount); err != nil {
+			log.Printf("[vault] Retry: proxy %s failed: %v", conn.Name, err)
+		} else {
+			log.Printf("[vault] Retry: proxy %s connected", conn.Name)
+			count++
+		}
+		mountCancel()
+	}
+
+	// Retry database connections that need a password from the vault
+	for _, conn := range cfg.AllConnections() {
+		if config.IsProxyType(conn.Type) || !conn.Enabled() {
+			continue
+		}
+		if registered[conn.Name] {
+			continue
+		}
+
+		// Resolve password from vault into a local copy
+		if conn.Password == "" {
+			pw, _ := config.GetSecret(conn.Name + "-password")
+			if pw != "" {
+				conn.Password = pw
+			}
+		}
+
+		var dialer tools.Dialer
+		if conn.Tunnel != "" {
+			dialer = tm.Get(conn.Tunnel)
+			if dialer == nil {
+				continue
+			}
+		}
+		if _, _, err := tools.RegisterConnection(s, conn, dialer); err != nil {
+			log.Printf("[vault] Retry: %s failed: %v", conn.Name, err)
+		} else {
+			log.Printf("[vault] Retry: %s connected", conn.Name)
+			count++
+		}
+	}
+
+	if count > 0 {
+		log.Printf("[vault] Registered %d connections after unlock", count)
+	}
+}
+
 // simpleReloader implements tools.ToolReloader for stdio and headless modes (no App/Wails).
 type simpleReloader struct {
 	mcpServer       *server.MCPServer

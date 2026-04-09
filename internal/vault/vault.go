@@ -35,8 +35,9 @@ type Vault struct {
 	lastActivity      atomic.Int64 // UnixNano — atomic to avoid races with RLock readers
 	timerStop         chan struct{}
 
-	// Optional callback on auto-lock (e.g. notify frontend)
-	onLock func()
+	// Optional callbacks on lock/unlock (e.g. notify frontend, retry connections)
+	onLock   func()
+	onUnlock func()
 
 	// Session token issued by WebAuthn login, required by approval grant.
 	// 128-bit random hex, rotated on each successful WebAuthn login.
@@ -54,6 +55,17 @@ func WithInactivityTimeout(d time.Duration) Option {
 
 func WithOnLock(fn func()) Option {
 	return func(v *Vault) { v.onLock = fn }
+}
+
+func WithOnUnlock(fn func()) Option {
+	return func(v *Vault) { v.onUnlock = fn }
+}
+
+// SetOnUnlock sets the unlock callback after construction (for late wiring).
+func (v *Vault) SetOnUnlock(fn func()) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.onUnlock = fn
 }
 
 // New creates a Vault. Call Load() to read existing state from disk.
@@ -165,6 +177,8 @@ func (v *Vault) Init(passphrase string) error {
 
 	v.dek = dek
 	v.startTimer()
+	// No onUnlock callback here: a freshly initialized vault has no secrets,
+	// so retrying connections would be pointless.
 	log.Printf("[vault] Initialized and unlocked")
 	return nil
 }
@@ -172,21 +186,25 @@ func (v *Vault) Init(passphrase string) error {
 // UnlockWithPassphrase decrypts the DEK using the passphrase.
 func (v *Vault) UnlockWithPassphrase(passphrase string) error {
 	v.mu.Lock()
-	defer v.mu.Unlock()
+	// Not using defer — we unlock manually before calling onUnlock callback
 
 	if v.store == nil {
+		v.mu.Unlock()
 		return fmt.Errorf("vault not initialized")
 	}
 	if v.dek != nil {
 		v.touch()
+		v.mu.Unlock()
 		return nil // already unlocked
 	}
 	if v.store.Passphrase == nil {
+		v.mu.Unlock()
 		return fmt.Errorf("passphrase unlock not configured")
 	}
 
 	salt, err := b64Decode(v.store.Passphrase.Salt)
 	if err != nil {
+		v.mu.Unlock()
 		return fmt.Errorf("decode salt: %w", err)
 	}
 
@@ -194,18 +212,25 @@ func (v *Vault) UnlockWithPassphrase(passphrase string) error {
 	wrappedDEK, err := b64Decode(v.store.Passphrase.WrappedDEK)
 	if err != nil {
 		wipeBytes(wrappingKey)
+		v.mu.Unlock()
 		return fmt.Errorf("decode wrapped DEK: %w", err)
 	}
 
 	dek, err := decrypt(wrappingKey, wrappedDEK)
 	wipeBytes(wrappingKey)
 	if err != nil {
+		v.mu.Unlock()
 		return fmt.Errorf("invalid passphrase")
 	}
 
 	v.dek = dek
 	v.startTimer()
+	cb := v.onUnlock
+	v.mu.Unlock()
 	log.Printf("[vault] Unlocked via passphrase")
+	if cb != nil {
+		go cb()
+	}
 	return nil
 }
 
@@ -213,39 +238,49 @@ func (v *Vault) UnlockWithPassphrase(passphrase string) error {
 // Called after successful WebAuthn authentication.
 func (v *Vault) UnlockWithAuthKey() error {
 	v.mu.Lock()
-	defer v.mu.Unlock()
 
 	if v.store == nil {
+		v.mu.Unlock()
 		return fmt.Errorf("vault not initialized")
 	}
 	if v.dek != nil {
 		v.touch()
+		v.mu.Unlock()
 		return nil
 	}
 	if v.store.AuthKey == nil {
+		v.mu.Unlock()
 		return fmt.Errorf("auth key unlock not configured")
 	}
 
 	authKey, err := loadAuthKey()
 	if err != nil {
+		v.mu.Unlock()
 		return fmt.Errorf("load auth key: %w", err)
 	}
 
 	wrappedDEK, err := b64Decode(v.store.AuthKey.WrappedDEK)
 	if err != nil {
 		wipeBytes(authKey)
+		v.mu.Unlock()
 		return fmt.Errorf("decode wrapped DEK: %w", err)
 	}
 
 	dek, err := decrypt(authKey, wrappedDEK)
 	wipeBytes(authKey)
 	if err != nil {
+		v.mu.Unlock()
 		return fmt.Errorf("auth key mismatch or corrupted vault")
 	}
 
 	v.dek = dek
 	v.startTimer()
+	cb := v.onUnlock
+	v.mu.Unlock()
 	log.Printf("[vault] Unlocked via auth key (WebAuthn)")
+	if cb != nil {
+		go cb()
+	}
 	return nil
 }
 
