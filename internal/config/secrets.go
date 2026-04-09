@@ -74,13 +74,22 @@ func secretsFilePath() string {
 }
 
 // getSecret reads a secret. Priority: vault (if enabled+unlocked) → keyring → file.
+// In exclusive mode, refuses to read from plaintext stores when the vault is sealed.
 func getSecret(key string) (string, error) {
+	v := getActiveVault()
+	exclusive := vaultExclusive.Load()
+
 	// Try vault first
-	if v := getActiveVault(); v != nil && v.IsUnlocked() {
+	if v != nil && v.IsUnlocked() {
 		if val, err := v.GetSecret(key); err == nil {
 			return val, nil
 		}
-		// Secret not in vault — fall through to legacy stores
+		// Secret not in vault — fall through to legacy stores only if not exclusive
+	}
+
+	// In exclusive mode, secrets must only come from the vault
+	if exclusive {
+		return "", fmt.Errorf("vault is sealed; call vault_unlock before accessing secrets (exclusive mode)")
 	}
 
 	if !keyringBroken.Load() {
@@ -102,11 +111,15 @@ func getSecret(key string) (string, error) {
 }
 
 // setSecret stores a secret. If vault is unlocked, writes to vault.
-// In exclusive mode, a successful vault write skips legacy stores.
+// In exclusive mode, refuses to write when the vault is sealed — never
+// falls through to plaintext stores when the user opted for encryption only.
 func setSecret(key, value string) error {
+	v := getActiveVault()
+	exclusive := vaultExclusive.Load()
+
 	// Write to vault if available and unlocked
 	vaultOK := false
-	if v := getActiveVault(); v != nil && v.IsUnlocked() {
+	if v != nil && v.IsUnlocked() {
 		if err := v.SetSecret(key, value); err != nil {
 			log.Printf("[secrets] Vault write failed for %q: %v (falling through to keyring/file)", key, err)
 		} else {
@@ -114,9 +127,16 @@ func setSecret(key, value string) error {
 		}
 	}
 
-	// In exclusive mode, skip legacy stores when vault write succeeded
-	if vaultOK && vaultExclusive.Load() {
-		return nil
+	// In exclusive mode, secrets must only exist in the vault
+	if exclusive {
+		if vaultOK {
+			return nil
+		}
+		// Vault is sealed or unavailable — refuse to write to plaintext stores
+		if v != nil && v.IsUnlocked() {
+			return fmt.Errorf("vault write failed; refusing to fall back to plaintext stores (exclusive mode)")
+		}
+		return fmt.Errorf("vault is sealed; call vault_unlock before storing secrets (exclusive mode)")
 	}
 
 	if !keyringBroken.Load() {
