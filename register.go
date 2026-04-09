@@ -173,9 +173,7 @@ func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config
 
 	count := 0
 
-	// Retry bearer-token proxy connections (not OAuth — OAuth tokens are
-	// stored in the keychain token store, not the vault, so they don't
-	// benefit from vault unlock)
+	// Retry proxy connections (bearer token and OAuth)
 	for _, conn := range cfg.AllConnections() {
 		if !config.IsProxyType(conn.Type) || !conn.Enabled() {
 			continue
@@ -183,21 +181,41 @@ func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config
 		if registered[conn.Name] {
 			continue
 		}
+
+		var mount proxy.Mount
+
 		if conn.OAuth {
-			continue
+			tokenStore := config.NewKeychainTokenStore(conn.Name)
+			if !tokenStore.HasToken() {
+				continue
+			}
+			adapter := proxy.NewKeychainTokenAdapter(tokenStore)
+			clientID, clientSecret := config.LoadOAuthClientID(conn.Name)
+			mount = proxy.Mount{
+				Name:       conn.Name,
+				URL:        conn.URL,
+				TokenStore: tokenStore,
+				OAuth: &transport.OAuthConfig{
+					ClientID:     clientID,
+					ClientSecret: clientSecret,
+					RedirectURI:  fmt.Sprintf("http://localhost:%d/oauth/callback", cfg.Server.Port),
+					TokenStore:   adapter,
+					PKCEEnabled:  true,
+				},
+			}
+		} else {
+			// Resolve token from vault without mutating the shared config
+			token, _ := config.GetSecret(conn.Name + "-token")
+			if token == "" {
+				continue
+			}
+			mount = proxy.Mount{
+				Name:  conn.Name,
+				URL:   conn.URL,
+				Token: proxy.NewTokenProvider(token),
+			}
 		}
 
-		// Resolve token from vault without mutating the shared config
-		token, _ := config.GetSecret(conn.Name + "-token")
-		if token == "" {
-			continue
-		}
-
-		mount := proxy.Mount{
-			Name:  conn.Name,
-			URL:   conn.URL,
-			Token: proxy.NewTokenProvider(token),
-		}
 		mountCtx, mountCancel := context.WithTimeout(ctx, 30*time.Second)
 		if err := proxy.RegisterMount(mountCtx, s, mount); err != nil {
 			log.Printf("[vault] Retry: proxy %s failed: %v", conn.Name, err)
