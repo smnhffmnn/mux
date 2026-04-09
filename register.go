@@ -13,6 +13,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/smnhffmnn/mux/internal/config"
+	"github.com/smnhffmnn/mux/internal/provisioning"
 	"github.com/smnhffmnn/mux/internal/proxy"
 	"github.com/smnhffmnn/mux/internal/tools"
 	"github.com/smnhffmnn/mux/internal/tunnel"
@@ -152,16 +153,45 @@ func registerProxies(ctx context.Context, s *server.MCPServer, cfg *config.Confi
 
 // retryAfterVaultUnlock re-resolves secrets from the now-unlocked vault
 // and registers connections that were skipped at startup.
+// This includes re-fetching provisioning if it failed due to a sealed vault.
 // Runs in a goroutine — must be safe for concurrent access.
 var retryMu sync.Mutex
 
 func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config.Config, tm *tunnelManager) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[vault] Retry panicked: %v", r)
+		}
+	}()
+
 	// Prevent concurrent retries (e.g. rapid lock/unlock cycles)
 	if !retryMu.TryLock() {
 		log.Printf("[vault] Retry already in progress, skipping")
 		return
 	}
 	defer retryMu.Unlock()
+
+	// Re-fetch provisioning if it wasn't done at startup (token was in sealed vault)
+	_, provConns := cfg.ProvisioningStatus()
+	if cfg.Provisioning.Endpoint != "" && provConns == 0 {
+		token := cfg.Provisioning.Token
+		if token == "" {
+			token, _ = config.GetSecret("provisioning-token")
+		}
+		if token != "" {
+			cfg.Provisioning.Token = token
+			log.Printf("[vault] Retry: fetching provisioning from %s", cfg.Provisioning.Endpoint)
+			provCtx, provCancel := context.WithTimeout(ctx, 20*time.Second)
+			provResp, provErr := provisioning.Fetch(provCtx, cfg.Provisioning.Endpoint, token)
+			provCancel()
+			if provErr != nil {
+				log.Printf("[vault] Retry: provisioning failed: %v", provErr)
+			} else {
+				cfg.SetProvisioned(provResp.Tunnels, provResp.Connections)
+				log.Printf("[vault] Retry: provisioned %d tunnels, %d connections", len(provResp.Tunnels), len(provResp.Connections))
+			}
+		}
+	}
 
 	// Build set of already-registered tool prefixes
 	registered := make(map[string]bool)
