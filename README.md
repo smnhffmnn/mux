@@ -82,9 +82,20 @@ secret_set key=mydb-password value=<your-password>
 
 ## Usage
 
-### With Claude Desktop
+### Connecting to mux
 
-Add to `claude_desktop_config.json`:
+mux exposes two MCP transports:
+
+| Transport | Endpoint | Use case |
+|-----------|----------|----------|
+| **Stdio** | Automatic when launched as subprocess | Clients that spawn mux themselves (Claude Desktop, Cursor) |
+| **Streamable HTTP** | `http://localhost:<port>/mcp` | Clients that connect to a running mux instance (Claude Code, other HTTP-capable clients) |
+
+mux auto-detects the transport: if stdin is piped, it runs in stdio mode. Otherwise it starts the HTTP server (desktop or headless, depending on whether a display is available).
+
+### Claude Desktop
+
+Add to your `claude_desktop_config.json`:
 
 ```json
 {
@@ -96,9 +107,9 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-Claude Desktop pipes stdin, so mux runs in stdio mode automatically.
+Claude Desktop spawns mux as a subprocess with piped stdin/stdout — stdio mode is detected automatically.
 
-### With Claude Code
+### Claude Code
 
 Add to your project's `.mcp.json`:
 
@@ -112,6 +123,12 @@ Add to your project's `.mcp.json`:
   }
 }
 ```
+
+This connects to a running mux instance. Start mux separately (desktop or headless) before using Claude Code.
+
+### Other MCP Clients
+
+Any MCP client that supports **Streamable HTTP** can connect to `http://localhost:<port>/mcp` while mux is running. Clients that only support **stdio** (like Claude Desktop) can launch mux as a subprocess — no flags needed, the transport is auto-detected.
 
 ### Desktop Mode
 
