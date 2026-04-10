@@ -773,6 +773,14 @@ func (a *App) TestConnection(name string) *TestResult {
 		result = a.testGoogleTagManager(*conn)
 	case "meilisearch":
 		result = a.testMeilisearch(*conn)
+	case "asana":
+		result = a.testAsana(*conn)
+	case "gemini":
+		result = a.testGemini(*conn)
+	case "imap":
+		result = a.testIMAP(*conn)
+	case "git":
+		result = a.testGit(*conn)
 	default:
 		if config.IsProxyType(conn.Type) {
 			if conn.OAuth {
@@ -1699,6 +1707,103 @@ func (a *App) testGoogleTagManager(conn config.Connection) testResponse {
 	}
 
 	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: %s", sa.ClientEmail)}
+}
+
+func (a *App) testAsana(conn config.Connection) testResponse {
+	if conn.Token == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "Personal access token not configured"}
+	}
+
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, "https://app.asana.com/api/1.0/users/me", nil)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	}
+	req.Header.Set("Authorization", "Bearer "+conn.Token)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your personal access token", resp.StatusCode)}
+	}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Asana API (HTTP %d)", resp.StatusCode)}
+}
+
+func (a *App) testGemini(conn config.Connection) testResponse {
+	if conn.Token == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "API key not configured"}
+	}
+
+	apiURL := conn.URL
+	if apiURL == "" {
+		apiURL = "https://generativelanguage.googleapis.com/v1beta"
+	}
+	apiURL = strings.TrimRight(apiURL, "/")
+
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, apiURL+"/models", nil)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	}
+	req.Header.Set("x-goog-api-key", conn.Token)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusBadRequest {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
+	}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Gemini API (HTTP %d)", resp.StatusCode)}
+}
+
+func (a *App) testIMAP(conn config.Connection) testResponse {
+	if conn.Host == "" || conn.User == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "Host or user not configured"}
+	}
+	if conn.Password == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "Password not configured"}
+	}
+
+	port := conn.Port
+	if port == 0 {
+		port = 993
+	}
+	addr := fmt.Sprintf("%s:%d", conn.Host, port)
+
+	d := &net.Dialer{Timeout: 10 * time.Second}
+	rawConn, err := d.Dial("tcp", addr)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
+	}
+
+	tlsConn := tls.Client(rawConn, &tls.Config{ServerName: conn.Host})
+	tlsConn.SetDeadline(time.Now().Add(10 * time.Second))
+	if err := tlsConn.Handshake(); err != nil {
+		rawConn.Close()
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("TLS handshake failed: %v", err)}
+	}
+	tlsConn.Close()
+
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: IMAP TLS (%s) — credentials not verified", addr)}
+}
+
+func (a *App) testGit(conn config.Connection) testResponse {
+	if conn.Host == "" || conn.User == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "Host or user not configured"}
+	}
+	// Git credentials are passive — no network call needed.
+	// Just verify the token is stored in the secret store.
+	if conn.Token == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "Personal access token not configured in secret store"}
+	}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Configured: %s@%s (token stored)", conn.User, conn.Host)}
 }
 
 func (a *App) testMeilisearch(conn config.Connection) testResponse {
