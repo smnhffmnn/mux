@@ -404,6 +404,35 @@ user = "user@example.com"
 | `{name}_create_reply_draft` | Create a reply draft for the latest message. Saved to Drafts, does NOT send. Parameters: `conversation_id`, `body` (required). |
 | `{name}_create_forward_draft` | Create a forward draft. Saved to Drafts, does NOT send. Parameters: `conversation_id`, `to` (required), `body` (optional). |
 
+### Meilisearch
+
+Connects to a Meilisearch instance and exposes hybrid search (keyword + semantic) over an index. Useful for knowledge bases with vector embeddings configured.
+
+**Required fields**: `name`, `type`, `host`, `database` (index name)
+
+**Optional fields**: `port` (default: 7700), `secure` (default: false), `tunnel`, `instructions`
+
+**Secret**: `{name}-token` in secret store (API key, optional for unauthenticated instances)
+
+**Index requirements**: The `path` attribute must be configured as filterable in the Meilisearch index for the `read` tool to work. Hybrid search requires an embedder named `openai` configured on the index.
+
+```toml
+[[connections]]
+name = "documentation"
+type = "meilisearch"
+host = "localhost"
+port = 7711
+database = "docs"
+instructions = "Semantic search over documentation. Use when grep is insufficient."
+```
+
+**MCP tools exposed**:
+
+| Tool | Description |
+|------|-------------|
+| `{name}_search` | Hybrid search (keyword + semantic) over the index. Parameters: `query` (required), `limit` (optional, default 5, max 20). Uses `semanticRatio: 0.7` for balanced keyword/semantic weighting. |
+| `{name}_read` | Read a full document by its path. Parameter: `path` (required, as returned by search results). Uses a filter-based exact match. |
+
 ## Proxy Connections
 
 ### MCP Proxy

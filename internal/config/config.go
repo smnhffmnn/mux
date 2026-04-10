@@ -55,6 +55,8 @@ func (c *Connection) Enabled() bool {
 		c.Type == "openai", c.Type == "elevenlabs", c.Type == "recraft", c.Type == "ideogram",
 		c.Type == "asana", c.Type == "gemini":
 		return c.Token != ""
+	case c.Type == "meilisearch":
+		return c.Host != "" && c.Database != ""
 	case c.Type == "imap":
 		return c.Host != "" && c.User != "" && c.Password != ""
 	case c.Type == "git":
@@ -477,6 +479,10 @@ func ApplyConnectionDefaults(c *Connection) {
 	case "imap":
 		if c.Port == 0 {
 			c.Port = 993
+		}
+	case "meilisearch":
+		if c.Port == 0 {
+			c.Port = 7700
 		}
 	}
 }

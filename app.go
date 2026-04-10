@@ -771,6 +771,8 @@ func (a *App) TestConnection(name string) *TestResult {
 		result = a.testMicrosoftGraph(*conn)
 	case "google-tagmanager":
 		result = a.testGoogleTagManager(*conn)
+	case "meilisearch":
+		result = a.testMeilisearch(*conn)
 	default:
 		if config.IsProxyType(conn.Type) {
 			if conn.OAuth {
@@ -1697,6 +1699,34 @@ func (a *App) testGoogleTagManager(conn config.Connection) testResponse {
 	}
 
 	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: %s", sa.ClientEmail)}
+}
+
+func (a *App) testMeilisearch(conn config.Connection) testResponse {
+	scheme := "http"
+	if conn.Secure {
+		scheme = "https"
+	}
+	baseURL := fmt.Sprintf("%s://%s:%d", scheme, conn.Host, conn.Port)
+
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/health", nil)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	}
+	if conn.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+conn.Token)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
+	}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Meilisearch (HTTP %d)", resp.StatusCode)}
 }
 
 func (a *App) testBearerProxy(conn config.Connection) testResponse {

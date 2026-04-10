@@ -142,6 +142,12 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		if err == nil {
 			toolDefs = im.Tools()
 		}
+	case "meilisearch":
+		var ms *Meilisearch
+		ms, err = NewMeilisearch(conn, dialer)
+		if err == nil {
+			toolDefs = ms.Tools()
+		}
 	case "git":
 		// Passive connection type — no MCP tools.
 		// Used by the git credential helper (mux git-credential) to look up

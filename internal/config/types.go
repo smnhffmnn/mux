@@ -119,6 +119,12 @@ var AllTypes = []TypeDef{
 		{Key: "user", Label: "Username", Placeholder: "oauth2"},
 		{Key: "token", Label: "Personal Access Token", Placeholder: "glpat-... / ghp_...", Secret: true},
 	}},
+	{Type: "meilisearch", Label: "Meilisearch", Fields: []TypeField{
+		{Key: "host", Label: "Host", Placeholder: "localhost"},
+		{Key: "port", Label: "Port", Placeholder: "7700", Small: true},
+		{Key: "database", Label: "Index", Placeholder: "docs"},
+		{Key: "token", Label: "API Key", Placeholder: "master-key", Secret: true},
+	}},
 }
 
 // typeIndex is a lazily-built lookup map from type string to TypeDef.
