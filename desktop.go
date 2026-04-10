@@ -35,6 +35,15 @@ func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx 
 	if vlt != nil {
 		vh = vault.NewVaultHandlers(vlt, waServer, approvalQueue)
 		log.Println("[mux] Vault HTTP endpoints registered on /vault/*")
+
+		// Credential socket for git credential helper
+		credSock := vault.NewCredentialSocket(vlt, gitHostsFromConfig(cfg))
+		go func() {
+			if err := credSock.Listen(); err != nil {
+				log.Printf("[vault] Credential socket error: %v", err)
+			}
+		}()
+		defer credSock.Close()
 	}
 
 	localRoutes := func(mux *http.ServeMux) {

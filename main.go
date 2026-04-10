@@ -25,6 +25,12 @@ import (
 )
 
 func main() {
+	// Subcommand: git credential helper (must be checked before flag.Parse)
+	if len(os.Args) > 1 && os.Args[1] == "git-credential" {
+		runGitCredential(os.Args[2:])
+		return
+	}
+
 	var (
 		flagPort    int
 		flagConfig  string
@@ -43,8 +49,9 @@ Provides Claude with unified access to configured connections
 via the Model Context Protocol (MCP).
 
 Usage:
-  mux                     Start desktop app (GUI + MCP server)
-  echo '...' | mux        Start in stdio mode (Claude Desktop)
+  mux                          Start desktop app (GUI + MCP server)
+  echo '...' | mux             Start in stdio mode (Claude Desktop)
+  mux git-credential <op>      Git credential helper (get/store/erase)
 
 Options:
   --config <path>    Config file (default: ~/.mux/config.toml)
@@ -285,6 +292,15 @@ More info: https://github.com/smnhffmnn/mux
 			}
 			tlsRoutes = func(mux *http.ServeMux) { vh.Mount(mux) }
 			log.Println("[mux] Vault HTTP endpoints registered on /vault/*")
+
+			// Credential socket for git credential helper (Unix domain socket, localhost-only)
+			credSock := vault.NewCredentialSocket(vlt, gitHostsFromConfig(cfg))
+			go func() {
+				if err := credSock.Listen(); err != nil {
+					log.Printf("[vault] Credential socket error: %v", err)
+				}
+			}()
+			defer credSock.Close()
 		}
 		servers := startHTTPServer(s, cfg, localRoutes, tlsRoutes)
 
@@ -302,6 +318,21 @@ More info: https://github.com/smnhffmnn/mux
 
 	// --- Desktop mode (Wails v3 + MCP HTTP) ---
 	runDesktop(s, cfg, tm, ctx, cancel, vlt, waServer, approvalQueue)
+}
+
+// gitHostsFromConfig extracts git connection configs for the credential socket.
+func gitHostsFromConfig(cfg *config.Config) []vault.GitHost {
+	var hosts []vault.GitHost
+	for _, c := range cfg.AllConnections() {
+		if c.Type == "git" && c.Host != "" && c.User != "" {
+			hosts = append(hosts, vault.GitHost{
+				Host:      c.Host,
+				Username:  c.User,
+				SecretKey: c.Name + "-token",
+			})
+		}
+	}
+	return hosts
 }
 
 // registerConfigTools creates a simpleReloader and registers config management tools on the MCP server.

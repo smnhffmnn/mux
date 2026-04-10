@@ -1,6 +1,10 @@
 # Tunnels
 
-## What Tunnels Enable
+mux supports two tunnel types: **WireGuard** (userspace, built-in) and **SSH** (via OpenSSH). Both allow connections to reach servers on private networks without a system-wide VPN.
+
+## WireGuard Tunnels
+
+### What WireGuard Tunnels Enable
 
 WireGuard tunnels allow mux to reach database servers on private networks without requiring a system-wide VPN. The tunnel runs entirely inside the mux process.
 
@@ -86,7 +90,7 @@ When `tunnel` is set, the database connection routes through that WireGuard tunn
 | `mtu` | integer | no | MTU (default: 1420) |
 | `keepalive` | integer | no | Persistent keepalive interval in seconds (default: 25) |
 
-**Secrets** (stored in OS keychain, not in TOML):
+**Secrets** (stored in vault, OS keychain, or secrets.toml — never in config.toml):
 - `tunnel-{name}-private-key` -- WireGuard private key (base64, required)
 - `tunnel-{name}-preshared-key` -- WireGuard preshared key (base64, optional)
 
@@ -143,3 +147,54 @@ All drivers receive the tunnel's `DialContext` method, which routes TCP connecti
 - **No runtime changes**: Tunnel configuration changes require a mux restart. The provisioning sync re-fetches connections but does not restart tunnels.
 - **No active health checks**: `IsUp()` reports whether the tunnel started successfully, not whether the peer is currently reachable.
 - **Single peer per tunnel**: Each tunnel connects to exactly one WireGuard peer (standard client pattern).
+
+## SSH Tunnels
+
+SSH tunnels provide TCP forwarding through an SSH connection. Unlike WireGuard, SSH tunnels use the system's OpenSSH client and support standard key-based authentication.
+
+### Configuration
+
+```toml
+[[tunnels]]
+name = "bastion"
+type = "ssh"
+host = "bastion.example.com"
+port = 22
+user = "deploy"
+key_file = "~/.ssh/id_ed25519"       # path to SSH private key
+# insecure_host_key = false           # default: false (fail-closed, verify known_hosts)
+# Private key can also be stored in vault (key: "tunnel-bastion-private-key")
+```
+
+### SSH Tunnel Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Unique identifier, referenced by connections |
+| `type` | string | yes | Must be `"ssh"` |
+| `host` | string | yes | SSH server hostname or IP |
+| `port` | integer | no | SSH server port (default: 22) |
+| `user` | string | yes | SSH username |
+| `key_file` | string | no | Path to SSH private key file (alternative to vault-stored key) |
+| `insecure_host_key` | boolean | no | Skip host key verification (default: false). **Not recommended for production.** |
+
+**Secrets**:
+- `tunnel-{name}-private-key` -- SSH private key (PEM format, stored in vault). Used when `key_file` is not set.
+
+### Host Key Verification
+
+SSH tunnels use **fail-closed** host key verification by default. The target host must be in `~/.ssh/known_hosts`. If not, the connection fails with a clear error. Set `insecure_host_key = true` only for development or when known_hosts management is not feasible.
+
+### Auto-Reconnect and Keepalive
+
+SSH tunnels automatically reconnect on connection loss and send keepalive packets to prevent idle disconnects. The tunnel provides a `DialContext` method (same interface as WireGuard tunnels), so connections reference SSH tunnels identically:
+
+```toml
+[[connections]]
+name = "remote-db"
+type = "mariadb"
+host = "10.0.0.5"
+port = 3306
+user = "app"
+tunnel = "bastion"     # same syntax as WireGuard tunnels
+```

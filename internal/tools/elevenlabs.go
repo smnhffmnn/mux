@@ -22,7 +22,7 @@ const DefaultElevenLabsInstructions = `ElevenLabs Audio API — Text-to-Speech, 
 
 Endpoints:
 - POST /v1/text-to-speech/{voice_id} — TTS (returns audio stream)
-  Models: eleven_flash_v2_5 (schnell, günstig), eleven_multilingual_v2 (beste Qualität)
+  Models: eleven_flash_v2_5 (fast, cost-efficient), eleven_multilingual_v2 (highest quality)
   Body: { "text": "...", "model_id": "eleven_flash_v2_5" }
   Response: Audio-Stream (mp3_44100_128 default)
 

@@ -142,6 +142,12 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		if err == nil {
 			toolDefs = im.Tools()
 		}
+	case "git":
+		// Passive connection type — no MCP tools.
+		// Used by the git credential helper (mux git-credential) to look up
+		// PATs from the vault. Visible in connection_list for discoverability.
+		log.Printf("[mux] Git credential: %s (%s)", conn.Name, conn.Host)
+		return nil, nil, nil
 	default:
 		if config.IsProxyType(conn.Type) {
 			return nil, nil, fmt.Errorf("proxy connections must be registered via the proxy package")

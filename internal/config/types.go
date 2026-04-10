@@ -114,6 +114,11 @@ var AllTypes = []TypeDef{
 		{Key: "user", Label: "Email / Username", Placeholder: "user@example.com"},
 		{Key: "password", Label: "Password", Placeholder: "password", Secret: true},
 	}},
+	{Type: "git", Label: "Git Credential", Fields: []TypeField{
+		{Key: "host", Label: "Git Host", Placeholder: "gitlab.com"},
+		{Key: "user", Label: "Username", Placeholder: "oauth2"},
+		{Key: "token", Label: "Personal Access Token", Placeholder: "glpat-... / ghp_...", Secret: true},
+	}},
 }
 
 // typeIndex is a lazily-built lookup map from type string to TypeDef.

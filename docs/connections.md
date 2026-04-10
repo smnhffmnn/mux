@@ -52,9 +52,8 @@ host = "10.100.0.5"
 port = 5432
 user = "readonly"
 database = "production"
-read_only = true
 tunnel = "office-vpn"
-instructions = "Production database. Read-only access."
+instructions = "Production database."
 ```
 
 **MCP tools exposed**:
@@ -108,7 +107,7 @@ Accesses Microsoft 365 mail and SharePoint via the Microsoft Graph REST API. Aut
 
 **Secret**: `{name}-oauth-refresh-token` in secret store (stored automatically after first login)
 
-Default scopes: `Mail.Read Mail.ReadWrite Mail.Send offline_access`
+Default scopes: `User.Read Mail.Read Mail.ReadWrite Mail.Send offline_access`
 
 ```toml
 [[connections]]
@@ -127,8 +126,12 @@ type = "microsoft-graph"
 | `{name}_get_conversation` | Get all messages in a conversation. Parameter: `conversation_id` (required). |
 | `{name}_archive_conversation` | Move all inbox messages of a conversation to Archive. Parameter: `conversation_id` (required). |
 | `{name}_delete_conversation` | Delete all inbox messages of a conversation. Parameter: `conversation_id` (required). |
+| `{name}_search_messages` | Search messages across all mail folders using KQL. Parameters: `query` (required), `limit` (optional). |
 | `{name}_create_reply_draft` | Create a reply draft (does NOT send). Parameters: `conversation_id`, `body` (required). |
-| `{name}_create_forward_draft` | Create a forward draft (does NOT send). Parameters: `conversation_id`, `to` (required), `body` (optional). |
+| `{name}_create_draft` | Create a new email draft from scratch (does NOT send). Parameters: `to`, `subject`, `body` (required), `cc`, `bcc` (optional). |
+| `{name}_create_forward_draft` | Create a forward draft (does NOT send). Parameters: `conversation_id`, `to` (required), `body`, `cc`, `bcc` (optional). |
+| `{name}_list_attachments` | List attachments of a message. Parameter: `message_id` (required). |
+| `{name}_get_attachment` | Get attachment content (base64-encoded). Parameters: `message_id`, `attachment_id` (required). |
 | `{name}_sp_list_sites` | Search SharePoint sites. Parameter: `query` (default: `*`). |
 | `{name}_sp_get_site` | Get SharePoint site details. Parameter: `site_id` (required). |
 | `{name}_sp_list_drives` | List document libraries for a site with quota info. Parameter: `site_id` (required). |
@@ -341,6 +344,66 @@ type = "google-tagmanager"
 | `{name}_create_version` | Create a container version. Parameters: `workspace_path`, `name` (required), `notes` (optional). |
 | `{name}_publish_version` | Publish a version. Parameter: `version_path` (required). |
 
+### Asana
+
+REST API client for Asana project management. Uses Personal Access Token authentication.
+
+**Required fields**: `name`, `type`
+
+**Secret**: `{name}-token` in secret store (Personal Access Token)
+
+```toml
+[[connections]]
+name = "asana"
+type = "asana"
+```
+
+**MCP tools exposed**:
+
+| Tool | Description |
+|------|-------------|
+| `{name}_me` | Get the current authenticated Asana user. |
+| `{name}_workspaces` | List all accessible Asana workspaces. |
+| `{name}_projects` | List projects in a workspace. Parameters: `workspace` (required), `archived` (optional). |
+| `{name}_sections` | List sections in a project. Parameter: `project` (required). |
+| `{name}_tasks` | List tasks. Parameters: `project` or `section` (one required), `assignee`, `workspace`, `completed` (optional). |
+| `{name}_get_task` | Get detailed information about a specific task. Parameter: `task` (required). |
+| `{name}_create_task` | Create a new task. Parameters: `name` (required), `workspace`, `project`, `section`, `assignee`, `due_on`, `notes` (optional). |
+| `{name}_update_task` | Update an existing task. Parameters: `task` (required), `name`, `assignee`, `due_on`, `notes`, `completed` (optional). |
+| `{name}_search` | Search tasks in a workspace. Parameters: `workspace` (required), `text`, `assignee`, `completed`, `project`, `due_on_before`, `due_on_after` (optional). |
+
+### IMAP
+
+Connects to an IMAP mailbox with conversation threading (subject-based grouping). Supports MIME parsing, RFC 2047 encoded headers, and common mailbox operations.
+
+**Required fields**: `name`, `type`, `host`, `user`
+
+**Optional fields**: `port` (default: 993), `tunnel`, `instructions`
+
+**Secret**: `{name}-password` in secret store
+
+```toml
+[[connections]]
+name = "mail"
+type = "imap"
+host = "imap.example.com"
+port = 993
+user = "user@example.com"
+```
+
+**MCP tools exposed**:
+
+| Tool | Description |
+|------|-------------|
+| `{name}_list_conversations` | List inbox conversations grouped by thread. Returns latest message, participants, and message count. Parameter: `limit` (optional). |
+| `{name}_get_conversation` | Get all messages in a conversation thread with full body text. Parameter: `conversation_id` (required). |
+| `{name}_search_messages` | Search messages by text, grouped by conversation. Parameters: `query` (required), `limit` (optional). |
+| `{name}_list_mailboxes` | List all IMAP mailbox folders. |
+| `{name}_archive_conversation` | Archive a conversation (move to Archive or Trash). Parameter: `conversation_id` (required). |
+| `{name}_delete_conversation` | Delete a conversation (move to Trash, not permanent). Parameter: `conversation_id` (required). |
+| `{name}_create_reply_draft` | Create a reply draft for the latest message. Saved to Drafts, does NOT send. Parameters: `conversation_id`, `body` (required). |
+| `{name}_create_forward_draft` | Create a forward draft. Saved to Drafts, does NOT send. Parameters: `conversation_id`, `to` (required), `body` (optional). |
+
 ## Proxy Connections
 
 ### MCP Proxy
@@ -372,7 +435,7 @@ oauth = true
 
 URLs ending in `/sse` use SSE transport; everything else uses Streamable HTTP.
 
-Proxy-type aliases (`youtrack`, `sentry`, `netdata`, `notion`) behave identically to `proxy` but provide semantic clarity.
+Proxy-type aliases (`youtrack`, `sentry`, `netdata`, `notion`, `asana-mcp`) behave identically to `proxy` but provide semantic clarity. `asana-mcp` additionally defaults `oauth = true` and URL to `https://mcp.asana.com/v2/mcp`.
 
 ### HTTP
 
@@ -380,7 +443,7 @@ Generic HTTP client for any REST API. Useful for internal APIs or services witho
 
 **Required fields**: `name`, `type`, `url`
 
-**Optional fields**: `token_header`, `tunnel`, `instructions`
+**Optional fields**: `read_only` (default: false), `token_header`, `tunnel`, `instructions`
 
 **Secret**: `{name}-token` in secret store (optional auth token)
 
@@ -429,6 +492,52 @@ type = "gemini"
 | `{name}_list_models` | List available models with capabilities. Use to discover model IDs before generating. |
 | `{name}_generate` | Generate content (text/images). Parameters: `model` (required), `prompt` (required), `images` (optional, for editing), `response_modalities`, `aspect_ratio`, `image_size`, `output_dir`. |
 
+## Passive Connections
+
+Passive connections don't expose MCP tools. They provide credentials for external processes that communicate with the mux daemon through internal channels (not MCP).
+
+### Git Credential
+
+Provides HTTPS authentication for git operations (clone, pull, push). The `mux git-credential` subcommand implements the [git credential helper protocol](https://git-scm.com/docs/gitcredentials) and fetches tokens from the vault via a Unix domain socket (`~/.mux/credential.sock`).
+
+**Required fields**: `name`, `type`, `host`, `user`
+
+**Secret**: `{name}-token` in secret store (Personal Access Token)
+
+```toml
+[[connections]]
+name = "gitlab"
+type = "git"
+host = "gitlab.com"
+user = "oauth2"
+
+[[connections]]
+name = "github"
+type = "git"
+host = "github.com"
+user = "x-access-token"
+```
+
+**Git configuration** (required on the host):
+
+```ini
+# ~/.gitconfig
+[url "https://gitlab.com/"]
+    insteadOf = git@gitlab.com:
+
+[url "https://github.com/"]
+    insteadOf = git@github.com:
+
+[credential]
+    helper = /path/to/mux git-credential
+```
+
+The `url.insteadOf` rules transparently rewrite SSH URLs to HTTPS. The credential helper is invoked by git when authentication is needed — it connects to the running mux daemon via Unix socket, retrieves the token from the vault, and outputs it in the git credential protocol format. Git consumes the token internally; it is not visible to calling processes.
+
+**MCP tools exposed**: None. Git connections are visible in `connection_list` for discoverability but do not register tools. Agents should use git via the `Bash` tool, not through MCP.
+
+**Security**: The Unix socket is restricted to the file owner (chmod 0600). The token is never exposed via HTTP endpoints or MCP tools. See the security architecture documentation for the full threat model.
+
 ## Built-in Tools
 
 These tools are always available regardless of configured connections.
@@ -453,3 +562,19 @@ These tools allow AI agents to inspect and modify the mux configuration at runti
 | `connection_delete` | Delete a local connection. Provisioned connections cannot be deleted. |
 | `secret_set` | Store a secret (vault or keychain, depending on configuration). Write-only. Parameters: `key`, `value` (required). |
 | `secret_check` | Check which secrets are set (true/false per key, never reveals values). Parameter: `connection` (optional filter). |
+| `tunnel_add` | Add a new tunnel (WireGuard or SSH). Parameters: `name`, `type` (required), plus type-specific fields. |
+| `tunnel_delete` | Delete a local tunnel. Provisioned tunnels cannot be deleted. Parameter: `name` (required). |
+
+### Vault Tools
+
+Available when the vault is enabled in configuration.
+
+| Tool | Description |
+|------|-------------|
+| `vault_status` | Show vault state (uninitialized, sealed, unlocked), secret count, and inactivity timer. |
+| `vault_init` | Initialize a new vault with a passphrase. Parameter: `passphrase` (required). |
+| `vault_unlock` | Unlock the vault with a passphrase. Parameter: `passphrase` (required). |
+| `vault_lock` | Lock the vault immediately. Wipes encryption key from memory. |
+| `vault_migrate` | Migrate secrets from legacy stores (keychain, secrets.toml) into the vault. |
+| `vault_ssh_status` | Show SSH key status (stored in vault, loaded in ssh-agent, fingerprint). |
+| `vault_ssh_load` | Load SSH private key from vault into ssh-agent with a temporary lifetime. Parameter: `lifetime_secs` (optional, default: 120). |

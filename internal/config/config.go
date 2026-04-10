@@ -57,6 +57,10 @@ func (c *Connection) Enabled() bool {
 		return c.Token != ""
 	case c.Type == "imap":
 		return c.Host != "" && c.User != "" && c.Password != ""
+	case c.Type == "git":
+		// Token is fetched from vault at request time, not at startup.
+		// Only require host and user for the connection to be considered enabled.
+		return c.Host != "" && c.User != ""
 	default:
 		return c.Host != "" && c.User != ""
 	}
