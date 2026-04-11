@@ -1965,6 +1965,31 @@ func discoverOAuthMetadata(ctx context.Context, mcpURL string) (string, error) {
 	return origin + "/.well-known/oauth-authorization-server", nil
 }
 
+// headlessOAuthRoutes returns a function that mounts OAuth routes (/oauth/start, /oauth/callback)
+// for headless mode. In headless mode there is no Wails UI, so /oauth/start provides a browser-based
+// entry point: GET /oauth/start?connection=<name> redirects to the provider's authorization page.
+func headlessOAuthRoutes(cfg *config.Config, port int, mcpServer *server.MCPServer, tm *tunnelManager) func(*http.ServeMux) {
+	app := NewApp(cfg, version, buildTime, port, mcpServer, tm)
+	return func(mux *http.ServeMux) {
+		mux.HandleFunc("/oauth/callback", app.oauthCallbackHandler())
+		mux.HandleFunc("/oauth/start", func(w http.ResponseWriter, r *http.Request) {
+			name := r.URL.Query().Get("connection")
+			if name == "" {
+				http.Error(w, "missing ?connection= parameter", http.StatusBadRequest)
+				return
+			}
+			result, err := app.StartOAuth(name)
+			if err != nil {
+				log.Printf("[oauth] StartOAuth error for %q: %v", name, err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			http.Redirect(w, r, result.AuthURL, http.StatusFound)
+		})
+		log.Printf("[oauth] Headless OAuth routes mounted (/oauth/start, /oauth/callback)")
+	}
+}
+
 func extractParam(header, param string) string {
 	key := param + `="`
 	idx := strings.Index(header, key)

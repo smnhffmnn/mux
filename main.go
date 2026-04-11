@@ -282,13 +282,19 @@ More info: https://github.com/smnhffmnn/mux
 
 		registerConfigTools(s, cfg, tm)
 
+		// OAuth routes for headless mode (browser-based /oauth/start + /oauth/callback)
+		oauthRoutes := headlessOAuthRoutes(cfg, cfg.Server.Port, s, tm)
+
 		var localRoutes, tlsRoutes func(*http.ServeMux)
 		if vlt != nil {
 			vh := vault.NewVaultHandlers(vlt, waServer, approvalQueue)
-			// Local: vault + SSH endpoints. TLS: vault only (SSH is localhost-only for security).
+			// Local: vault + SSH endpoints + OAuth. TLS: vault only (SSH is localhost-only for security).
 			localRoutes = func(mux *http.ServeMux) {
 				vh.Mount(mux)
 				vh.MountSSH(mux)
+				if oauthRoutes != nil {
+					oauthRoutes(mux)
+				}
 			}
 			tlsRoutes = func(mux *http.ServeMux) { vh.Mount(mux) }
 			log.Println("[mux] Vault HTTP endpoints registered on /vault/*")
@@ -301,6 +307,9 @@ More info: https://github.com/smnhffmnn/mux
 				}
 			}()
 			defer credSock.Close()
+		} else if oauthRoutes != nil {
+			// OAuth routes on local HTTP only — redirect_uri is always localhost.
+			localRoutes = oauthRoutes
 		}
 		servers := startHTTPServer(s, cfg, localRoutes, tlsRoutes)
 

@@ -472,6 +472,11 @@ func ApplyConnectionDefaults(c *Connection) {
 		if c.URL == "" {
 			c.URL = "https://mcp.asana.com/v2/mcp"
 		}
+	case "notion":
+		c.OAuth = true
+		if c.URL == "" {
+			c.URL = "https://mcp.notion.com/mcp"
+		}
 	case "gemini":
 		if c.URL == "" {
 			c.URL = "https://generativelanguage.googleapis.com/v1beta"
