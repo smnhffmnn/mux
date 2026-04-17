@@ -71,7 +71,7 @@ func (c *Connection) Enabled() bool {
 // IsProxyType reports whether a connection type proxies an upstream MCP server.
 func IsProxyType(typ string) bool {
 	switch typ {
-	case "proxy", "youtrack", "sentry", "netdata", "notion", "asana-mcp":
+	case "proxy", "youtrack", "sentry", "netdata", "notion", "asana-mcp", "google-workspace":
 		return true
 	}
 	return false

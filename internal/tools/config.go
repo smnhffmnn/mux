@@ -43,6 +43,7 @@ func (ct *ConfigTools) Tools() []ToolDef {
 		ct.tunnelDeleteTool(),
 		ct.secretSetTool(),
 		ct.secretCheckTool(),
+		ct.provisioningSetTool(),
 	}
 }
 
@@ -205,6 +206,18 @@ func (ct *ConfigTools) secretCheckTool() ToolDef {
 			),
 		),
 		Handler: ct.handleSecretCheck,
+	}
+}
+
+func (ct *ConfigTools) provisioningSetTool() ToolDef {
+	return ToolDef{
+		Tool: mcp.NewTool("provisioning_set",
+			mcp.WithDescription("Set the remote provisioning endpoint. The token is stored separately via secret_set with key 'provisioning-token'. After setting both, mux fetches tunnels and connections from the endpoint on next startup."),
+			mcp.WithString("endpoint", mcp.Required(),
+				mcp.Description("Provisioning API URL (e.g. 'https://api.example.com/api/nmg/config')."),
+			),
+		),
+		Handler: ct.handleProvisioningSet,
 	}
 }
 
@@ -562,7 +575,9 @@ func (ct *ConfigTools) updateInMemorySecret(key, value string) {
 				ct.reloader.ReloadConnection(*c)
 			}
 		}
-	} else if key != "provisioning-token" && strings.HasSuffix(key, "-token") {
+	} else if key == "provisioning-token" {
+		ct.cfg.Provisioning.Token = value
+	} else if strings.HasSuffix(key, "-token") {
 		name := strings.TrimSuffix(key, "-token")
 		if c := ct.cfg.FindAnyConnection(name); c != nil {
 			c.Token = value
@@ -630,6 +645,32 @@ func (ct *ConfigTools) handleSecretCheck(_ context.Context, req mcp.CallToolRequ
 
 	data, _ := json.MarshalIndent(secrets, "", "  ")
 	return mcp.NewToolResultText(string(data)), nil
+}
+
+func (ct *ConfigTools) handleProvisioningSet(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	endpoint, err := req.RequireString("endpoint")
+	if err != nil {
+		return mcp.NewToolResultError("missing required parameter: endpoint"), nil
+	}
+
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return mcp.NewToolResultError("endpoint cannot be empty"), nil
+	}
+
+	ct.cfg.Provisioning.Endpoint = endpoint
+	if err := ct.cfg.Save(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to save config: %v", err)), nil
+	}
+
+	hasToken := ct.cfg.Provisioning.Token != ""
+	msg := fmt.Sprintf("provisioning endpoint set to %q", endpoint)
+	if !hasToken {
+		msg += ". Next: use secret_set with key 'provisioning-token' to store the token. Provisioning will activate on next mux restart once both are set."
+	} else {
+		msg += ". Token is already set — provisioning will activate on next mux restart."
+	}
+	return mcp.NewToolResultText(msg), nil
 }
 
 // validHeaderName checks that s is a valid HTTP header field name (RFC 7230 token).

@@ -125,6 +125,9 @@ var AllTypes = []TypeDef{
 		{Key: "database", Label: "Index", Placeholder: "docs"},
 		{Key: "token", Label: "API Key", Placeholder: "master-key", Secret: true},
 	}},
+	{Type: "google-workspace", Label: "Google Workspace", Fields: []TypeField{
+		{Key: "url", Label: "MCP URL", Placeholder: "http://localhost:8000/mcp"},
+	}},
 }
 
 // typeIndex is a lazily-built lookup map from type string to TypeDef.

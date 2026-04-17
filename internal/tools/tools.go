@@ -197,6 +197,8 @@ func DefaultInstructions(connType string) string {
 		return DefaultGeminiInstructions
 	case "imap":
 		return DefaultIMAPInstructions
+	case "google-workspace":
+		return DefaultGoogleWorkspaceInstructions
 	default:
 		return ""
 	}

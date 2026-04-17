@@ -143,6 +143,12 @@ func registerProxies(ctx context.Context, s *server.MCPServer, cfg *config.Confi
 				URL:   conn.URL,
 				Token: proxy.NewTokenProvider(conn.Token),
 			})
+		} else {
+			// No-auth mount — upstream server handles its own auth (e.g. google-workspace)
+			mounts = append(mounts, proxy.Mount{
+				Name: conn.Name,
+				URL:  conn.URL,
+			})
 		}
 	}
 
@@ -236,13 +242,16 @@ func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config
 		} else {
 			// Resolve token from vault without mutating the shared config
 			token, _ := config.GetSecret(conn.Name + "-token")
-			if token == "" {
+			if token != "" {
+				mount = proxy.Mount{
+					Name:  conn.Name,
+					URL:   conn.URL,
+					Token: proxy.NewTokenProvider(token),
+				}
+			} else {
+				// No-auth connections don't depend on vault secrets —
+				// they were already attempted at startup. Skip retry.
 				continue
-			}
-			mount = proxy.Mount{
-				Name:  conn.Name,
-				URL:   conn.URL,
-				Token: proxy.NewTokenProvider(token),
 			}
 		}
 
@@ -390,6 +399,19 @@ func (r *simpleReloader) registerProxy(conn config.Connection) {
 			Name:  conn.Name,
 			URL:   conn.URL,
 			Token: proxy.NewTokenProvider(conn.Token),
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := proxy.RegisterMount(ctx, r.mcpServer, mount); err != nil {
+			log.Printf("[mux] Warning: proxy %s not available: %v", conn.Name, err)
+			return
+		}
+		r.trackProxyTools(conn.Name)
+	} else {
+		// No-auth mount — upstream server handles its own auth
+		mount := proxy.Mount{
+			Name: conn.Name,
+			URL:  conn.URL,
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

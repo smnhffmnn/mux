@@ -19,7 +19,7 @@ import {
   GetOAuthStatus as _GetOAuthStatus,
   StartDeviceAuth as _StartDeviceAuth,
   GetDeviceAuthStatus as _GetDeviceAuthStatus,
-} from '../../bindings/mux/app.js'
+} from '../../bindings/github.com/smnhffmnn/mux/app.js'
 
 // Re-export types for convenience
 export interface ServerInfo {

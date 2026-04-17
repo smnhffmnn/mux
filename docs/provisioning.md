@@ -110,7 +110,7 @@ All fields use **camelCase** JSON keys.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | yes | Unique connection identifier |
-| `type` | string | yes | One of: `mariadb`, `postgresql`, `clickhouse`, `proxy`, `youtrack`, `sentry`, `netdata`, `notion`, `http`, `microsoft-graph`, `openai`, `elevenlabs`, `brave`, `firecrawl`, `google-tagmanager` |
+| `type` | string | yes | One of: `mariadb`, `postgresql`, `clickhouse`, `proxy`, `youtrack`, `sentry`, `netdata`, `notion`, `http`, `microsoft-graph`, `openai`, `elevenlabs`, `brave`, `firecrawl`, `google-tagmanager`, `google-workspace` |
 | `host` | string | databases | Database hostname or IP |
 | `port` | integer | no | Port number (defaults applied per type: MariaDB 3306, PostgreSQL 5432, ClickHouse 8123) |
 | `user` | string | databases | Database username |

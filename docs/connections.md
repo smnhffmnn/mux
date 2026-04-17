@@ -466,6 +466,25 @@ URLs ending in `/sse` use SSE transport; everything else uses Streamable HTTP.
 
 Proxy-type aliases (`youtrack`, `sentry`, `netdata`, `notion`, `asana-mcp`) behave identically to `proxy` but provide semantic clarity. `asana-mcp` additionally defaults `oauth = true` and URL to `https://mcp.asana.com/v2/mcp`.
 
+### Google Workspace
+
+Proxies tools from a local [google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp) server. Provides access to Gmail, Google Drive, Docs, Sheets, Calendar, and Tasks. The upstream server handles Google OAuth 2.0 — no token is needed in mux.
+
+**Required fields**: `name`, `type`, `url`
+
+**Optional fields**: `instructions`
+
+```toml
+[[connections]]
+name = "google-workspace"
+type = "google-workspace"
+url = "http://localhost:8000/mcp"
+```
+
+**MCP tools exposed**: All tools from the upstream google_workspace_mcp server, prefixed with `{name}_`. Typical tools include Gmail search/send/draft, Drive file management, Docs read/write, Sheets operations, Calendar event management, and Tasks CRUD.
+
+**Prerequisites**: The google_workspace_mcp server must be running locally with valid Google OAuth credentials before mux can connect. See [`google-workspace-setup.md`](google-workspace-setup.md) for the full setup guide.
+
 ### HTTP
 
 Generic HTTP client for any REST API. Useful for internal APIs or services without a dedicated connection type.
@@ -593,6 +612,7 @@ These tools allow AI agents to inspect and modify the mux configuration at runti
 | `secret_check` | Check which secrets are set (true/false per key, never reveals values). Parameter: `connection` (optional filter). |
 | `tunnel_add` | Add a new tunnel (WireGuard or SSH). Parameters: `name`, `type` (required), plus type-specific fields. |
 | `tunnel_delete` | Delete a local tunnel. Provisioned tunnels cannot be deleted. Parameter: `name` (required). |
+| `provisioning_set` | Set the remote provisioning endpoint. Parameter: `endpoint` (required). Token stored separately via `secret_set` with key `provisioning-token`. |
 
 ### Vault Tools
 
