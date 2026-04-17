@@ -260,6 +260,7 @@ func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config
 			log.Printf("[vault] Retry: proxy %s failed: %v", conn.Name, err)
 		} else {
 			log.Printf("[vault] Retry: proxy %s connected", conn.Name)
+			registered[conn.Name] = true
 			count++
 		}
 		mountCancel()

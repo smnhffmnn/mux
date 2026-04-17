@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net"
@@ -1256,7 +1257,8 @@ func callbackHTML(status, color, message string) string {
 <style>body{background:#0f1117;color:#e2e4e9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
 .card{text-align:center;padding:2rem;border-radius:12px;border:1px solid #2a2d35}
 h2{color:%s}</style></head>
-<body><div class="card"><h2>%s</h2><p>%s</p></div></body></html>`, status, color, status, message)
+<body><div class="card"><h2>%s</h2><p>%s</p></div></body></html>`,
+		html.EscapeString(status), color, html.EscapeString(status), html.EscapeString(message))
 }
 
 func (a *App) mountOAuthProxy(connName string, tokenStore *config.KeychainTokenStore) {
