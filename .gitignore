@@ -1,6 +1,6 @@
-# Binary
-mux
-mux.exe
+# Binary (root level only — avoid matching bindings/github.com/.../mux/)
+/mux
+/mux.exe
 
 # Build output
 dist/
