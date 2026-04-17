@@ -82,6 +82,7 @@ func getSecret(key string) (string, error) {
 	// Try vault first
 	if v != nil && v.IsUnlocked() {
 		if val, err := v.GetSecret(key); err == nil {
+			log.Printf("[secrets] Resolved %q from vault", key)
 			return val, nil
 		}
 		// Secret not in vault — fall through to legacy stores only if not exclusive
@@ -95,6 +96,7 @@ func getSecret(key string) (string, error) {
 	if !keyringBroken.Load() {
 		v, err := keyring.Get(ServiceName, key)
 		if err == nil {
+			log.Printf("[secrets] Resolved %q from keyring", key)
 			return v, nil
 		}
 		// "Not found" is not broken — the key just doesn't exist in keyring.
@@ -107,7 +109,11 @@ func getSecret(key string) (string, error) {
 
 	// File fallback (also checked when key is not in keyring — it may have
 	// been written during a previous session where keyring was broken)
-	return fileGet(key)
+	val, err := fileGet(key)
+	if err == nil {
+		log.Printf("[secrets] Resolved %q from file (%s)", key, secretsFilePath())
+	}
+	return val, err
 }
 
 // setSecret stores a secret. If vault is unlocked, writes to vault.

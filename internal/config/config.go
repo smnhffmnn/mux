@@ -3,7 +3,9 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/url"
+	"sort"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -126,6 +128,7 @@ type ProvisioningConfig struct {
 
 type ServerConfig struct {
 	Port    int    `toml:"port"`
+	Mode    string `toml:"mode,omitempty" json:"mode,omitempty"`       // "desktop", "headless", or "" (auto-detect)
 	TLSCert string `toml:"tls_cert,omitempty" json:"tlsCert,omitempty"` // path to TLS certificate
 	TLSKey  string `toml:"tls_key,omitempty" json:"tlsKey,omitempty"`   // path to TLS private key
 	TLSPort int    `toml:"tls_port,omitzero" json:"tlsPort,omitempty"` // HTTPS port for WebAuthn/Vault (default: port + 1)
@@ -393,6 +396,7 @@ func Load(path string) (*Config, error) {
 		path = DefaultConfigPath()
 	}
 	if _, err := os.Stat(path); err == nil {
+		log.Printf("[config] Loading config from %s", path)
 		if _, err := toml.DecodeFile(path, cfg); err != nil {
 			return nil, fmt.Errorf("parse config %s: %w", path, err)
 		}
@@ -401,6 +405,8 @@ func Load(path string) (*Config, error) {
 		var legacy legacyConfigFile
 		toml.DecodeFile(path, &legacy)
 		migrateFromLegacy(cfg, &legacy)
+	} else {
+		log.Printf("[config] No config file found at %s — using defaults", path)
 	}
 
 	// Mark local connections
@@ -444,6 +450,22 @@ func Load(path string) (*Config, error) {
 				cfg.Tunnels[i].KeepAlive = 25
 			}
 		}
+	}
+
+	// Log summary
+	connTypes := make(map[string]int)
+	for _, c := range cfg.Connections {
+		connTypes[c.Type]++
+	}
+	if len(cfg.Connections) > 0 {
+		parts := make([]string, 0, len(connTypes))
+		for t, n := range connTypes {
+			parts = append(parts, fmt.Sprintf("%d× %s", n, t))
+		}
+		sort.Strings(parts)
+		log.Printf("[config] %d connections (%s), %d tunnels", len(cfg.Connections), strings.Join(parts, ", "), len(cfg.Tunnels))
+	} else {
+		log.Printf("[config] No connections configured")
 	}
 
 	cfg.path = path
@@ -539,9 +561,12 @@ func (cfg *Config) Save() error {
 // --- Keychain ---
 
 func loadKeychain(cfg *Config) {
+	secretsLoaded := 0
+
 	// Provisioning token
 	if v, err := getSecret("provisioning-token"); err == nil {
 		cfg.Provisioning.Token = v
+		secretsLoaded++
 	}
 
 	// Connection secrets (password or token, keyed by connection name)
@@ -549,9 +574,11 @@ func loadKeychain(cfg *Config) {
 		name := cfg.Connections[i].Name
 		if v, err := getSecret(name + "-password"); err == nil {
 			cfg.Connections[i].Password = v
+			secretsLoaded++
 		}
 		if v, err := getSecret(name + "-token"); err == nil && cfg.Connections[i].Token == "" {
 			cfg.Connections[i].Token = v
+			secretsLoaded++
 		}
 	}
 
@@ -560,11 +587,15 @@ func loadKeychain(cfg *Config) {
 		name := cfg.Tunnels[i].Name
 		if v, err := getSecret("tunnel-" + name + "-private-key"); err == nil {
 			cfg.Tunnels[i].PrivateKey = v
+			secretsLoaded++
 		}
 		if v, err := getSecret("tunnel-" + name + "-preshared-key"); err == nil {
 			cfg.Tunnels[i].PresharedKey = v
+			secretsLoaded++
 		}
 	}
+
+	log.Printf("[secrets] Loaded %d secrets", secretsLoaded)
 }
 
 func loadEnv(cfg *Config) {

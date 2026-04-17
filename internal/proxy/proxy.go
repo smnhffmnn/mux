@@ -147,12 +147,17 @@ func RegisterMount(ctx context.Context, s *server.MCPServer, m Mount) error {
 		origName := originalName
 
 		s.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			log.Printf("[tool] Call: %s → %s", prefixedName, m.URL)
 			// Forward the call to the upstream server
 			upstreamReq := mcp.CallToolRequest{}
 			upstreamReq.Params.Name = origName
 			upstreamReq.Params.Arguments = req.GetArguments()
 
-			return upstream.CallTool(ctx, upstreamReq)
+			result, err := upstream.CallTool(ctx, upstreamReq)
+			if err != nil {
+				log.Printf("[tool] Error: %s — %v", prefixedName, err)
+			}
+			return result, err
 		})
 		count++
 	}

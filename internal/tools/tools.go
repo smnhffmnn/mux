@@ -170,11 +170,23 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		// Prefix tool name with connection name
 		prefixedName := conn.Name + "_" + t.Tool.Name
 		t.Tool.Name = prefixedName
-		s.AddTool(t.Tool, t.Handler)
+		s.AddTool(t.Tool, withCallLogging(prefixedName, t.Handler))
 		log.Printf("[mux] Registered: %s", prefixedName)
 		names = append(names, prefixedName)
 	}
 	return names, closer, nil
+}
+
+// withCallLogging wraps a tool handler to log each invocation.
+func withCallLogging(name string, handler server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		log.Printf("[tool] Call: %s", name)
+		result, err := handler(ctx, req)
+		if err != nil {
+			log.Printf("[tool] Error: %s — %v", name, err)
+		}
+		return result, err
+	}
 }
 
 // DefaultInstructions returns built-in instructions for connection types that have them.

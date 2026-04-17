@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -272,13 +273,24 @@ More info: https://github.com/smnhffmnn/mux
 		return
 	}
 
-	// Detect display availability for GUI vs headless decision
-	hasDisplay := runtime.GOOS == "darwin" || runtime.GOOS == "windows" ||
-		os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
+	// Detect display availability for GUI vs headless decision.
+	// Config mode overrides auto-detection: "headless" forces HTTP-only, "desktop" forces GUI.
+	var hasDisplay bool
+	switch strings.ToLower(cfg.Server.Mode) {
+	case "headless":
+		hasDisplay = false
+		log.Println("[mux] Mode forced to headless via config")
+	case "desktop":
+		hasDisplay = true
+		log.Println("[mux] Mode forced to desktop via config")
+	default:
+		hasDisplay = runtime.GOOS == "darwin" || runtime.GOOS == "windows" ||
+			os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
+	}
 
 	// --- Headless HTTP mode (no display server available) ---
 	if !hasDisplay {
-		log.Println("[mux] Starting in headless HTTP mode (no display detected)")
+		log.Println("[mux] Starting in headless HTTP mode")
 
 		registerConfigTools(s, cfg, tm)
 
