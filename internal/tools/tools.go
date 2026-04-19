@@ -118,6 +118,12 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		if err == nil {
 			toolDefs = gm.Tools()
 		}
+	case "fal-ai":
+		var fa *FalAI
+		fa, err = NewFalAI(conn, dialer)
+		if err == nil {
+			toolDefs = fa.Tools()
+		}
 	case "microsoft-graph":
 		var mg *MicrosoftGraph
 		mg, err = NewMicrosoftGraph(conn, dialer)

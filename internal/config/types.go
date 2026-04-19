@@ -108,6 +108,10 @@ var AllTypes = []TypeDef{
 		{Key: "url", Label: "API URL", Placeholder: "https://generativelanguage.googleapis.com/v1beta (default)"},
 		{Key: "token", Label: "API Key (x-goog-api-key)", Placeholder: "AIzaSy...", Secret: true},
 	}},
+	{Type: "fal-ai", Label: "fal.ai", Fields: []TypeField{
+		{Key: "url", Label: "API URL", Placeholder: "https://queue.fal.run (default)"},
+		{Key: "token", Label: "API Key", Placeholder: "fal_...", Secret: true},
+	}},
 	{Type: "imap", Label: "IMAP", Fields: []TypeField{
 		{Key: "host", Label: "IMAP Host", Placeholder: "imap.example.com"},
 		{Key: "port", Label: "Port", Placeholder: "993", Small: true},

@@ -540,6 +540,34 @@ type = "gemini"
 | `{name}_list_models` | List available models with capabilities. Use to discover model IDs before generating. |
 | `{name}_generate` | Generate content (text/images). Parameters: `model` (required), `prompt` (required), `images` (optional, for editing), `response_modalities`, `aspect_ratio`, `image_size`, `output_dir`. |
 
+### fal.ai
+
+Async inference queue connector for [fal.ai](https://fal.ai) — video, image and other generative models (Seedance, Kling, Flux, etc.). Long-running jobs are submitted to a queue; callers poll for status and fetch the final result separately, so that a single MCP call never blocks on minute-long generations.
+
+**Required fields**: `name`, `type`
+
+**Optional fields**: `url` (default: `https://queue.fal.run`), `tunnel`, `instructions`
+
+**Secret**: `{name}-token` in secret store (API key, sent as `Authorization: Key <token>`)
+
+```toml
+[[connections]]
+name = "fal"
+type = "fal-ai"
+# url defaults to https://queue.fal.run
+# Token stored as secret (key: "fal-token")
+```
+
+**MCP tools exposed**:
+
+| Tool | Description |
+|------|-------------|
+| `{name}_submit` | Submit an async job to a fal.ai model. Parameters: `model` (required, e.g. `bytedance/seedance-2.0/text-to-video`), `input` (required, JSON string with model parameters). Returns `request_id`, `status_url`, `response_url`. |
+| `{name}_status` | Check queue status. Parameters: `status_url` (required). Returns status (`IN_QUEUE`, `IN_PROGRESS`, `COMPLETED`), queue position, logs. |
+| `{name}_result` | Fetch the result of a completed job. Parameters: `response_url` (required). Call only after status reports `COMPLETED`. |
+
+Status and response URLs are validated against the configured host — unexpected hosts are rejected to prevent SSRF via manipulated API responses.
+
 ## Passive Connections
 
 Passive connections don't expose MCP tools. They provide credentials for external processes that communicate with the mux daemon through internal channels (not MCP).

@@ -55,7 +55,7 @@ func (c *Connection) Enabled() bool {
 		return true // auth is interactive via tools
 	case c.Type == "firecrawl", c.Type == "brave", c.Type == "google-tagmanager",
 		c.Type == "openai", c.Type == "elevenlabs", c.Type == "recraft", c.Type == "ideogram",
-		c.Type == "asana", c.Type == "gemini":
+		c.Type == "asana", c.Type == "gemini", c.Type == "fal-ai":
 		return c.Token != ""
 	case c.Type == "meilisearch":
 		return c.Host != "" && c.Database != ""
@@ -502,6 +502,10 @@ func ApplyConnectionDefaults(c *Connection) {
 	case "gemini":
 		if c.URL == "" {
 			c.URL = "https://generativelanguage.googleapis.com/v1beta"
+		}
+	case "fal-ai":
+		if c.URL == "" {
+			c.URL = "https://queue.fal.run"
 		}
 	case "imap":
 		if c.Port == 0 {
