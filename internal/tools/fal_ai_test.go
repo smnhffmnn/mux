@@ -1,8 +1,13 @@
 package tools
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/smnhffmnn/mux/internal/config"
 )
@@ -133,6 +138,44 @@ func TestFalAI_ValidateQueueURL_FailsClosedOnEmptyBaseURL(t *testing.T) {
 	fa := &FalAI{baseURL: "", apiKey: "t"}
 	if err := fa.validateQueueURL("https://queue.fal.run/reqs/abc"); err == nil {
 		t.Error("expected error when baseURL is empty")
+	}
+}
+
+func TestFalAI_HandleStatus_AcceptsInProgress(t *testing.T) {
+	// fal.ai's queue API returns HTTP 202 while a job is IN_QUEUE or IN_PROGRESS
+	// and HTTP 200 only when COMPLETED. Both carry a valid JSON status body.
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"in-progress 202", http.StatusAccepted, `{"status":"IN_PROGRESS","request_id":"x"}`},
+		{"completed 200", http.StatusOK, `{"status":"COMPLETED","request_id":"x"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			fa, err := NewFalAI(config.Connection{Type: "fal-ai", Token: "t", URL: srv.URL}, nil)
+			if err != nil {
+				t.Fatalf("NewFalAI: %v", err)
+			}
+
+			req := mcp.CallToolRequest{Params: mcp.CallToolParams{
+				Arguments: map[string]any{"status_url": srv.URL + "/status"},
+			}}
+			res, err := fa.handleStatus(context.Background(), req)
+			if err != nil {
+				t.Fatalf("handleStatus returned error: %v", err)
+			}
+			if res.IsError {
+				t.Errorf("expected success result, got error: %+v", res)
+			}
+		})
 	}
 }
 

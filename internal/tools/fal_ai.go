@@ -215,7 +215,9 @@ func (f *FalAI) handleStatus(ctx context.Context, req mcp.CallToolRequest) (*mcp
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	if status != http.StatusOK {
+	// fal.ai returns 202 while the job is IN_QUEUE/IN_PROGRESS and 200 when COMPLETED;
+	// both carry a valid JSON status body.
+	if status != http.StatusOK && status != http.StatusAccepted {
 		return mcp.NewToolResultError(fmt.Sprintf("fal.ai API error (HTTP %d): %s", status, string(data))), nil
 	}
 

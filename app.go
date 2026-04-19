@@ -247,7 +247,9 @@ func allTypes() []TypeListEntry {
 	for _, td := range config.AllTypes {
 		types = append(types, TypeListEntry{Type: td.Type, Label: td.Label})
 	}
-	sort.Slice(types, func(i, j int) bool { return types[i].Label < types[j].Label })
+	sort.Slice(types, func(i, j int) bool {
+		return strings.ToLower(types[i].Label) < strings.ToLower(types[j].Label)
+	})
 	return types
 }
 
