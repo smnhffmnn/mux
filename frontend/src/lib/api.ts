@@ -19,6 +19,7 @@ import {
   GetOAuthStatus as _GetOAuthStatus,
   StartDeviceAuth as _StartDeviceAuth,
   GetDeviceAuthStatus as _GetDeviceAuthStatus,
+  GetSetupDoc as _GetSetupDoc,
 } from '../../bindings/github.com/smnhffmnn/mux/app.js'
 
 // Re-export types for convenience
@@ -184,3 +185,4 @@ export const StartOAuth = _StartOAuth as (name: string) => Promise<OAuthStartRes
 export const GetOAuthStatus = _GetOAuthStatus as (name: string) => Promise<OAuthStatus>
 export const StartDeviceAuth = _StartDeviceAuth as (name: string) => Promise<DeviceAuthStart>
 export const GetDeviceAuthStatus = _GetDeviceAuthStatus as (name: string) => Promise<DeviceAuthStatus>
+export const GetSetupDoc = _GetSetupDoc as (typ: string) => Promise<string>

@@ -1,6 +1,8 @@
 <script lang="ts">
   import type { TypeListEntry } from '../api'
-  import { AddConnection } from '../api'
+  import { AddConnection, GetSetupDoc } from '../api'
+  import { marked } from 'marked'
+  import DOMPurify from 'dompurify'
 
   let { types, onAdd, onClose }: { types: TypeListEntry[]; onAdd: () => void; onClose: () => void } = $props()
 
@@ -8,6 +10,18 @@
   let selectedType = $state(types[0]?.type ?? '')
   let adding = $state(false)
   let error = $state('')
+  let setupDoc = $state('')
+
+  $effect(() => {
+    const current = selectedType
+    if (!current) {
+      setupDoc = ''
+      return
+    }
+    GetSetupDoc(current)
+      .then(doc => { if (current === selectedType) setupDoc = doc })
+      .catch(() => { if (current === selectedType) setupDoc = '' })
+  })
 
   async function handleAdd() {
     if (!name.trim() || !selectedType) {
@@ -64,6 +78,11 @@
       {#if error}
         <div class="error">{error}</div>
       {/if}
+      {#if setupDoc}
+        <div class="setup-doc">
+          {@html DOMPurify.sanitize(marked(setupDoc) as string)}
+        </div>
+      {/if}
     </div>
     <div class="modal-footer">
       <button class="primary" onclick={handleAdd} disabled={adding}>
@@ -91,6 +110,11 @@
     border-radius: var(--radius-lg);
     width: 380px;
     box-shadow: var(--shadow-lg);
+    transition: width 0.15s ease;
+  }
+
+  .modal:has(.setup-doc) {
+    width: 520px;
   }
 
   .modal-header {
@@ -151,5 +175,103 @@
     padding: 12px 16px;
     border-top: 1px solid var(--border);
     justify-content: flex-end;
+  }
+
+  .setup-doc {
+    max-height: 300px;
+    overflow-y: auto;
+    padding: 12px;
+    background: var(--bg-inset);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+  }
+
+  .setup-doc :global(h1) {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 0 0 8px;
+  }
+
+  .setup-doc :global(h2) {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 12px 0 4px;
+  }
+
+  .setup-doc :global(h3) {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 10px 0 4px;
+  }
+
+  .setup-doc :global(p) {
+    margin: 0 0 8px;
+  }
+
+  .setup-doc :global(ul), .setup-doc :global(ol) {
+    margin: 0 0 8px;
+    padding-left: 18px;
+  }
+
+  .setup-doc :global(li) {
+    margin: 2px 0;
+  }
+
+  .setup-doc :global(code) {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--bg-surface);
+    padding: 1px 4px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+  }
+
+  .setup-doc :global(pre) {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px;
+    overflow-x: auto;
+    margin: 0 0 8px;
+  }
+
+  .setup-doc :global(pre code) {
+    background: none;
+    border: none;
+    padding: 0;
+  }
+
+  .setup-doc :global(table) {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 8px;
+    font-size: 11px;
+  }
+
+  .setup-doc :global(th), .setup-doc :global(td) {
+    border: 1px solid var(--border);
+    padding: 4px 8px;
+    text-align: left;
+  }
+
+  .setup-doc :global(th) {
+    background: var(--bg-surface);
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .setup-doc :global(a) {
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  .setup-doc :global(a:hover) {
+    text-decoration: underline;
   }
 </style>

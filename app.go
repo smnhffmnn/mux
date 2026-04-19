@@ -28,6 +28,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/smnhffmnn/mux/docs/setup"
 	"github.com/smnhffmnn/mux/internal/config"
 	"github.com/smnhffmnn/mux/internal/provisioning"
 	"github.com/smnhffmnn/mux/internal/proxy"
@@ -400,6 +401,12 @@ func (a *App) GetServerInfo() ServerInfo {
 // GetConnectionTypes returns available connection types for the add dialog.
 func (a *App) GetConnectionTypes() []TypeListEntry {
 	return allTypes()
+}
+
+// GetSetupDoc returns the setup documentation markdown for a connection type.
+// Returns an empty string if no documentation exists for the given type.
+func (a *App) GetSetupDoc(typ string) string {
+	return setup.Get(typ)
 }
 
 // GetConnection returns a single connection's info.

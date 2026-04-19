@@ -125,6 +125,16 @@ export function GetServerInfo() {
 }
 
 /**
+ * GetSetupDoc returns the setup documentation markdown for a connection type.
+ * Returns an empty string if no documentation exists for the given type.
+ * @param {string} typ
+ * @returns {$CancellablePromise<string>}
+ */
+export function GetSetupDoc(typ) {
+    return $Call.ByID(3367668382, typ);
+}
+
+/**
  * ReloadConnection re-registers MCP tools for a connection (implements tools.ToolReloader).
  * @param {config$0.Connection} conn
  * @returns {$CancellablePromise<void>}
