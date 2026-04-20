@@ -57,6 +57,8 @@ func (c *Connection) Enabled() bool {
 		c.Type == "openai", c.Type == "elevenlabs", c.Type == "recraft", c.Type == "ideogram",
 		c.Type == "asana", c.Type == "gemini", c.Type == "fal-ai":
 		return c.Token != ""
+	case c.Type == "youtrack-agile":
+		return c.URL != "" && c.Token != "" && c.Database != ""
 	case c.Type == "meilisearch":
 		return c.Host != "" && c.Database != ""
 	case c.Type == "imap":
