@@ -574,6 +574,11 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
+	// Headless mode skips the OS keyring entirely.
+	if strings.EqualFold(cfg.Server.Mode, "headless") {
+		skipKeyring.Store(true)
+	}
+
 	// Load secrets from OS keychain (best-effort)
 	loadKeychain(cfg)
 
