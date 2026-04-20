@@ -30,7 +30,7 @@ type secretsFile struct {
 
 var (
 	fileStoreMu   sync.Mutex
-	keyringBroken atomic.Bool // cached: true after first keyring failure
+	skipKeyring atomic.Bool // set in headless mode or after first keyring failure
 
 	// activeVault is set when the vault feature is enabled.
 	// When set, getSecret/setSecret/deleteSecret try the vault first.
@@ -92,7 +92,7 @@ func getSecret(key string) (string, error) {
 		return "", fmt.Errorf("vault is sealed; call vault_unlock before accessing secrets (exclusive mode)")
 	}
 
-	if !keyringBroken.Load() {
+	if !skipKeyring.Load() {
 		v, err := keyring.Get(ServiceName, key)
 		if err == nil {
 			log.Printf("[secrets] Resolved %q from keyring", key)
@@ -102,7 +102,7 @@ func getSecret(key string) (string, error) {
 		// Only mark broken for systemic errors (no provider, D-Bus failure, etc.)
 		if !isKeyNotFound(err) {
 			log.Printf("[secrets] Keyring unavailable (%v), using file fallback", err)
-			keyringBroken.Store(true)
+			skipKeyring.Store(true)
 		}
 	}
 
@@ -144,11 +144,11 @@ func setSecret(key, value string) error {
 		return fmt.Errorf("vault is sealed; call vault_unlock before storing secrets (exclusive mode)")
 	}
 
-	if !keyringBroken.Load() {
+	if !skipKeyring.Load() {
 		err := keyring.Set(ServiceName, key, value)
 		if err != nil && !isKeyNotFound(err) {
 			log.Printf("[secrets] Keyring unavailable (%v), using file fallback", err)
-			keyringBroken.Store(true)
+			skipKeyring.Store(true)
 		}
 	}
 
@@ -168,10 +168,10 @@ func deleteSecret(key string) error {
 	// Try both legacy stores — secret might be in either or both.
 	var keyringErr, fileErr error
 
-	if !keyringBroken.Load() {
+	if !skipKeyring.Load() {
 		keyringErr = keyring.Delete(ServiceName, key)
 		if keyringErr != nil && !isKeyNotFound(keyringErr) {
-			keyringBroken.Store(true)
+			skipKeyring.Store(true)
 		}
 	}
 
