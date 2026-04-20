@@ -67,10 +67,9 @@ func SetVaultExclusive(exclusive bool) {
 	vaultExclusive.Store(exclusive)
 }
 
-// secretsFilePath returns ~/.mux/secrets.toml.
+// secretsFilePath returns the path to secrets.toml inside the config directory.
 func secretsFilePath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, DefaultConfigDir, "secrets.toml")
+	return filepath.Join(Dir(), "secrets.toml")
 }
 
 // getSecret reads a secret. Priority: vault (if enabled+unlocked) → keyring → file.

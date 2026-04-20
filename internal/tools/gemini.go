@@ -64,11 +64,7 @@ func NewGemini(conn config.Connection, dialer Dialer) (*Gemini, error) {
 		baseURL = "https://generativelanguage.googleapis.com/v1beta"
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = os.TempDir()
-	}
-	outputDir := filepath.Join(home, ".mux", "output")
+	outputDir := filepath.Join(config.Dir(), "output")
 
 	transport := &http.Transport{
 		ResponseHeaderTimeout: 120 * time.Second,
@@ -131,7 +127,7 @@ func (g *Gemini) Tools() []ToolDef {
 					mcp.Description("Image output resolution: 512, 1K, 2K, or 4K (default: 1K)"),
 				),
 				mcp.WithString("output_dir",
-					mcp.Description("Override output directory for saved images (default: ~/.mux/output/, supports ~ for home dir)."),
+					mcp.Description("Override output directory for saved images (default: $XDG_CONFIG_HOME/mux/output/, supports ~ for home dir)."),
 				),
 			),
 			Handler: g.handleGenerate,
