@@ -135,7 +135,7 @@ var AllTypes = []TypeDef{
 	{Type: "youtrack-agile", Label: "YouTrack Agile", Fields: []TypeField{
 		{Key: "url", Label: "Base URL", Placeholder: "https://instance.myjetbrains.com/youtrack"},
 		{Key: "token", Label: "Permanent Token", Placeholder: "perm:...", Secret: true},
-		{Key: "database", Label: "Board ID", Placeholder: "97-63"},
+		{Key: "database", Label: "Board ID", Placeholder: "123-45"},
 	}},
 }
 
