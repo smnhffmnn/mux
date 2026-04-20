@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,11 +42,24 @@ func migrateLegacyProvisioningHeader(content []byte) []byte {
 }
 
 const (
-	ServiceName      = "mux"
-	DefaultPort      = 7700
-	DefaultConfigDir = ".mux"
-	ConfigFileName   = "config.toml"
+	ServiceName    = "mux"
+	DefaultPort    = 7700
+	ConfigFileName = "config.toml"
 )
+
+// Dir returns the mux configuration directory.
+// Windows: %USERPROFILE%\.mux
+// Otherwise: $XDG_CONFIG_HOME/mux if set, ~/.config/mux as fallback.
+func Dir() string {
+	home, _ := os.UserHomeDir()
+	if runtime.GOOS == "windows" {
+		return filepath.Join(home, ".mux")
+	}
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, ServiceName)
+	}
+	return filepath.Join(home, ".config", ServiceName)
+}
 
 // --- Core types ---
 
@@ -401,8 +415,7 @@ func (cfg *Config) ProvisioningStatus() (tunnels, connections int) {
 }
 
 func DefaultConfigPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, DefaultConfigDir, ConfigFileName)
+	return filepath.Join(Dir(), ConfigFileName)
 }
 
 // --- Legacy types for backward-compatible config loading ---
