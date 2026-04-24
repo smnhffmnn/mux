@@ -13,7 +13,7 @@ mux is a [Model Context Protocol](https://modelcontextprotocol.io) gateway that 
 - **API Integrations** -- Microsoft Graph (mail + SharePoint), Google Workspace (Drive, Docs, Sheets, Gmail, Calendar, Tasks), Google Tag Manager, Google Gemini, OpenAI, ElevenLabs, Brave Search, Firecrawl, fal.ai (async inference queue)
 - **Generic HTTP** -- connect any REST API with optional auth headers and file output
 - **WireGuard Tunnels** -- reach databases on private networks through userspace WireGuard (no root, no VPN client)
-- **Remote Provisioning** -- centrally manage connections and tunnels for your team from a single HTTP endpoint
+- **Remote Provisioning** -- centrally manage connections and tunnels for your team from one or more HTTP endpoints (configure multiple `[[provisioning]]` blocks to combine sources)
 - **Two Transports, Three Modes** -- stdio (Claude Desktop) and Streamable HTTP (`/mcp`), with auto-detection of desktop, headless, and stdio modes
 - **Desktop App** -- Wails v3 + Svelte 5 with system tray, web UI, OAuth flows, and connection testing
 - **Encrypted Vault** -- hardware-security-grade secret storage with AES-256-GCM, Argon2id key derivation, inactivity auto-lock, and WebAuthn/FIDO2 unlock (FaceID, YubiKey)

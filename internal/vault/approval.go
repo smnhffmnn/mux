@@ -27,7 +27,7 @@ const (
 type ApprovalRequest struct {
 	ID        string        `json:"id"`
 	Action    string        `json:"action"`    // e.g. "git push origin main"
-	Context   string        `json:"context"`   // e.g. "nas-erp" (repo or session)
+	Context   string        `json:"context"`   // e.g. a repo name or session ID
 	Requester string        `json:"requester"` // e.g. "claude-code-session-1"
 	State     ApprovalState `json:"state"`
 	CreatedAt time.Time     `json:"created_at"`

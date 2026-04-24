@@ -1,7 +1,6 @@
 # Design: SSH Signing Proxy via Vault
 
 **Status:** Draft
-**Author:** Simon Hoffmann / Claude
 **Created:** 2026-04-01
 **Last Updated:** 2026-04-01
 
@@ -233,7 +232,7 @@ The FIDO2 approach has stronger cryptographic guarantees (hardware element), but
 
 4. **Git credential helper alternative:** Instead of ssh-agent, could mux act as a Git credential helper? This would avoid the agent sock question but only works for HTTPS Git, not SSH.
 
-5. **Should the FIDO2 key be removed from GitLab/GitHub?** It's now redundant. Or keep it as a backup for when Simon is physically at the PC.
+5. **Should the FIDO2 key be removed from GitLab/GitHub?** It's now redundant. Or keep it as a backup for when the operator is physically at the PC.
 
 ## Alternatives Considered
 
@@ -263,7 +262,7 @@ Run an SSH agent on the iPhone that holds the key, forward it to the PC via Tail
 
 ### D. Keep FIDO2 + Physical Presence
 
-Accept that git push requires Simon to be at the PC with YubiKey.
+Accept that git push requires the operator to be at the PC with YubiKey.
 
 **Pros:** Strongest security.
 **Cons:** Defeats the entire Harness remote-control use case.
