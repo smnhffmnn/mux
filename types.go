@@ -7,11 +7,11 @@ package main
 
 // PageData is the top-level structure returned by GetPageData().
 type PageData struct {
-	Server      ServerInfo      `json:"server"`
+	Server      ServerInfo       `json:"server"`
 	Provisioning ProvisioningInfo `json:"provisioning"`
-	Tunnels     []TunnelInfo    `json:"tunnels"`
-	Connections []ConnInfo      `json:"connections"`
-	Types       []TypeListEntry `json:"types"`
+	Tunnels     []TunnelInfo     `json:"tunnels"`
+	Connections []ConnInfo       `json:"connections"`
+	Types       []TypeListEntry  `json:"types"`
 }
 
 // ServerInfo contains version/uptime metadata shown in the header.
@@ -23,15 +23,24 @@ type ServerInfo struct {
 	CanSelfUpdate  bool   `json:"canSelfUpdate"`
 }
 
-// ProvisioningInfo describes provisioning status.
+// ProvisioningInfo describes the aggregate provisioning status across all endpoints
+// and lists each configured endpoint individually.
 type ProvisioningInfo struct {
-	Configured    bool   `json:"configured"`
-	Endpoint      string `json:"endpoint"`
-	TokenSet      bool   `json:"tokenSet"`
-	Tunnels       int    `json:"tunnels"`
-	Connections   int    `json:"connections"`
-	ResultMessage string `json:"resultMessage,omitempty"`
-	ResultSuccess bool   `json:"resultSuccess,omitempty"`
+	Configured    bool                 `json:"configured"`   // true if at least one endpoint has endpoint+token
+	Endpoints     []ProvisioningEndpointInfo `json:"endpoints"`
+	Tunnels       int                  `json:"tunnels"`      // aggregate count
+	Connections   int                  `json:"connections"`  // aggregate count
+	ResultMessage string               `json:"resultMessage,omitempty"`
+	ResultSuccess bool                 `json:"resultSuccess,omitempty"`
+}
+
+// ProvisioningEndpointInfo describes a single provisioning endpoint.
+type ProvisioningEndpointInfo struct {
+	Name        string `json:"name"`                // empty for the legacy default endpoint
+	Endpoint    string `json:"endpoint"`
+	TokenSet    bool   `json:"tokenSet"`
+	Tunnels     int    `json:"tunnels"`     // count delivered by this endpoint
+	Connections int    `json:"connections"` // count delivered by this endpoint
 }
 
 // TunnelInfo describes a WireGuard or SSH tunnel.

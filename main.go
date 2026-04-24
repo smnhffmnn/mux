@@ -95,18 +95,27 @@ More info: https://github.com/smnhffmnn/mux
 		cfg.Server.Port = flagPort
 	}
 
-	// Remote Provisioning: fetch tunnels + connections from provisioning API
-	if cfg.HasProvisioning() {
-		log.Printf("[mux] Fetching config from provisioning: %s", cfg.Provisioning.Endpoint)
+	// Remote Provisioning: fetch tunnels + connections from each configured endpoint.
+	// Errors on individual endpoints are logged and do not block startup.
+	for i := range cfg.Provisioning {
+		p := cfg.Provisioning[i]
+		if !p.Enabled() {
+			continue
+		}
+		label := p.Name
+		if label == "" {
+			label = "default"
+		}
+		log.Printf("[mux] Fetching config from provisioning endpoint %q: %s", label, p.Endpoint)
 		provCtx, provCancel := context.WithTimeout(context.Background(), 20*time.Second)
-		provResp, provErr := provisioning.Fetch(provCtx, cfg.Provisioning.Endpoint, cfg.Provisioning.Token)
+		provResp, provErr := provisioning.Fetch(provCtx, p.Endpoint, p.Token)
 		provCancel()
 		if provErr != nil {
-			log.Printf("[mux] Provisioning failed: %v (continuing with local config)", provErr)
-		} else {
-			cfg.SetProvisioned(provResp.Tunnels, provResp.Connections)
-			log.Printf("[mux] Provisioned: %d tunnels, %d connections", len(provResp.Tunnels), len(provResp.Connections))
+			log.Printf("[mux] Provisioning from %q failed: %v (continuing)", label, provErr)
+			continue
 		}
+		cfg.SetProvisioned(p.Name, provResp.Tunnels, provResp.Connections)
+		log.Printf("[mux] Provisioned from %q: %d tunnels, %d connections", label, len(provResp.Tunnels), len(provResp.Connections))
 	}
 
 	// --- Vault (encrypted secret store) ---

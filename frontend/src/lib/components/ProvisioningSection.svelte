@@ -1,20 +1,36 @@
 <script lang="ts">
-  import type { ProvisioningInfo } from '../api'
+  import type { ProvisioningInfo, ProvisioningEndpointInfo } from '../api'
   import { SetupProvisioning, SyncProvisioning } from '../api'
 
   let { provisioning, onSync }: { provisioning: ProvisioningInfo; onSync: () => void } = $props()
 
-  let endpoint = $state(provisioning.endpoint ?? '')
+  // Selected endpoint to edit. Empty string = the default (unnamed) endpoint,
+  // which matches how the backend treats the legacy single-endpoint case.
+  let selectedName = $state<string>('')
+  let endpoint = $state('')
   let token = $state('')
   let saving = $state(false)
   let syncing = $state(false)
-  let resultMsg = $state(provisioning.resultMessage ?? '')
-  let resultSuccess = $state(provisioning.resultSuccess ?? false)
+  let resultMsg = $state('')
+  let resultSuccess = $state(false)
+
+  $effect(() => {
+    // Reset form values when switching endpoint selection
+    const sel = provisioning.endpoints.find(e => e.name === selectedName)
+    endpoint = sel?.endpoint ?? ''
+    token = ''
+  })
+
+  function displayName(e: ProvisioningEndpointInfo): string {
+    return e.name === '' ? 'Default' : e.name
+  }
 
   async function handleSetup() {
     saving = true
     resultMsg = ''
     try {
+      // Backend's SetupProvisioning currently updates the default (unnamed) endpoint only.
+      // Named endpoints are managed via config.toml or the MCP provisioning_set tool.
       const result = await SetupProvisioning(endpoint, token)
       resultMsg = result.resultMessage ?? 'Saved'
       resultSuccess = result.resultSuccess ?? true
@@ -50,25 +66,44 @@
   </div>
 
   <div class="provisioning-card">
+    {#if provisioning.endpoints.length > 0}
+      <div class="endpoint-list">
+        {#each provisioning.endpoints as ep (ep.name)}
+          <div class="endpoint-row" class:active={ep.name === selectedName}>
+            <button class="endpoint-label" onclick={() => (selectedName = ep.name)}>
+              <span class="dot" class:green={ep.tokenSet && ep.endpoint} class:gray={!ep.tokenSet || !ep.endpoint}></span>
+              <span class="name">{displayName(ep)}</span>
+              <span class="url">{ep.endpoint || '(no endpoint)'}</span>
+            </button>
+            <span class="stats">{ep.tunnels}T · {ep.connections}C</span>
+          </div>
+        {/each}
+      </div>
+    {/if}
+
     <div class="form-grid">
       <div class="field">
-        <label for="provisioning-endpoint">Endpoint</label>
-        <input id="provisioning-endpoint" type="text" placeholder="https://provisioning.example.com/api/mux/config" bind:value={endpoint} />
+        <label for="provisioning-endpoint">Endpoint (Default)</label>
+        <input id="provisioning-endpoint" type="text" placeholder="https://provisioning.example.com/api/mux/provision" bind:value={endpoint} />
       </div>
       <div class="field">
-        <label for="provisioning-token">Token</label>
-        <input id="provisioning-token" type="password" placeholder={provisioning.tokenSet ? '••••• (stored)' : 'Bearer token'} bind:value={token} />
+        <label for="provisioning-token">Token (Default)</label>
+        <input id="provisioning-token" type="password" placeholder={provisioning.endpoints.find(e => e.name === '')?.tokenSet ? '••••• (stored)' : 'Bearer token'} bind:value={token} />
       </div>
     </div>
+    <p class="hint">
+      Additional endpoints can be configured via <code>[[provisioning]]</code> blocks in <code>~/.mux/config.toml</code>
+      or through the <code>provisioning_set</code> MCP tool with a <code>name</code> parameter.
+    </p>
 
     <div class="provisioning-actions">
-      <button onclick={handleSetup} disabled={saving}>{saving ? 'Saving...' : 'Save'}</button>
-      <button class="primary" onclick={handleSync} disabled={syncing || !provisioning.configured}>{syncing ? 'Syncing...' : 'Sync'}</button>
+      <button onclick={handleSetup} disabled={saving}>{saving ? 'Saving...' : 'Save Default'}</button>
+      <button class="primary" onclick={handleSync} disabled={syncing || !provisioning.configured}>{syncing ? 'Syncing...' : 'Sync All'}</button>
     </div>
 
     {#if provisioning.configured}
       <div class="provisioning-status">
-        <span>{provisioning.tunnels} tunnels, {provisioning.connections} connections provisioned</span>
+        <span>Total: {provisioning.tunnels} tunnels, {provisioning.connections} connections across {provisioning.endpoints.length} endpoint{provisioning.endpoints.length === 1 ? '' : 's'}</span>
       </div>
     {/if}
 
@@ -101,11 +136,67 @@
     padding: 16px;
   }
 
+  .endpoint-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .endpoint-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 6px;
+    border-radius: 4px;
+  }
+
+  .endpoint-row.active {
+    background: var(--bg-inset);
+  }
+
+  .endpoint-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+  }
+
+  .endpoint-label .name {
+    font-weight: 500;
+    font-size: 12px;
+  }
+
+  .endpoint-label .url {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .stats {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+  }
+
   .form-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 10px;
-    margin-bottom: 12px;
+    margin-bottom: 8px;
   }
 
   .field {
@@ -124,6 +215,21 @@
 
   .field input {
     width: 100%;
+  }
+
+  .hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin: 0 0 10px;
+  }
+
+  .hint code {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    background: var(--bg-inset);
+    padding: 1px 4px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
   }
 
   .provisioning-actions {

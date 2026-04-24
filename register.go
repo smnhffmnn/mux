@@ -177,26 +177,51 @@ func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config
 	}
 	defer retryMu.Unlock()
 
-	// Re-fetch provisioning if it wasn't done at startup (token was in sealed vault)
-	_, provConns := cfg.ProvisioningStatus()
-	if cfg.Provisioning.Endpoint != "" && provConns == 0 {
-		token := cfg.Provisioning.Token
-		if token == "" {
-			token, _ = config.GetSecret("provisioning-token")
+	// Re-fetch provisioning for each endpoint whose fetch failed at startup
+	// (typically because the token was still in a sealed vault).
+	for i := range cfg.Provisioning {
+		p := &cfg.Provisioning[i]
+		if p.Endpoint == "" {
+			continue
 		}
-		if token != "" {
-			cfg.Provisioning.Token = token
-			log.Printf("[vault] Retry: fetching provisioning from %s", cfg.Provisioning.Endpoint)
-			provCtx, provCancel := context.WithTimeout(ctx, 20*time.Second)
-			provResp, provErr := provisioning.Fetch(provCtx, cfg.Provisioning.Endpoint, token)
-			provCancel()
-			if provErr != nil {
-				log.Printf("[vault] Retry: provisioning failed: %v", provErr)
-			} else {
-				cfg.SetProvisioned(provResp.Tunnels, provResp.Connections)
-				log.Printf("[vault] Retry: provisioned %d tunnels, %d connections", len(provResp.Tunnels), len(provResp.Connections))
+		// Skip if this endpoint already delivered its share.
+		tunnels, conns := 0, 0
+		if cfg.ProvisioningStatus(); true {
+			// Per-endpoint status via the public accessors
+			for _, pc := range cfg.ProvisionedConnections() {
+				if cfg.ConnectionEndpointName(pc.Name) == p.Name {
+					conns++
+				}
 			}
+			_ = tunnels
 		}
+		if conns > 0 {
+			continue
+		}
+
+		token := p.Token
+		if token == "" {
+			token, _ = config.GetSecret(p.SecretKey())
+		}
+		if token == "" {
+			continue
+		}
+		p.Token = token
+
+		label := p.Name
+		if label == "" {
+			label = "default"
+		}
+		log.Printf("[vault] Retry: fetching provisioning %q from %s", label, p.Endpoint)
+		provCtx, provCancel := context.WithTimeout(ctx, 20*time.Second)
+		provResp, provErr := provisioning.Fetch(provCtx, p.Endpoint, token)
+		provCancel()
+		if provErr != nil {
+			log.Printf("[vault] Retry: provisioning %q failed: %v", label, provErr)
+			continue
+		}
+		cfg.SetProvisioned(p.Name, provResp.Tunnels, provResp.Connections)
+		log.Printf("[vault] Retry: provisioned %q: %d tunnels, %d connections", label, len(provResp.Tunnels), len(provResp.Connections))
 	}
 
 	// Build set of already-registered tool prefixes

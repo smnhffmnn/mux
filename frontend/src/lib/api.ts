@@ -31,12 +31,19 @@ export interface ServerInfo {
   canSelfUpdate: boolean
 }
 
-export interface ProvisioningInfo {
-  configured: boolean
+export interface ProvisioningEndpointInfo {
+  name: string          // empty string for the legacy/default endpoint
   endpoint: string
   tokenSet: boolean
   tunnels: number
   connections: number
+}
+
+export interface ProvisioningInfo {
+  configured: boolean
+  endpoints: ProvisioningEndpointInfo[]
+  tunnels: number       // aggregate across all endpoints
+  connections: number   // aggregate across all endpoints
   resultMessage?: string
   resultSuccess?: boolean
 }

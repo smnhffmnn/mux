@@ -362,14 +362,7 @@ func (a *App) GetPageData() PageData {
 		Types: allTypes(),
 	}
 
-	provT, provC := a.cfg.ProvisioningStatus()
-	data.Provisioning = ProvisioningInfo{
-		Configured:  a.cfg.HasProvisioning(),
-		Endpoint:    a.cfg.Provisioning.Endpoint,
-		TokenSet:    a.cfg.Provisioning.Token != "",
-		Tunnels:     provT,
-		Connections: provC,
-	}
+	data.Provisioning = a.buildProvisioningInfo("", false)
 
 	for _, t := range a.cfg.AllTunnels() {
 		connected := false
@@ -817,12 +810,19 @@ func (a *App) SetupProvisioning(endpoint, token string) (*ProvisioningInfo, erro
 		return nil, fmt.Errorf("enter at least an endpoint or token")
 	}
 
+	// Upsert the default (unnamed) endpoint. Multi-endpoint setups are configured
+	// via config.toml or MCP provisioning_set tool with a name.
+	defaultEp := a.cfg.FindProvisioning("")
+	if defaultEp == nil {
+		a.cfg.Provisioning = append(a.cfg.Provisioning, config.ProvisioningConfig{})
+		defaultEp = &a.cfg.Provisioning[len(a.cfg.Provisioning)-1]
+	}
 	if endpoint != "" {
-		a.cfg.Provisioning.Endpoint = endpoint
+		defaultEp.Endpoint = endpoint
 	}
 	if token != "" {
-		a.cfg.Provisioning.Token = token
-		if err := config.SaveSecret("provisioning-token", token); err != nil {
+		defaultEp.Token = token
+		if err := config.SaveSecret(defaultEp.SecretKey(), token); err != nil {
 			log.Printf("[app] Warning: could not save provisioning token to keychain: %v", err)
 		}
 	}
@@ -830,33 +830,20 @@ func (a *App) SetupProvisioning(endpoint, token string) (*ProvisioningInfo, erro
 		log.Printf("[app] Warning: could not save config file: %v", err)
 	}
 
-	provT, provC := a.cfg.ProvisioningStatus()
-	return &ProvisioningInfo{
-		Configured:    a.cfg.HasProvisioning(),
-		Endpoint:      a.cfg.Provisioning.Endpoint,
-		TokenSet:      a.cfg.Provisioning.Token != "",
-		Tunnels:       provT,
-		Connections:   provC,
-		ResultMessage: "Provisioning settings saved.",
-		ResultSuccess: true,
-	}, nil
+	info := a.buildProvisioningInfo("Provisioning settings saved.", true)
+	return &info, nil
 }
 
-// SyncProvisioning fetches config from the provisioning server and returns updated page data.
+// SyncProvisioning fetches config from every configured endpoint and returns updated page data.
 func (a *App) SyncProvisioning() (*PageData, error) {
 	if !a.cfg.HasProvisioning() {
-		return nil, fmt.Errorf("provisioning not configured (endpoint or token missing)")
+		return nil, fmt.Errorf("provisioning not configured (no endpoint with token)")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	resp, err := provisioning.Fetch(ctx, a.cfg.Provisioning.Endpoint, a.cfg.Provisioning.Token)
-	if err != nil {
-		return nil, fmt.Errorf("provisioning sync failed: %w", err)
-	}
-
-	// Collect old provisioned connection names before overwriting
+	// Collect old provisioned connection names before overwriting (per endpoint).
 	oldProvisioned := make(map[string]bool)
 	for _, c := range a.cfg.AllConnections() {
 		if c.Source == "provisioning" {
@@ -864,26 +851,86 @@ func (a *App) SyncProvisioning() (*PageData, error) {
 		}
 	}
 
-	a.cfg.SetProvisioned(resp.Tunnels, resp.Connections)
-	log.Printf("[app] Provisioning sync: %d tunnels, %d connections", len(resp.Tunnels), len(resp.Connections))
+	var totalTunnels, totalConns int
+	var errs []string
+	for i := range a.cfg.Provisioning {
+		p := a.cfg.Provisioning[i]
+		if !p.Enabled() {
+			continue
+		}
+		label := p.Name
+		if label == "" {
+			label = "default"
+		}
+		resp, err := provisioning.Fetch(ctx, p.Endpoint, p.Token)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", label, err))
+			continue
+		}
+		a.cfg.SetProvisioned(p.Name, resp.Tunnels, resp.Connections)
+		totalTunnels += len(resp.Tunnels)
+		totalConns += len(resp.Connections)
+		log.Printf("[app] Provisioning sync %q: %d tunnels, %d connections", label, len(resp.Tunnels), len(resp.Connections))
 
-	// Unregister connections that were removed from provisioning
-	for _, c := range resp.Connections {
-		delete(oldProvisioned, c.Name)
+		for _, c := range resp.Connections {
+			delete(oldProvisioned, c.Name)
+		}
+		for _, conn := range resp.Connections {
+			a.registerConnectionTools(conn)
+		}
 	}
+
+	// Unregister connections that were removed from any provisioning source.
 	for name := range oldProvisioned {
 		a.unregisterConnectionTools(name)
 	}
 
-	// Register current connections
-	for _, conn := range resp.Connections {
-		a.registerConnectionTools(conn)
+	if len(errs) > 0 && totalConns == 0 && totalTunnels == 0 {
+		return nil, fmt.Errorf("all provisioning endpoints failed: %s", strings.Join(errs, "; "))
 	}
 
 	data := a.GetPageData()
-	data.Provisioning.ResultMessage = fmt.Sprintf("Synced: %d tunnels, %d connections", len(resp.Tunnels), len(resp.Connections))
-	data.Provisioning.ResultSuccess = true
+	msg := fmt.Sprintf("Synced: %d tunnels, %d connections", totalTunnels, totalConns)
+	if len(errs) > 0 {
+		msg += fmt.Sprintf(" (errors: %s)", strings.Join(errs, "; "))
+	}
+	data.Provisioning.ResultMessage = msg
+	data.Provisioning.ResultSuccess = len(errs) == 0
 	return &data, nil
+}
+
+// buildProvisioningInfo assembles the UI-facing view of provisioning status
+// across all configured endpoints.
+func (a *App) buildProvisioningInfo(resultMsg string, resultSuccess bool) ProvisioningInfo {
+	totalT, totalC := a.cfg.ProvisioningStatus()
+	info := ProvisioningInfo{
+		Configured:    a.cfg.HasProvisioning(),
+		Tunnels:       totalT,
+		Connections:   totalC,
+		ResultMessage: resultMsg,
+		ResultSuccess: resultSuccess,
+	}
+	for _, p := range a.cfg.Provisioning {
+		var tc, cc int
+		for _, pc := range a.cfg.ProvisionedConnections() {
+			if a.cfg.ConnectionEndpointName(pc.Name) == p.Name {
+				cc++
+			}
+		}
+		for _, pt := range a.cfg.ProvisionedTunnels() {
+			if a.cfg.ConnectionEndpointName(pt.Name) == p.Name {
+				tc++
+			}
+		}
+		info.Endpoints = append(info.Endpoints, ProvisioningEndpointInfo{
+			Name:        p.Name,
+			Endpoint:    p.Endpoint,
+			TokenSet:    p.Token != "",
+			Tunnels:     tc,
+			Connections: cc,
+		})
+	}
+	return info
 }
 
 // SelfUpdate downloads the platform-specific binary and replaces the current one.
@@ -1413,8 +1460,14 @@ func (a *App) testHTTP(conn config.Connection) testResponse {
 	}
 
 	testURL := conn.URL
-	if conn.Source == "provisioning" && a.cfg.Provisioning.Endpoint != "" {
-		testURL = a.cfg.Provisioning.Endpoint
+	if conn.Source == "provisioning" {
+		if epName := a.cfg.ConnectionEndpointName(conn.Name); epName != "" {
+			if ep := a.cfg.FindProvisioning(epName); ep != nil && ep.Endpoint != "" {
+				testURL = ep.Endpoint
+			}
+		} else if len(a.cfg.Provisioning) > 0 && a.cfg.Provisioning[0].Endpoint != "" {
+			testURL = a.cfg.Provisioning[0].Endpoint
+		}
 	}
 
 	httpClient := &http.Client{
