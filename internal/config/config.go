@@ -5,15 +5,40 @@ import (
 	"fmt"
 	"log"
 	"net/url"
-	"sort"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/BurntSushi/toml"
 )
+
+// legacyProvisioningHeader matches a standalone `[provisioning]` header on its
+// own line (with optional surrounding whitespace). Used to migrate the old
+// single-endpoint schema to the new array-of-tables form.
+var legacyProvisioningHeader = regexp.MustCompile(`(?m)^(\s*)\[provisioning\]\s*$`)
+
+// arrayProvisioningHeader matches a standalone `[[provisioning]]` header. Used
+// as a guard: if the file already uses the new array form anywhere, we leave
+// it alone to avoid mixing both schemas.
+var arrayProvisioningHeader = regexp.MustCompile(`(?m)^\s*\[\[provisioning\]\]\s*$`)
+
+// migrateLegacyProvisioningHeader rewrites `[provisioning]` (singular table)
+// to `[[provisioning]]` (array of tables) in-place. Leaves files that already
+// use the array form untouched. Operates only on header lines — string
+// occurrences inside values or comments are not affected because table
+// headers must be on their own line.
+func migrateLegacyProvisioningHeader(content []byte) []byte {
+	// Skip migration if the file already uses `[[provisioning]]` anywhere —
+	// mixed formats would be ambiguous.
+	if arrayProvisioningHeader.Match(content) {
+		return content
+	}
+	return legacyProvisioningHeader.ReplaceAll(content, []byte("${1}[[provisioning]]"))
+}
 
 const (
 	ServiceName      = "mux"
@@ -38,6 +63,7 @@ type Connection struct {
 	URL          string `toml:"url,omitempty" json:"url,omitempty"`
 	Token        string `toml:"-" json:"token,omitempty"`
 	OAuth        bool   `toml:"oauth,omitempty" json:"oauth,omitempty"` // proxy: use OAuth instead of bearer token
+	ClientID     string `toml:"client_id,omitempty" json:"clientId,omitempty"` // OAuth client ID (microsoft-graph: Azure App Registration ID)
 	Scopes       string `toml:"scopes,omitempty" json:"scopes,omitempty"`
 	Instructions string `toml:"instructions,omitempty" json:"instructions,omitempty"`
 	TokenHeader  string `toml:"token_header,omitempty" json:"tokenHeader,omitempty"` // custom header name for token (default: "Authorization: Bearer {token}")
@@ -52,7 +78,9 @@ func (c *Connection) Enabled() bool {
 	case IsProxyType(c.Type), c.Type == "http":
 		return c.URL != ""
 	case c.Type == "microsoft-graph":
-		return true // auth is interactive via tools
+		// Azure App Registration (Client ID) must be configured — there is no
+		// longer a built-in default. Auth is interactive via MCP tools.
+		return c.ClientID != ""
 	case c.Type == "firecrawl", c.Type == "brave", c.Type == "google-tagmanager",
 		c.Type == "openai", c.Type == "elevenlabs", c.Type == "recraft", c.Type == "ideogram",
 		c.Type == "asana", c.Type == "gemini", c.Type == "fal-ai":
@@ -120,10 +148,29 @@ func (t *TunnelConfig) Enabled() bool {
 	return t.PrivateKey != "" && t.PeerPublicKey != "" && t.PeerEndpoint != ""
 }
 
-// ProvisioningConfig holds the remote provisioning endpoint settings.
+// ProvisioningConfig holds a single remote provisioning endpoint.
+// Multiple endpoints can be configured as `[[provisioning]]` blocks in config.toml;
+// Name is required when more than one endpoint is configured so tokens and
+// provisioned entries can be attributed back to their source.
 type ProvisioningConfig struct {
+	Name     string `toml:"name,omitempty" json:"name,omitempty"`
 	Endpoint string `toml:"endpoint,omitempty" json:"endpoint,omitempty"`
 	Token    string `toml:"-" json:"-"`
+}
+
+// Enabled reports whether this endpoint is ready to fetch (endpoint + token present).
+func (p ProvisioningConfig) Enabled() bool {
+	return p.Endpoint != "" && p.Token != ""
+}
+
+// SecretKey returns the keychain key under which this endpoint's token is stored.
+// Endpoints without a Name fall back to the legacy "provisioning-token" key for
+// backward compatibility with single-endpoint configs.
+func (p ProvisioningConfig) SecretKey() string {
+	if p.Name == "" {
+		return "provisioning-token"
+	}
+	return "provisioning-" + p.Name + "-token"
 }
 
 type ServerConfig struct {
@@ -154,26 +201,59 @@ type VaultConfig struct {
 
 // Config is the application configuration.
 type Config struct {
-	Server      ServerConfig   `toml:"server"`
-	Provisioning ProvisioningConfig `toml:"provisioning,omitempty"`
-	Vault       VaultConfig    `toml:"vault,omitempty"`
-	Tunnels     []TunnelConfig `toml:"tunnels,omitempty"`
-	Connections []Connection `toml:"connections,omitempty"`
+	Server       ServerConfig         `toml:"server"`
+	Provisioning []ProvisioningConfig `toml:"provisioning,omitempty"`
+	Vault        VaultConfig          `toml:"vault,omitempty"`
+	Tunnels      []TunnelConfig       `toml:"tunnels,omitempty"`
+	Connections  []Connection         `toml:"connections,omitempty"`
 
-	// Runtime fields (not persisted)
-	provisionedTunnels     []TunnelConfig
-	provisionedConnections []Connection
-	path           string
+	// Runtime fields (not persisted). Provisioned entries are tracked by
+	// the name of the endpoint that delivered them so a sync of a single
+	// endpoint only replaces its own entries.
+	provisionedByEndpoint map[string]provisionedEntries
+	path                  string
+}
+
+type provisionedEntries struct {
+	Tunnels     []TunnelConfig
+	Connections []Connection
+}
+
+// ProvisionedTunnels returns all tunnels delivered across all provisioning endpoints.
+func (cfg *Config) ProvisionedTunnels() []TunnelConfig {
+	var all []TunnelConfig
+	for _, p := range cfg.Provisioning {
+		entries, ok := cfg.provisionedByEndpoint[p.Name]
+		if !ok {
+			continue
+		}
+		all = append(all, entries.Tunnels...)
+	}
+	return all
+}
+
+// ProvisionedConnections returns all connections delivered across all provisioning endpoints.
+func (cfg *Config) ProvisionedConnections() []Connection {
+	var all []Connection
+	for _, p := range cfg.Provisioning {
+		entries, ok := cfg.provisionedByEndpoint[p.Name]
+		if !ok {
+			continue
+		}
+		all = append(all, entries.Connections...)
+	}
+	return all
 }
 
 // AllTunnels returns local + provisioned tunnels. On name collision, provisioned wins.
 func (cfg *Config) AllTunnels() []TunnelConfig {
-	if len(cfg.provisionedTunnels) == 0 {
+	provisioned := cfg.ProvisionedTunnels()
+	if len(provisioned) == 0 {
 		return cfg.Tunnels
 	}
 	seen := make(map[string]bool)
 	var all []TunnelConfig
-	for _, t := range cfg.provisionedTunnels {
+	for _, t := range provisioned {
 		seen[t.Name] = true
 		all = append(all, t)
 	}
@@ -187,30 +267,44 @@ func (cfg *Config) AllTunnels() []TunnelConfig {
 
 // AllConnections returns local + provisioned connections.
 func (cfg *Config) AllConnections() []Connection {
-	if len(cfg.provisionedConnections) == 0 {
+	provisioned := cfg.ProvisionedConnections()
+	if len(provisioned) == 0 {
 		return cfg.Connections
 	}
 	var all []Connection
-	all = append(all, cfg.provisionedConnections...)
+	all = append(all, provisioned...)
 	all = append(all, cfg.Connections...)
 	return all
 }
 
-// SetProvisioned stores provisioned tunnels and connections from a provisioning response.
-// It applies defaults to provisioned connections so they are ready to use.
-// HTTP connections without a token inherit the provisioning bearer token when their URL
-// points to the same host as the provisioning endpoint (same API, same credentials).
-func (cfg *Config) SetProvisioned(tunnels []TunnelConfig, connections []Connection) {
-	provHost := hostFromURL(cfg.Provisioning.Endpoint)
+// SetProvisioned stores provisioned tunnels and connections for a single endpoint
+// (identified by endpointName — matches ProvisioningConfig.Name). A call only replaces
+// the entries that came from that endpoint; others remain untouched.
+// HTTP connections without a token inherit the endpoint's bearer token when their URL
+// points to the same host as the endpoint (same API, same credentials).
+func (cfg *Config) SetProvisioned(endpointName string, tunnels []TunnelConfig, connections []Connection) {
+	endpoint := cfg.FindProvisioning(endpointName)
+	if endpoint == nil {
+		// Writing into a bucket whose endpoint isn't configured means the
+		// entries would be invisible to every aggregator (which iterates
+		// cfg.Provisioning). Log a warning — callers should not hit this path.
+		log.Printf("[config] SetProvisioned called with unknown endpoint name %q — entries will be tracked but invisible until that endpoint is added to config", endpointName)
+	}
+	var provHost, provToken string
+	if endpoint != nil {
+		provHost = hostFromURL(endpoint.Endpoint)
+		provToken = endpoint.Token
+	}
+
 	for i := range connections {
 		if connections[i].Source == "" {
 			connections[i].Source = "provisioning"
 		}
-		// Provisioned http connections without their own token reuse the provisioning token
-		// if they point to the same host as the provisioning endpoint
-		if connections[i].Type == "http" && connections[i].Token == "" && cfg.Provisioning.Token != "" {
+		// Provisioned http connections without their own token reuse this endpoint's
+		// bearer token if they point to the same host as the endpoint URL.
+		if connections[i].Type == "http" && connections[i].Token == "" && provToken != "" {
 			if provHost != "" && hostFromURL(connections[i].URL) == provHost {
-				connections[i].Token = cfg.Provisioning.Token
+				connections[i].Token = provToken
 			}
 		}
 		// Supplement with locally stored secrets from keychain/file.
@@ -255,18 +349,53 @@ func (cfg *Config) SetProvisioned(tunnels []TunnelConfig, connections []Connecti
 			}
 		}
 	}
-	cfg.provisionedTunnels = tunnels
-	cfg.provisionedConnections = connections
+	if cfg.provisionedByEndpoint == nil {
+		cfg.provisionedByEndpoint = make(map[string]provisionedEntries)
+	}
+	cfg.provisionedByEndpoint[endpointName] = provisionedEntries{
+		Tunnels:     tunnels,
+		Connections: connections,
+	}
 }
 
-// HasProvisioning reports whether remote provisioning is configured (endpoint + token present).
+// ClearProvisioned drops all provisioned entries for an endpoint (used when an
+// endpoint is removed from config).
+func (cfg *Config) ClearProvisioned(endpointName string) {
+	delete(cfg.provisionedByEndpoint, endpointName)
+}
+
+// FindProvisioning returns the ProvisioningConfig for a given name, or nil.
+func (cfg *Config) FindProvisioning(name string) *ProvisioningConfig {
+	for i := range cfg.Provisioning {
+		if cfg.Provisioning[i].Name == name {
+			return &cfg.Provisioning[i]
+		}
+	}
+	return nil
+}
+
+// HasProvisioning reports whether at least one provisioning endpoint is fully configured.
 func (cfg *Config) HasProvisioning() bool {
-	return cfg.Provisioning.Endpoint != "" && cfg.Provisioning.Token != ""
+	for _, p := range cfg.Provisioning {
+		if p.Enabled() {
+			return true
+		}
+	}
+	return false
 }
 
-// ProvisioningStatus reports whether remote provisioning has loaded data.
+// ProvisioningStatus reports the aggregate count of provisioned tunnels and connections
+// across all endpoints.
 func (cfg *Config) ProvisioningStatus() (tunnels, connections int) {
-	return len(cfg.provisionedTunnels), len(cfg.provisionedConnections)
+	for _, p := range cfg.Provisioning {
+		entries, ok := cfg.provisionedByEndpoint[p.Name]
+		if !ok {
+			continue
+		}
+		tunnels += len(entries.Tunnels)
+		connections += len(entries.Connections)
+	}
+	return
 }
 
 func DefaultConfigPath() string {
@@ -397,13 +526,22 @@ func Load(path string) (*Config, error) {
 	}
 	if _, err := os.Stat(path); err == nil {
 		log.Printf("[config] Loading config from %s", path)
-		if _, err := toml.DecodeFile(path, cfg); err != nil {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read config %s: %w", path, err)
+		}
+		// Legacy migration: the old schema wrote a singular `[provisioning]`
+		// table. The new schema uses an array-of-tables `[[provisioning]]`.
+		// Rewrite a standalone `[provisioning]` header on a line of its own
+		// to `[[provisioning]]` so BurntSushi/toml decodes it into the slice.
+		migrated := migrateLegacyProvisioningHeader(content)
+		if _, err := toml.Decode(string(migrated), cfg); err != nil {
 			return nil, fmt.Errorf("parse config %s: %w", path, err)
 		}
 
 		// Migrate old-format config sections (best-effort)
 		var legacy legacyConfigFile
-		toml.DecodeFile(path, &legacy)
+		toml.Decode(string(migrated), &legacy)
 		migrateFromLegacy(cfg, &legacy)
 	} else {
 		log.Printf("[config] No config file found at %s — using defaults", path)
@@ -567,10 +705,14 @@ func (cfg *Config) Save() error {
 func loadKeychain(cfg *Config) {
 	secretsLoaded := 0
 
-	// Provisioning token
-	if v, err := getSecret("provisioning-token"); err == nil {
-		cfg.Provisioning.Token = v
-		secretsLoaded++
+	// Provisioning tokens (one per endpoint, keyed by endpoint name).
+	// Unnamed endpoints fall back to the legacy "provisioning-token" key.
+	for i := range cfg.Provisioning {
+		key := cfg.Provisioning[i].SecretKey()
+		if v, err := getSecret(key); err == nil {
+			cfg.Provisioning[i].Token = v
+			secretsLoaded++
+		}
 	}
 
 	// Connection secrets (password or token, keyed by connection name)
@@ -610,12 +752,13 @@ func loadEnv(cfg *Config) {
 		}
 	}
 
-	// Provisioning
-	if v := os.Getenv("MUX_PROVISIONING_ENDPOINT"); v != "" {
-		cfg.Provisioning.Endpoint = v
+	// Provisioning — env vars override the first (default, unnamed) endpoint.
+	// For multi-endpoint setups, configure additional endpoints via config.toml.
+	if endpoint := os.Getenv("MUX_PROVISIONING_ENDPOINT"); endpoint != "" {
+		setDefaultProvisioningEndpoint(cfg, endpoint)
 	}
-	if v := os.Getenv("MUX_PROVISIONING_TOKEN"); v != "" {
-		cfg.Provisioning.Token = v
+	if token := os.Getenv("MUX_PROVISIONING_TOKEN"); token != "" {
+		setDefaultProvisioningToken(cfg, token)
 	}
 
 	// Legacy env vars: create or update connections by name
@@ -737,9 +880,15 @@ func (cfg *Config) FindAnyTunnel(name string) *TunnelConfig {
 			return &cfg.Tunnels[i]
 		}
 	}
-	for i := range cfg.provisionedTunnels {
-		if cfg.provisionedTunnels[i].Name == name {
-			return &cfg.provisionedTunnels[i]
+	for _, p := range cfg.Provisioning {
+		entries, ok := cfg.provisionedByEndpoint[p.Name]
+		if !ok {
+			continue
+		}
+		for i := range entries.Tunnels {
+			if entries.Tunnels[i].Name == name {
+				return &entries.Tunnels[i]
+			}
 		}
 	}
 	return nil
@@ -765,12 +914,86 @@ func (cfg *Config) FindAnyConnection(name string) *Connection {
 			return &cfg.Connections[i]
 		}
 	}
-	for i := range cfg.provisionedConnections {
-		if cfg.provisionedConnections[i].Name == name {
-			return &cfg.provisionedConnections[i]
+	for _, p := range cfg.Provisioning {
+		entries, ok := cfg.provisionedByEndpoint[p.Name]
+		if !ok {
+			continue
+		}
+		for i := range entries.Connections {
+			if entries.Connections[i].Name == name {
+				return &entries.Connections[i]
+			}
 		}
 	}
 	return nil
+}
+
+// setDefaultProvisioningEndpoint sets the Endpoint URL on the first (default)
+// provisioning entry, creating one if none exists. Used by env-var overrides.
+func setDefaultProvisioningEndpoint(cfg *Config, endpoint string) {
+	if len(cfg.Provisioning) == 0 {
+		cfg.Provisioning = []ProvisioningConfig{{Endpoint: endpoint}}
+		return
+	}
+	cfg.Provisioning[0].Endpoint = endpoint
+}
+
+// setDefaultProvisioningToken sets the Token on the first (default)
+// provisioning entry, creating one if none exists. Used by env-var overrides.
+func setDefaultProvisioningToken(cfg *Config, token string) {
+	if len(cfg.Provisioning) == 0 {
+		cfg.Provisioning = []ProvisioningConfig{{Token: token}}
+		return
+	}
+	cfg.Provisioning[0].Token = token
+}
+
+// ConnectionEndpointName returns the Name of the provisioning endpoint that
+// delivered the given connection, and true if it was found. The returned name
+// is "" for the unnamed/default endpoint — distinguishing that from the
+// "not provisioned" case is what the boolean is for.
+func (cfg *Config) ConnectionEndpointName(connName string) (string, bool) {
+	for _, p := range cfg.Provisioning {
+		entries, ok := cfg.provisionedByEndpoint[p.Name]
+		if !ok {
+			continue
+		}
+		for i := range entries.Connections {
+			if entries.Connections[i].Name == connName {
+				return p.Name, true
+			}
+		}
+	}
+	return "", false
+}
+
+// TunnelEndpointName returns the Name of the provisioning endpoint that
+// delivered the given tunnel, and true if it was found. Same semantics as
+// ConnectionEndpointName.
+func (cfg *Config) TunnelEndpointName(tunnelName string) (string, bool) {
+	for _, p := range cfg.Provisioning {
+		entries, ok := cfg.provisionedByEndpoint[p.Name]
+		if !ok {
+			continue
+		}
+		for i := range entries.Tunnels {
+			if entries.Tunnels[i].Name == tunnelName {
+				return p.Name, true
+			}
+		}
+	}
+	return "", false
+}
+
+// ProvisionedCountFor returns (tunnels, connections) delivered by the named
+// endpoint. Returns (0, 0) if the endpoint is not configured or has not
+// delivered anything yet.
+func (cfg *Config) ProvisionedCountFor(endpointName string) (int, int) {
+	entries, ok := cfg.provisionedByEndpoint[endpointName]
+	if !ok {
+		return 0, 0
+	}
+	return len(entries.Tunnels), len(entries.Connections)
 }
 
 // --- Secrets ---

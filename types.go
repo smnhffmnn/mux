@@ -7,73 +7,82 @@ package main
 
 // PageData is the top-level structure returned by GetPageData().
 type PageData struct {
-	Server      ServerInfo      `json:"server"`
+	Server       ServerInfo       `json:"server"`
 	Provisioning ProvisioningInfo `json:"provisioning"`
-	Tunnels     []TunnelInfo    `json:"tunnels"`
-	Connections []ConnInfo      `json:"connections"`
-	Types       []TypeListEntry `json:"types"`
+	Tunnels      []TunnelInfo     `json:"tunnels"`
+	Connections  []ConnInfo       `json:"connections"`
+	Types        []TypeListEntry  `json:"types"`
 }
 
 // ServerInfo contains version/uptime metadata shown in the header.
 type ServerInfo struct {
-	Version        string `json:"version"`
-	Uptime         string `json:"uptime"`
-	Port           int    `json:"port"`
-	BuildTime      string `json:"buildTime"`
-	CanSelfUpdate  bool   `json:"canSelfUpdate"`
+	Version       string `json:"version"`
+	Uptime        string `json:"uptime"`
+	Port          int    `json:"port"`
+	BuildTime     string `json:"buildTime"`
+	CanSelfUpdate bool   `json:"canSelfUpdate"`
 }
 
-// ProvisioningInfo describes provisioning status.
+// ProvisioningInfo describes the aggregate provisioning status across all endpoints
+// and lists each configured endpoint individually.
 type ProvisioningInfo struct {
-	Configured    bool   `json:"configured"`
-	Endpoint      string `json:"endpoint"`
-	TokenSet      bool   `json:"tokenSet"`
-	Tunnels       int    `json:"tunnels"`
-	Connections   int    `json:"connections"`
-	ResultMessage string `json:"resultMessage,omitempty"`
-	ResultSuccess bool   `json:"resultSuccess,omitempty"`
+	Configured    bool                       `json:"configured"` // true if at least one endpoint has endpoint+token
+	Endpoints     []ProvisioningEndpointInfo `json:"endpoints"`
+	Tunnels       int                        `json:"tunnels"`     // aggregate count
+	Connections   int                        `json:"connections"` // aggregate count
+	ResultMessage string                     `json:"resultMessage,omitempty"`
+	ResultSuccess bool                       `json:"resultSuccess,omitempty"`
+}
+
+// ProvisioningEndpointInfo describes a single provisioning endpoint.
+type ProvisioningEndpointInfo struct {
+	Name        string `json:"name"` // empty for the legacy default endpoint
+	Endpoint    string `json:"endpoint"`
+	TokenSet    bool   `json:"tokenSet"`
+	Tunnels     int    `json:"tunnels"`     // count delivered by this endpoint
+	Connections int    `json:"connections"` // count delivered by this endpoint
 }
 
 // TunnelInfo describes a WireGuard or SSH tunnel.
 type TunnelInfo struct {
 	Name            string `json:"name"`
-	Type            string `json:"type"`                              // "wireguard" or "ssh"
-	PeerEndpoint    string `json:"peerEndpoint,omitempty"`            // WireGuard
-	TunnelAddress   string `json:"tunnelAddress,omitempty"`           // WireGuard
-	PeerPublicKey   string `json:"peerPublicKey,omitempty"`           // WireGuard (display only, not secret)
-	AllowedIPs      string `json:"allowedIPs,omitempty"`              // WireGuard
-	DNS             string `json:"dns,omitempty"`                     // WireGuard
-	MTU             int    `json:"mtu,omitempty"`                     // WireGuard
-	KeepAlive       int    `json:"keepAlive,omitempty"`               // WireGuard
-	Host            string `json:"host,omitempty"`                    // SSH
-	Port            int    `json:"port,omitempty"`                    // SSH
-	User            string `json:"user,omitempty"`                    // SSH
-	KeyFile         string `json:"keyFile,omitempty"`                 // SSH
-	InsecureHostKey bool   `json:"insecureHostKey,omitempty"`         // SSH
+	Type            string `json:"type"`                      // "wireguard" or "ssh"
+	PeerEndpoint    string `json:"peerEndpoint,omitempty"`    // WireGuard
+	TunnelAddress   string `json:"tunnelAddress,omitempty"`   // WireGuard
+	PeerPublicKey   string `json:"peerPublicKey,omitempty"`   // WireGuard (display only, not secret)
+	AllowedIPs      string `json:"allowedIPs,omitempty"`      // WireGuard
+	DNS             string `json:"dns,omitempty"`             // WireGuard
+	MTU             int    `json:"mtu,omitempty"`             // WireGuard
+	KeepAlive       int    `json:"keepAlive,omitempty"`       // WireGuard
+	Host            string `json:"host,omitempty"`            // SSH
+	Port            int    `json:"port,omitempty"`            // SSH
+	User            string `json:"user,omitempty"`            // SSH
+	KeyFile         string `json:"keyFile,omitempty"`         // SSH
+	InsecureHostKey bool   `json:"insecureHostKey,omitempty"` // SSH
 	Source          string `json:"source"`
 	Connected       bool   `json:"connected"`
-	PrivateKeySet   bool   `json:"privateKeySet"`                     // whether a private key is stored
-	PresharedKeySet bool   `json:"presharedKeySet,omitempty"`         // WireGuard: whether a preshared key is stored
+	PrivateKeySet   bool   `json:"privateKeySet"`             // whether a private key is stored
+	PresharedKeySet bool   `json:"presharedKeySet,omitempty"` // WireGuard: whether a preshared key is stored
 }
 
 // ConnInfo describes a connection with its current field values.
 type ConnInfo struct {
-	Name         string      `json:"name"`
-	Type         string      `json:"type"`
-	TypeLabel    string      `json:"typeLabel"`
-	Configured   bool        `json:"configured"`
-	Source       string      `json:"source"`
-	Tunnel       string      `json:"tunnel"`
-	Summary      string      `json:"summary"`
-	IsProxy      bool        `json:"isProxy"`
-	IsOAuth      bool        `json:"isOAuth"`
-	OAuthOK      bool        `json:"oauthOK"`
-	IsProvisioned bool       `json:"isProvisioned"`
-	IsDeviceAuth bool        `json:"isDeviceAuth"`
-	DeviceAuthOK bool        `json:"deviceAuthOK"`
-	ReadOnly     bool        `json:"readOnly"`
-	Instructions string      `json:"instructions"`
-	Fields       []FieldInfo `json:"fields"`
+	Name          string      `json:"name"`
+	Type          string      `json:"type"`
+	TypeLabel     string      `json:"typeLabel"`
+	Configured    bool        `json:"configured"`
+	Source        string      `json:"source"`
+	Tunnel        string      `json:"tunnel"`
+	Summary       string      `json:"summary"`
+	IsProxy       bool        `json:"isProxy"`
+	IsOAuth       bool        `json:"isOAuth"`
+	OAuthOK       bool        `json:"oauthOK"`
+	IsProvisioned bool        `json:"isProvisioned"`
+	IsDeviceAuth  bool        `json:"isDeviceAuth"`
+	DeviceAuthOK  bool        `json:"deviceAuthOK"`
+	ReadOnly      bool        `json:"readOnly"`
+	Instructions  string      `json:"instructions"`
+	Fields        []FieldInfo `json:"fields"`
 }
 
 // FieldInfo describes a single form field for a connection.
@@ -160,6 +169,7 @@ type SaveConnectionRequest struct {
 	Database     string `json:"database,omitempty"`
 	URL          string `json:"url,omitempty"`
 	Token        string `json:"token,omitempty"`
+	ClientID     string `json:"clientId,omitempty"`
 	Scopes       string `json:"scopes,omitempty"`
 	Tunnel       string `json:"tunnel,omitempty"`
 	Instructions string `json:"instructions,omitempty"`

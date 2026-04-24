@@ -212,9 +212,12 @@ func (ct *ConfigTools) secretCheckTool() ToolDef {
 func (ct *ConfigTools) provisioningSetTool() ToolDef {
 	return ToolDef{
 		Tool: mcp.NewTool("provisioning_set",
-			mcp.WithDescription("Set the remote provisioning endpoint. The token is stored separately via secret_set with key 'provisioning-token'. After setting both, mux fetches tunnels and connections from the endpoint on next startup."),
+			mcp.WithDescription("Set or add a remote provisioning endpoint. Multiple endpoints can be configured — use 'name' to distinguish them. The token is stored separately via secret_set (key 'provisioning-token' for the default/unnamed endpoint, or 'provisioning-<name>-token' for named endpoints). After setting both, mux fetches tunnels and connections from the endpoint on next startup."),
 			mcp.WithString("endpoint", mcp.Required(),
-				mcp.Description("Provisioning API URL (e.g. 'https://api.example.com/api/nmg/config')."),
+				mcp.Description("Provisioning API URL (e.g. 'https://api.example.com/api/mux/provision')."),
+			),
+			mcp.WithString("name",
+				mcp.Description("Optional name to identify this endpoint (required when configuring multiple endpoints). Leave empty for a single/default endpoint."),
 			),
 		),
 		Handler: ct.handleProvisioningSet,
@@ -575,8 +578,24 @@ func (ct *ConfigTools) updateInMemorySecret(key, value string) {
 				ct.reloader.ReloadConnection(*c)
 			}
 		}
-	} else if key == "provisioning-token" {
-		ct.cfg.Provisioning.Token = value
+	} else if strings.HasPrefix(key, "provisioning-") && strings.HasSuffix(key, "-token") {
+		// Provisioning-endpoint token: either legacy "provisioning-token"
+		// (unnamed/default endpoint) or named "provisioning-<name>-token".
+		name := strings.TrimSuffix(strings.TrimPrefix(key, "provisioning-"), "-token")
+		if p := ct.cfg.FindProvisioning(name); p != nil {
+			p.Token = value
+		} else if name == "" {
+			// Legacy "provisioning-token" with no default endpoint configured.
+			// If any endpoints exist, prefer writing to the first one (the
+			// intuitive "default"); otherwise create a new default.
+			if len(ct.cfg.Provisioning) > 0 {
+				ct.cfg.Provisioning[0].Token = value
+			} else {
+				ct.cfg.Provisioning = []config.ProvisioningConfig{{Token: value}}
+			}
+		}
+		// If name != "" and the named endpoint doesn't exist, silently drop —
+		// the user needs to add the endpoint first via provisioning_set.
 	} else if strings.HasSuffix(key, "-token") {
 		name := strings.TrimSuffix(key, "-token")
 		if c := ct.cfg.FindAnyConnection(name); c != nil {
@@ -658,15 +677,36 @@ func (ct *ConfigTools) handleProvisioningSet(_ context.Context, req mcp.CallTool
 		return mcp.NewToolResultError("endpoint cannot be empty"), nil
 	}
 
-	ct.cfg.Provisioning.Endpoint = endpoint
+	name := strings.TrimSpace(req.GetString("name", ""))
+
+	// Update existing entry with this name, or append new one.
+	if p := ct.cfg.FindProvisioning(name); p != nil {
+		p.Endpoint = endpoint
+	} else {
+		ct.cfg.Provisioning = append(ct.cfg.Provisioning, config.ProvisioningConfig{
+			Name:     name,
+			Endpoint: endpoint,
+		})
+	}
+
 	if err := ct.cfg.Save(); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to save config: %v", err)), nil
 	}
 
-	hasToken := ct.cfg.Provisioning.Token != ""
-	msg := fmt.Sprintf("provisioning endpoint set to %q", endpoint)
+	p := ct.cfg.FindProvisioning(name)
+	hasToken := p != nil && p.Token != ""
+
+	label := "default (unnamed)"
+	if name != "" {
+		label = fmt.Sprintf("%q", name)
+	}
+	msg := fmt.Sprintf("provisioning endpoint %s set to %q", label, endpoint)
 	if !hasToken {
-		msg += ". Next: use secret_set with key 'provisioning-token' to store the token. Provisioning will activate on next mux restart once both are set."
+		secretKey := "provisioning-token"
+		if name != "" {
+			secretKey = "provisioning-" + name + "-token"
+		}
+		msg += fmt.Sprintf(". Next: use secret_set with key %q to store the token. Provisioning will activate on next mux restart once both are set.", secretKey)
 	} else {
 		msg += ". Token is already set — provisioning will activate on next mux restart."
 	}

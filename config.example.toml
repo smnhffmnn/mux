@@ -25,10 +25,20 @@ port = 7700                                  # HTTP port (always localhost, for 
 #   Discord:  secret_set key=vault-discord-webhook value=https://discord.com/api/webhooks/...
 
 # Remote Provisioning (optional)
-# Fetches connections and tunnels from a central provisioning server.
-# Token stored as secret (key: "provisioning-token").
-# [provisioning]
-# endpoint = "https://provisioning.example.com/api/mux/config"
+# Fetches connections and tunnels from one or more central provisioning servers.
+# Each endpoint is an [[provisioning]] block. The `name` identifies the
+# endpoint so its token can be stored separately:
+#   - unnamed/default endpoint  → secret key: "provisioning-token"
+#   - named endpoint "foo"       → secret key: "provisioning-foo-token"
+# The legacy single `[provisioning]` table is still accepted and migrated
+# transparently on load.
+#
+# [[provisioning]]
+# endpoint = "https://provisioning.example.com/api/mux/provision"
+#
+# [[provisioning]]
+# name = "secondary"
+# endpoint = "https://admin.example.com/api/mux/provision"
 
 # --- Connections ---
 # Define any number of database or proxy connections.

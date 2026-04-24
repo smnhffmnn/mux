@@ -22,12 +22,16 @@ import (
 )
 
 const (
-	graphBaseURL   = "https://graph.microsoft.com/v1.0"
-	graphAuthURL   = "https://login.microsoftonline.com/common/oauth2/v2.0"
-	GraphClientID  = "9e5f94bc-e8a4-4e73-b8be-63364c29d753" // Exported for UI test handler
-	graphDefScopes = "https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access"
-	graphMaxBody    = 8 * 1024 * 1024 // 8 MB — needed when body (full HTML) is in $select
-	graphRefreshBuf = 5 * time.Minute
+	graphBaseURL = "https://graph.microsoft.com/v1.0"
+	graphAuthURL = "https://login.microsoftonline.com/common/oauth2/v2.0"
+	// GraphDefaultScopes is the default scope set requested when a
+	// microsoft-graph connection has no explicit scopes configured. It covers
+	// the Mail tools exposed by mux today. If a connection points at an Azure
+	// app that grants additional permissions (Calendars, Files, …), the user
+	// must override this via the Scopes connection field to request them.
+	GraphDefaultScopes = "https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access"
+	graphMaxBody       = 8 * 1024 * 1024 // 8 MB — needed when body (full HTML) is in $select
+	graphRefreshBuf    = 5 * time.Minute
 )
 
 // MicrosoftGraph wraps the Microsoft Graph REST API as MCP tools.
@@ -44,7 +48,15 @@ type MicrosoftGraph struct {
 }
 
 // NewMicrosoftGraph creates a Microsoft Graph connection.
+// The connection's ClientID (Azure App Registration ID) must be set — there
+// is no longer a built-in default. Scopes fall back to GraphDefaultScopes
+// (mail-only) if not configured; users with an app granting additional
+// permissions should set Scopes explicitly.
 func NewMicrosoftGraph(conn config.Connection, dialer Dialer) (*MicrosoftGraph, error) {
+	if conn.ClientID == "" {
+		return nil, fmt.Errorf("microsoft-graph connection %q: client_id (Azure App Registration ID) is required", conn.Name)
+	}
+
 	transport := &http.Transport{
 		ResponseHeaderTimeout: 30 * time.Second,
 	}
@@ -56,7 +68,7 @@ func NewMicrosoftGraph(conn config.Connection, dialer Dialer) (*MicrosoftGraph, 
 
 	scopes := conn.Scopes
 	if scopes == "" {
-		scopes = graphDefScopes
+		scopes = GraphDefaultScopes
 	}
 
 	mg := &MicrosoftGraph{
@@ -65,7 +77,7 @@ func NewMicrosoftGraph(conn config.Connection, dialer Dialer) (*MicrosoftGraph, 
 			Timeout:   30 * time.Second,
 		},
 		name:     conn.Name,
-		clientID: GraphClientID,
+		clientID: conn.ClientID,
 		scopes:   scopes,
 	}
 
@@ -99,18 +111,27 @@ func (mg *MicrosoftGraph) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("list_conversations",
-				mcp.WithDescription("List inbox conversations grouped by thread. Returns conversations with latest message, participant list, and message count."),
+				mcp.WithDescription("List conversations (grouped by thread) in a mail folder. Defaults to Inbox."),
 				mcp.WithNumber("limit", mcp.Description("Max conversations to return (default: 20)")),
+				mcp.WithString("folder_id", mcp.Description("Mail folder ID to list (default: Inbox). Use list_mail_folders to discover folder IDs.")),
 			),
 			Handler: mg.handleListConversations,
 		},
 		{
 			Tool: mcp.NewTool("search_messages",
-				mcp.WithDescription("Search messages across all mail folders using KQL. Examples: subject:audit, from:john@example.com, subject:\"exact phrase\", hasAttachments:true. Results grouped by conversation, ordered by relevance (not date)."),
+				mcp.WithDescription("Search messages using KQL. Examples: subject:audit, from:john@example.com, subject:\"exact phrase\", hasAttachments:true. Results grouped by conversation, ordered by relevance (not date). By default searches all mail folders; pass folder_id to scope to one folder."),
 				mcp.WithString("query", mcp.Required(), mcp.Description("KQL search query (do not wrap in quotes — pass raw KQL)")),
 				mcp.WithNumber("limit", mcp.Description("Max conversations to return (default: 25)")),
+				mcp.WithString("folder_id", mcp.Description("Optional mail folder ID to restrict search to. Default: all folders.")),
 			),
 			Handler: mg.handleSearchMessages,
+		},
+		{
+			Tool: mcp.NewTool("list_mail_folders",
+				mcp.WithDescription("List mail folders in the mailbox. Returns id, displayName, parentFolderId, totalItemCount, unreadItemCount. Use this to discover folder IDs for folder_id parameters on list_conversations and search_messages."),
+				mcp.WithBoolean("include_children", mcp.Description("If true, also lists child folders recursively. Default: false (top-level only).")),
+			),
+			Handler: mg.handleListMailFolders,
 		},
 		{
 			Tool: mcp.NewTool("get_conversation",
@@ -332,13 +353,19 @@ func (mg *MicrosoftGraph) handleSearchMessages(ctx context.Context, req mcp.Call
 		fetchCount = 250
 	}
 
+	folderID := strings.TrimSpace(req.GetString("folder_id", ""))
+
 	fields := "id,conversationId,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,isRead,flag,bodyPreview"
-	// $search uses KQL across all mail folders; $orderby is not supported with $search.
+	// $search uses KQL; $orderby is not supported with $search.
 	// The query is passed as-is to allow raw KQL (subject:text, from:email, etc.).
 	// Wrapping in outer quotes is required by the OData $search protocol.
 	escaped := strings.ReplaceAll(query, `"`, `\"`)
 	searchParam := url.QueryEscape(`"` + escaped + `"`)
-	path := fmt.Sprintf("/me/messages?$search=%s&$select=%s&$top=%d", searchParam, fields, fetchCount)
+	basePath := "/me/messages"
+	if folderID != "" {
+		basePath = "/me/mailFolders/" + url.PathEscape(folderID) + "/messages"
+	}
+	path := fmt.Sprintf("%s?$search=%s&$select=%s&$top=%d", basePath, searchParam, fields, fetchCount)
 
 	data, status, err := mg.doGraph(ctx, http.MethodGet, path, nil)
 	if err != nil {
@@ -371,8 +398,13 @@ func (mg *MicrosoftGraph) handleListConversations(ctx context.Context, req mcp.C
 		fetchCount = 250
 	}
 
+	folderID := strings.TrimSpace(req.GetString("folder_id", ""))
+	if folderID == "" {
+		folderID = "inbox" // well-known folder name accepted by Graph
+	}
+
 	fields := "id,conversationId,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,isRead,flag,bodyPreview"
-	path := fmt.Sprintf("/me/mailFolders/inbox/messages?$top=%d&$orderby=receivedDateTime+desc&$select=%s", fetchCount, fields)
+	path := fmt.Sprintf("/me/mailFolders/%s/messages?$top=%d&$orderby=receivedDateTime+desc&$select=%s", url.PathEscape(folderID), fetchCount, fields)
 
 	data, status, err := mg.doGraph(ctx, http.MethodGet, path, nil)
 	if err != nil {
@@ -391,6 +423,74 @@ func (mg *MicrosoftGraph) handleListConversations(ctx context.Context, req mcp.C
 
 	conversations := groupByConversation(resp.Value, limit)
 	return jsonResult(conversations)
+}
+
+// mailFolderInfo is the minimal shape returned by list_mail_folders.
+type mailFolderInfo struct {
+	ID               string `json:"id"`
+	DisplayName      string `json:"displayName"`
+	ParentFolderID   string `json:"parentFolderId,omitempty"`
+	TotalItemCount   int    `json:"totalItemCount"`
+	UnreadItemCount  int    `json:"unreadItemCount"`
+	ChildFolderCount int    `json:"childFolderCount,omitempty"`
+}
+
+// maxMailFolderDepth caps recursion in list_mail_folders to guard against
+// pathologically deep folder trees. Real Outlook mailboxes rarely exceed 5
+// levels; 10 gives plenty of headroom without risking runaway API calls.
+const maxMailFolderDepth = 10
+
+func (mg *MicrosoftGraph) handleListMailFolders(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	includeChildren := false
+	if v, ok := req.GetArguments()["include_children"].(bool); ok {
+		includeChildren = v
+	}
+
+	folders, err := mg.fetchMailFolders(ctx, "", includeChildren, 0)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return jsonResult(folders)
+}
+
+// fetchMailFolders retrieves folders under parentID (empty = root). If recurse
+// is true, children of each folder are fetched too (depth-first, depth-capped
+// at maxMailFolderDepth).
+func (mg *MicrosoftGraph) fetchMailFolders(ctx context.Context, parentID string, recurse bool, depth int) ([]mailFolderInfo, error) {
+	path := "/me/mailFolders?$top=100&$select=id,displayName,parentFolderId,totalItemCount,unreadItemCount,childFolderCount"
+	if parentID != "" {
+		path = "/me/mailFolders/" + url.PathEscape(parentID) + "/childFolders?$top=100&$select=id,displayName,parentFolderId,totalItemCount,unreadItemCount,childFolderCount"
+	}
+
+	data, status, err := mg.doGraph(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("Graph API error (HTTP %d): %s", status, string(data))
+	}
+
+	var resp struct {
+		Value []mailFolderInfo `json:"value"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("parse mail folders: %w", err)
+	}
+
+	result := resp.Value
+	if recurse && depth < maxMailFolderDepth {
+		for i := range resp.Value {
+			if resp.Value[i].ChildFolderCount == 0 {
+				continue
+			}
+			children, err := mg.fetchMailFolders(ctx, resp.Value[i].ID, true, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, children...)
+		}
+	}
+	return result, nil
 }
 
 func (mg *MicrosoftGraph) handleGetConversation(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

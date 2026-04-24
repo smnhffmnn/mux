@@ -20,6 +20,14 @@
     formValues = vals
   })
 
+  // Map from TypeField keys (snake_case, user-facing) to the SaveConnectionRequest
+  // JSON property names (camelCase). Fields whose TypeField key and JSON name match
+  // do not need to be listed.
+  const fieldKeyMap: Record<string, string> = {
+    client_id: 'clientId',
+    token_header: 'tokenHeader',
+  }
+
   async function handleSave() {
     saving = true
     error = ''
@@ -28,7 +36,8 @@
       for (const f of conn.fields) {
         const val = formValues[f.key]
         if (val) {
-          (req as any)[f.key] = val
+          const jsonKey = fieldKeyMap[f.key] ?? f.key
+          ;(req as any)[jsonKey] = val
         }
       }
       req.tunnel = formValues['tunnel'] ?? ''
