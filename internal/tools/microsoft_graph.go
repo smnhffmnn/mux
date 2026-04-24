@@ -22,12 +22,16 @@ import (
 )
 
 const (
-	graphBaseURL   = "https://graph.microsoft.com/v1.0"
-	graphAuthURL   = "https://login.microsoftonline.com/common/oauth2/v2.0"
-	GraphClientID  = "9e5f94bc-e8a4-4e73-b8be-63364c29d753" // Exported for UI test handler
-	graphDefScopes = "https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access"
-	graphMaxBody    = 8 * 1024 * 1024 // 8 MB — needed when body (full HTML) is in $select
-	graphRefreshBuf = 5 * time.Minute
+	graphBaseURL = "https://graph.microsoft.com/v1.0"
+	graphAuthURL = "https://login.microsoftonline.com/common/oauth2/v2.0"
+	// GraphDefaultScopes is the default scope set requested when a
+	// microsoft-graph connection has no explicit scopes configured. It covers
+	// the Mail tools exposed by mux today. If a connection points at an Azure
+	// app that grants additional permissions (Calendars, Files, …), the user
+	// must override this via the Scopes connection field to request them.
+	GraphDefaultScopes = "https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access"
+	graphMaxBody       = 8 * 1024 * 1024 // 8 MB — needed when body (full HTML) is in $select
+	graphRefreshBuf    = 5 * time.Minute
 )
 
 // MicrosoftGraph wraps the Microsoft Graph REST API as MCP tools.
@@ -44,7 +48,15 @@ type MicrosoftGraph struct {
 }
 
 // NewMicrosoftGraph creates a Microsoft Graph connection.
+// The connection's ClientID (Azure App Registration ID) must be set — there
+// is no longer a built-in default. Scopes fall back to GraphDefaultScopes
+// (mail-only) if not configured; users with an app granting additional
+// permissions should set Scopes explicitly.
 func NewMicrosoftGraph(conn config.Connection, dialer Dialer) (*MicrosoftGraph, error) {
+	if conn.ClientID == "" {
+		return nil, fmt.Errorf("microsoft-graph connection %q: client_id (Azure App Registration ID) is required", conn.Name)
+	}
+
 	transport := &http.Transport{
 		ResponseHeaderTimeout: 30 * time.Second,
 	}
@@ -56,7 +68,7 @@ func NewMicrosoftGraph(conn config.Connection, dialer Dialer) (*MicrosoftGraph, 
 
 	scopes := conn.Scopes
 	if scopes == "" {
-		scopes = graphDefScopes
+		scopes = GraphDefaultScopes
 	}
 
 	mg := &MicrosoftGraph{
@@ -65,7 +77,7 @@ func NewMicrosoftGraph(conn config.Connection, dialer Dialer) (*MicrosoftGraph, 
 			Timeout:   30 * time.Second,
 		},
 		name:     conn.Name,
-		clientID: GraphClientID,
+		clientID: conn.ClientID,
 		scopes:   scopes,
 	}
 

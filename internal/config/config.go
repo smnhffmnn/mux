@@ -60,6 +60,7 @@ type Connection struct {
 	URL          string `toml:"url,omitempty" json:"url,omitempty"`
 	Token        string `toml:"-" json:"token,omitempty"`
 	OAuth        bool   `toml:"oauth,omitempty" json:"oauth,omitempty"` // proxy: use OAuth instead of bearer token
+	ClientID     string `toml:"client_id,omitempty" json:"clientId,omitempty"` // OAuth client ID (microsoft-graph: Azure App Registration ID)
 	Scopes       string `toml:"scopes,omitempty" json:"scopes,omitempty"`
 	Instructions string `toml:"instructions,omitempty" json:"instructions,omitempty"`
 	TokenHeader  string `toml:"token_header,omitempty" json:"tokenHeader,omitempty"` // custom header name for token (default: "Authorization: Bearer {token}")
@@ -74,7 +75,9 @@ func (c *Connection) Enabled() bool {
 	case IsProxyType(c.Type), c.Type == "http":
 		return c.URL != ""
 	case c.Type == "microsoft-graph":
-		return true // auth is interactive via tools
+		// Azure App Registration (Client ID) must be configured — there is no
+		// longer a built-in default. Auth is interactive via MCP tools.
+		return c.ClientID != ""
 	case c.Type == "firecrawl", c.Type == "brave", c.Type == "google-tagmanager",
 		c.Type == "openai", c.Type == "elevenlabs", c.Type == "recraft", c.Type == "ideogram",
 		c.Type == "asana", c.Type == "gemini", c.Type == "fal-ai":

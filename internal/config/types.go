@@ -77,7 +77,8 @@ var AllTypes = []TypeDef{
 		{Key: "token", Label: "API Key", Placeholder: "BSA...", Secret: true},
 	}},
 	{Type: "microsoft-graph", Label: "Microsoft Graph", Fields: []TypeField{
-		{Key: "scopes", Label: "Scopes (optional)", Placeholder: "Mail.ReadWrite Mail.Send offline_access"},
+		{Key: "client_id", Label: "Client ID (required)", Placeholder: "Azure App Registration (Application) ID"},
+		{Key: "scopes", Label: "Scopes", Placeholder: "Mail.ReadWrite Mail.Send offline_access (default: Mail-only)"},
 	}},
 	{Type: "google-tagmanager", Label: "Google Tag Manager", Fields: []TypeField{
 		{Key: "token", Label: "Service Account JSON Key", Placeholder: `{"client_email":"...","private_key":"..."}`, Secret: true},

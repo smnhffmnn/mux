@@ -169,6 +169,7 @@ type SaveConnectionRequest struct {
 	Database     string `json:"database,omitempty"`
 	URL          string `json:"url,omitempty"`
 	Token        string `json:"token,omitempty"`
+	ClientID     string `json:"clientId,omitempty"`
 	Scopes       string `json:"scopes,omitempty"`
 	Tunnel       string `json:"tunnel,omitempty"`
 	Instructions string `json:"instructions,omitempty"`

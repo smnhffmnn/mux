@@ -3,13 +3,33 @@
 ## Prerequisites
 
 - A Microsoft 365 account (personal or organizational).
-- No app registration required — mux uses a device code flow with a preconfigured app.
+- An **Azure App Registration** in your own tenant (or a multi-tenant one you control).
+  mux no longer ships a built-in Client ID — every connection points at the app
+  registration *you* own so that tokens, audit logs, and consent are attributed
+  to you rather than to the mux project.
+
+## Creating the Azure App Registration
+
+1. Open the [Azure Portal → App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade)
+   and click **New registration**.
+2. **Name:** anything you like (e.g. `mux`).
+3. **Supported account types:** choose based on where the signed-in users live
+   (single-tenant, multi-tenant, or `Personal Microsoft accounts only`).
+4. **Redirect URI:** leave blank — the device code flow does not need one.
+5. After creation, copy the **Application (client) ID** from the Overview page —
+   this is the value that goes in the `Client ID` connection field.
+6. Under **Authentication**, enable **Allow public client flows** (required for
+   the device code flow).
+7. Under **API permissions**, add the Microsoft Graph permissions you need,
+   e.g. `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `Files.ReadWrite`,
+   `offline_access`. Grant admin consent if your tenant requires it.
 
 ## Fields
 
 | Field | Description |
 |------|-------------|
-| Scopes (optional) | OAuth scopes, separated by spaces. Default: `Mail.ReadWrite Mail.Send offline_access`. Extend the scopes if you need access to Calendar, OneDrive, etc. |
+| **Client ID** (required) | Application (client) ID of your Azure App Registration. |
+| Scopes | Space-separated OAuth scopes. Default: `User.Read Mail.Read Mail.ReadWrite Mail.Send offline_access` (mail only). Override this if your app grants additional permissions (Calendar, Files, Teams, etc.) and you want them in the issued token. |
 
 ## After creating
 
@@ -22,7 +42,15 @@
 
 ## Notes
 
-- The device code flow is particularly suited to scenarios where a browser redirect is not possible.
+- The device code flow is suited to scenarios where a browser redirect is not
+  possible.
 - Tokens are stored in the system Keychain and refreshed automatically.
-- If your organization's admin restricts third-party apps, you will need admin approval for the requested scopes.
-- Commonly used scopes: `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `Files.ReadWrite`, `offline_access`.
+- **Changing the Client ID** on an existing connection drops all stored OAuth
+  tokens — they were issued against the old app registration and would no
+  longer work. You will need to re-authenticate afterwards.
+- **Scopes are bounded by the app registration.** The OAuth `scope` parameter
+  requests a subset of the permissions your Azure app grants; you cannot
+  obtain tokens for permissions the app does not have, regardless of what you
+  put in this field.
+- Commonly used scopes: `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`,
+  `Calendars.ReadWrite`, `Files.ReadWrite`, `offline_access`.

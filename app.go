@@ -294,6 +294,8 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 					fi.Value = conn.Database
 				case "url":
 					fi.Value = conn.URL
+				case "client_id":
+					fi.Value = conn.ClientID
 				case "scopes":
 					fi.Value = conn.Scopes
 				case "token_header":
@@ -449,6 +451,17 @@ func (a *App) AddConnection(name, typ string) (*ConnInfo, error) {
 	return &ci, nil
 }
 
+// invalidateOAuthTokens drops stored access and refresh tokens for a connection.
+// Called when a setting changes that makes existing tokens unusable (e.g. the
+// Azure App Registration ID / ClientID for microsoft-graph). Errors from
+// DeleteSecret are ignored — the secret may not have been stored at all.
+func (a *App) invalidateOAuthTokens(connName string) {
+	config.DeleteSecret(connName + "-oauth-token")
+	config.DeleteSecret(connName + "-oauth-refresh-token")
+	config.DeleteSecret(connName + "-oauth-access-token")
+	log.Printf("[app] Invalidated OAuth tokens for %q (configuration changed)", connName)
+}
+
 // SaveConnection saves connection fields and returns the updated info.
 func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnInfo, error) {
 	conn := a.cfg.FindAnyConnection(name)
@@ -475,6 +488,13 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 		}
 		if fields.Scopes != "" {
 			conn.Scopes = fields.Scopes
+		}
+		// Client ID change invalidates existing OAuth tokens (they were issued
+		// against the old Azure app). Drop them proactively so the UI surfaces
+		// the Reauthorize path instead of a zombie "token present, all calls 401".
+		if fields.ClientID != "" && fields.ClientID != conn.ClientID {
+			a.invalidateOAuthTokens(conn.Name)
+			conn.ClientID = fields.ClientID
 		}
 		conn.Tunnel = fields.Tunnel
 		conn.Instructions = fields.Instructions
@@ -1113,14 +1133,17 @@ func (a *App) StartDeviceAuth(name string) (*DeviceAuthStart, error) {
 	if conn == nil || conn.Type != "microsoft-graph" {
 		return nil, fmt.Errorf("device auth not supported for: %s", name)
 	}
+	if conn.ClientID == "" {
+		return nil, fmt.Errorf("microsoft-graph connection %q: client_id (Azure App Registration ID) is required", name)
+	}
 
 	scopes := conn.Scopes
 	if scopes == "" {
-		scopes = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access"
+		scopes = tools.GraphDefaultScopes
 	}
 
 	form := url.Values{
-		"client_id": {tools.GraphClientID},
+		"client_id": {conn.ClientID},
 		"scope":     {scopes},
 	}
 
@@ -1156,7 +1179,7 @@ func (a *App) StartDeviceAuth(name string) (*DeviceAuthStart, error) {
 	a.pendingDevice[name] = &pendingDeviceFlow{
 		connName:   name,
 		deviceCode: result.DeviceCode,
-		clientID:   tools.GraphClientID,
+		clientID:   conn.ClientID,
 		scopes:     scopes,
 		expiresAt:  time.Now().Add(time.Duration(result.ExpiresIn) * time.Second),
 	}
@@ -1686,15 +1709,18 @@ func (a *App) testMicrosoftGraph(conn config.Connection) testResponse {
 		return testResponse{Connection: conn.Name, Connected: false, Message: "Not authenticated — use Authenticate button"}
 	}
 
+	if conn.ClientID == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "client_id (Azure App Registration ID) not configured"}
+	}
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	scopes := conn.Scopes
 	if scopes == "" {
-		scopes = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access"
+		scopes = tools.GraphDefaultScopes
 	}
 
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
-		"client_id":     {tools.GraphClientID},
+		"client_id":     {conn.ClientID},
 		"refresh_token": {rt},
 		"scope":         {scopes},
 	}
