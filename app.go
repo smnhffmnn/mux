@@ -451,14 +451,16 @@ func (a *App) AddConnection(name, typ string) (*ConnInfo, error) {
 	return &ci, nil
 }
 
-// invalidateOAuthTokens drops stored access and refresh tokens for a connection.
-// Called when a setting changes that makes existing tokens unusable (e.g. the
-// Azure App Registration ID / ClientID for microsoft-graph). Errors from
-// DeleteSecret are ignored — the secret may not have been stored at all.
+// invalidateOAuthTokens drops stored OAuth tokens for a connection. Called
+// when a setting changes that makes existing tokens unusable (e.g. the Azure
+// App Registration ID for microsoft-graph). Matches the keys actually used
+// by the codebase — OAuth-proxy flows write "<name>-oauth-token" (the full
+// token blob) and microsoft-graph / device-code flows write
+// "<name>-oauth-refresh-token". Errors from DeleteSecret are ignored because
+// the secret may not have been stored at all for a given connection.
 func (a *App) invalidateOAuthTokens(connName string) {
 	config.DeleteSecret(connName + "-oauth-token")
 	config.DeleteSecret(connName + "-oauth-refresh-token")
-	config.DeleteSecret(connName + "-oauth-access-token")
 	log.Printf("[app] Invalidated OAuth tokens for %q (configuration changed)", connName)
 }
 
@@ -931,17 +933,7 @@ func (a *App) buildProvisioningInfo(resultMsg string, resultSuccess bool) Provis
 		ResultSuccess: resultSuccess,
 	}
 	for _, p := range a.cfg.Provisioning {
-		var tc, cc int
-		for _, pc := range a.cfg.ProvisionedConnections() {
-			if a.cfg.ConnectionEndpointName(pc.Name) == p.Name {
-				cc++
-			}
-		}
-		for _, pt := range a.cfg.ProvisionedTunnels() {
-			if a.cfg.ConnectionEndpointName(pt.Name) == p.Name {
-				tc++
-			}
-		}
+		tc, cc := a.cfg.ProvisionedCountFor(p.Name)
 		info.Endpoints = append(info.Endpoints, ProvisioningEndpointInfo{
 			Name:        p.Name,
 			Endpoint:    p.Endpoint,
@@ -1484,7 +1476,7 @@ func (a *App) testHTTP(conn config.Connection) testResponse {
 
 	testURL := conn.URL
 	if conn.Source == "provisioning" {
-		if epName := a.cfg.ConnectionEndpointName(conn.Name); epName != "" {
+		if epName, ok := a.cfg.ConnectionEndpointName(conn.Name); ok {
 			if ep := a.cfg.FindProvisioning(epName); ep != nil && ep.Endpoint != "" {
 				testURL = ep.Endpoint
 			}

@@ -578,18 +578,24 @@ func (ct *ConfigTools) updateInMemorySecret(key, value string) {
 				ct.reloader.ReloadConnection(*c)
 			}
 		}
-	} else if key == "provisioning-token" || (strings.HasPrefix(key, "provisioning-") && strings.HasSuffix(key, "-token")) {
+	} else if strings.HasPrefix(key, "provisioning-") && strings.HasSuffix(key, "-token") {
 		// Provisioning-endpoint token: either legacy "provisioning-token"
-		// (first endpoint) or named "provisioning-<name>-token".
-		var name string
-		if key != "provisioning-token" {
-			name = strings.TrimSuffix(strings.TrimPrefix(key, "provisioning-"), "-token")
-		}
+		// (unnamed/default endpoint) or named "provisioning-<name>-token".
+		name := strings.TrimSuffix(strings.TrimPrefix(key, "provisioning-"), "-token")
 		if p := ct.cfg.FindProvisioning(name); p != nil {
 			p.Token = value
-		} else if name == "" && len(ct.cfg.Provisioning) == 0 {
-			ct.cfg.Provisioning = []config.ProvisioningConfig{{Token: value}}
+		} else if name == "" {
+			// Legacy "provisioning-token" with no default endpoint configured.
+			// If any endpoints exist, prefer writing to the first one (the
+			// intuitive "default"); otherwise create a new default.
+			if len(ct.cfg.Provisioning) > 0 {
+				ct.cfg.Provisioning[0].Token = value
+			} else {
+				ct.cfg.Provisioning = []config.ProvisioningConfig{{Token: value}}
+			}
 		}
+		// If name != "" and the named endpoint doesn't exist, silently drop —
+		// the user needs to add the endpoint first via provisioning_set.
 	} else if strings.HasSuffix(key, "-token") {
 		name := strings.TrimSuffix(key, "-token")
 		if c := ct.cfg.FindAnyConnection(name); c != nil {

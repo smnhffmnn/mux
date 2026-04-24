@@ -435,13 +435,18 @@ type mailFolderInfo struct {
 	ChildFolderCount int    `json:"childFolderCount,omitempty"`
 }
 
+// maxMailFolderDepth caps recursion in list_mail_folders to guard against
+// pathologically deep folder trees. Real Outlook mailboxes rarely exceed 5
+// levels; 10 gives plenty of headroom without risking runaway API calls.
+const maxMailFolderDepth = 10
+
 func (mg *MicrosoftGraph) handleListMailFolders(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	includeChildren := false
 	if v, ok := req.GetArguments()["include_children"].(bool); ok {
 		includeChildren = v
 	}
 
-	folders, err := mg.fetchMailFolders(ctx, "", includeChildren)
+	folders, err := mg.fetchMailFolders(ctx, "", includeChildren, 0)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -449,8 +454,9 @@ func (mg *MicrosoftGraph) handleListMailFolders(ctx context.Context, req mcp.Cal
 }
 
 // fetchMailFolders retrieves folders under parentID (empty = root). If recurse
-// is true, children of each folder are fetched too (depth-first).
-func (mg *MicrosoftGraph) fetchMailFolders(ctx context.Context, parentID string, recurse bool) ([]mailFolderInfo, error) {
+// is true, children of each folder are fetched too (depth-first, depth-capped
+// at maxMailFolderDepth).
+func (mg *MicrosoftGraph) fetchMailFolders(ctx context.Context, parentID string, recurse bool, depth int) ([]mailFolderInfo, error) {
 	path := "/me/mailFolders?$top=100&$select=id,displayName,parentFolderId,totalItemCount,unreadItemCount,childFolderCount"
 	if parentID != "" {
 		path = "/me/mailFolders/" + url.PathEscape(parentID) + "/childFolders?$top=100&$select=id,displayName,parentFolderId,totalItemCount,unreadItemCount,childFolderCount"
@@ -472,12 +478,12 @@ func (mg *MicrosoftGraph) fetchMailFolders(ctx context.Context, parentID string,
 	}
 
 	result := resp.Value
-	if recurse {
+	if recurse && depth < maxMailFolderDepth {
 		for i := range resp.Value {
 			if resp.Value[i].ChildFolderCount == 0 {
 				continue
 			}
-			children, err := mg.fetchMailFolders(ctx, resp.Value[i].ID, true)
+			children, err := mg.fetchMailFolders(ctx, resp.Value[i].ID, true, depth+1)
 			if err != nil {
 				return nil, err
 			}

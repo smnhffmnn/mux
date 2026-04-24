@@ -21,18 +21,21 @@ import (
 // single-endpoint schema to the new array-of-tables form.
 var legacyProvisioningHeader = regexp.MustCompile(`(?m)^(\s*)\[provisioning\]\s*$`)
 
+// arrayProvisioningHeader matches a standalone `[[provisioning]]` header. Used
+// as a guard: if the file already uses the new array form anywhere, we leave
+// it alone to avoid mixing both schemas.
+var arrayProvisioningHeader = regexp.MustCompile(`(?m)^\s*\[\[provisioning\]\]\s*$`)
+
 // migrateLegacyProvisioningHeader rewrites `[provisioning]` (singular table)
 // to `[[provisioning]]` (array of tables) in-place. Leaves files that already
 // use the array form untouched. Operates only on header lines — string
 // occurrences inside values or comments are not affected because table
 // headers must be on their own line.
 func migrateLegacyProvisioningHeader(content []byte) []byte {
-	if bytes := content; len(bytes) > 0 {
-		// Skip migration if the file already uses `[[provisioning]]` anywhere —
-		// mixed formats would be ambiguous.
-		if regexp.MustCompile(`(?m)^\s*\[\[provisioning\]\]\s*$`).Match(bytes) {
-			return bytes
-		}
+	// Skip migration if the file already uses `[[provisioning]]` anywhere —
+	// mixed formats would be ambiguous.
+	if arrayProvisioningHeader.Match(content) {
+		return content
 	}
 	return legacyProvisioningHeader.ReplaceAll(content, []byte("${1}[[provisioning]]"))
 }
@@ -281,6 +284,12 @@ func (cfg *Config) AllConnections() []Connection {
 // points to the same host as the endpoint (same API, same credentials).
 func (cfg *Config) SetProvisioned(endpointName string, tunnels []TunnelConfig, connections []Connection) {
 	endpoint := cfg.FindProvisioning(endpointName)
+	if endpoint == nil {
+		// Writing into a bucket whose endpoint isn't configured means the
+		// entries would be invisible to every aggregator (which iterates
+		// cfg.Provisioning). Log a warning — callers should not hit this path.
+		log.Printf("[config] SetProvisioned called with unknown endpoint name %q — entries will be tracked but invisible until that endpoint is added to config", endpointName)
+	}
 	var provHost, provToken string
 	if endpoint != nil {
 		provHost = hostFromURL(endpoint.Endpoint)
@@ -940,8 +949,10 @@ func setDefaultProvisioningToken(cfg *Config, token string) {
 }
 
 // ConnectionEndpointName returns the Name of the provisioning endpoint that
-// delivered the given connection, or "" if the connection is local.
-func (cfg *Config) ConnectionEndpointName(connName string) string {
+// delivered the given connection, and true if it was found. The returned name
+// is "" for the unnamed/default endpoint — distinguishing that from the
+// "not provisioned" case is what the boolean is for.
+func (cfg *Config) ConnectionEndpointName(connName string) (string, bool) {
 	for _, p := range cfg.Provisioning {
 		entries, ok := cfg.provisionedByEndpoint[p.Name]
 		if !ok {
@@ -949,11 +960,40 @@ func (cfg *Config) ConnectionEndpointName(connName string) string {
 		}
 		for i := range entries.Connections {
 			if entries.Connections[i].Name == connName {
-				return p.Name
+				return p.Name, true
 			}
 		}
 	}
-	return ""
+	return "", false
+}
+
+// TunnelEndpointName returns the Name of the provisioning endpoint that
+// delivered the given tunnel, and true if it was found. Same semantics as
+// ConnectionEndpointName.
+func (cfg *Config) TunnelEndpointName(tunnelName string) (string, bool) {
+	for _, p := range cfg.Provisioning {
+		entries, ok := cfg.provisionedByEndpoint[p.Name]
+		if !ok {
+			continue
+		}
+		for i := range entries.Tunnels {
+			if entries.Tunnels[i].Name == tunnelName {
+				return p.Name, true
+			}
+		}
+	}
+	return "", false
+}
+
+// ProvisionedCountFor returns (tunnels, connections) delivered by the named
+// endpoint. Returns (0, 0) if the endpoint is not configured or has not
+// delivered anything yet.
+func (cfg *Config) ProvisionedCountFor(endpointName string) (int, int) {
+	entries, ok := cfg.provisionedByEndpoint[endpointName]
+	if !ok {
+		return 0, 0
+	}
+	return len(entries.Tunnels), len(entries.Connections)
 }
 
 // --- Secrets ---

@@ -68,7 +68,7 @@
   <div class="provisioning-card">
     {#if provisioning.endpoints.length > 0}
       <div class="endpoint-list">
-        {#each provisioning.endpoints as ep (ep.name)}
+        {#each provisioning.endpoints as ep, i (ep.name || `__default_${i}`)}
           <div class="endpoint-row" class:active={ep.name === selectedName}>
             <button class="endpoint-label" onclick={() => (selectedName = ep.name)}>
               <span class="dot" class:green={ep.tokenSet && ep.endpoint} class:gray={!ep.tokenSet || !ep.endpoint}></span>

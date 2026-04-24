@@ -185,17 +185,7 @@ func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config
 			continue
 		}
 		// Skip if this endpoint already delivered its share.
-		tunnels, conns := 0, 0
-		if cfg.ProvisioningStatus(); true {
-			// Per-endpoint status via the public accessors
-			for _, pc := range cfg.ProvisionedConnections() {
-				if cfg.ConnectionEndpointName(pc.Name) == p.Name {
-					conns++
-				}
-			}
-			_ = tunnels
-		}
-		if conns > 0 {
+		if t, c := cfg.ProvisionedCountFor(p.Name); t > 0 || c > 0 {
 			continue
 		}
 
