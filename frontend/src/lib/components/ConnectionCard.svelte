@@ -79,11 +79,15 @@
         <button onclick={handleTest} disabled={testing}>
           {testing ? '...' : 'Test'}
         </button>
-        {#if conn.isOAuth && !conn.oauthOK}
-          <button class="primary" onclick={() => (showOAuth = true)}>Authorize</button>
+        {#if conn.isOAuth}
+          <button class:primary={!conn.oauthOK} onclick={() => (showOAuth = true)}>
+            {conn.oauthOK ? 'Reauthorize' : 'Authorize'}
+          </button>
         {/if}
-        {#if conn.isDeviceAuth && !conn.deviceAuthOK}
-          <button class="primary" onclick={() => (showDeviceAuth = true)}>Authenticate</button>
+        {#if conn.isDeviceAuth}
+          <button class:primary={!conn.deviceAuthOK} onclick={() => (showDeviceAuth = true)}>
+            {conn.deviceAuthOK ? 'Reauthenticate' : 'Authenticate'}
+          </button>
         {/if}
         {#if !conn.isProvisioned}
           <button class="danger" onclick={handleDelete}>×</button>
