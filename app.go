@@ -798,6 +798,8 @@ func (a *App) TestConnection(name string) *TestResult {
 		result = a.testGoogleTagManager(*conn)
 	case "meilisearch":
 		result = a.testMeilisearch(*conn)
+	case "youtrack-agile":
+		result = a.testYouTrackAgile(*conn)
 	case "asana":
 		result = a.testAsana(*conn)
 	case "gemini":
@@ -1914,6 +1916,35 @@ func (a *App) testMeilisearch(conn config.Connection) testResponse {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
 	}
 	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Meilisearch (HTTP %d)", resp.StatusCode)}
+}
+
+func (a *App) testYouTrackAgile(conn config.Connection) testResponse {
+	if conn.URL == "" || conn.Token == "" || conn.Database == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "Not configured (URL, token, or board ID missing)"}
+	}
+
+	baseURL := strings.TrimRight(conn.URL, "/")
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/api/agiles/"+conn.Database+"?fields=id,name", nil)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	}
+	req.Header.Set("Authorization", "Bearer "+conn.Token)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your permanent token", resp.StatusCode)}
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Board %q not found (HTTP 404) — check the board ID", conn.Database)}
+	}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: YouTrack Agile board %s (HTTP %d)", conn.Database, resp.StatusCode)}
 }
 
 func (a *App) testBearerProxy(conn config.Connection) testResponse {

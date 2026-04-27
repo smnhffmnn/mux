@@ -133,6 +133,11 @@ var AllTypes = []TypeDef{
 	{Type: "google-workspace", Label: "Google Workspace", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "http://localhost:8000/mcp"},
 	}},
+	{Type: "youtrack-agile", Label: "YouTrack Agile", Fields: []TypeField{
+		{Key: "url", Label: "Base URL", Placeholder: "https://instance.myjetbrains.com/youtrack"},
+		{Key: "token", Label: "Permanent Token", Placeholder: "perm:...", Secret: true},
+		{Key: "database", Label: "Board ID", Placeholder: "123-45"},
+	}},
 }
 
 // typeIndex is a lazily-built lookup map from type string to TypeDef.

@@ -154,6 +154,12 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		if err == nil {
 			toolDefs = ms.Tools()
 		}
+	case "youtrack-agile":
+		var ya *YouTrackAgile
+		ya, err = NewYouTrackAgile(conn, dialer)
+		if err == nil {
+			toolDefs = ya.Tools()
+		}
 	case "git":
 		// Passive connection type — no MCP tools.
 		// Used by the git credential helper (mux git-credential) to look up
