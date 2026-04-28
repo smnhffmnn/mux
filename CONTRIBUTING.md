@@ -42,11 +42,12 @@ register.go     # Connection registration and hot-reload
 
 ## Adding a New Connection Type
 
-1. Add the type name to `AllTypes` in `internal/config/types.go`
-2. Create a tool file in `internal/tools/` (see existing ones as examples)
-3. Add a case in `tools.RegisterConnection()` in `internal/tools/tools.go`
-4. Add a TOML example in `config.example.toml`
-5. Document in `docs/connections.md`
+1. Add a `Type<Name>` constant in `internal/config/identifiers.go` (the wire-format string is the constant's value)
+2. Add the type to `AllTypes` in `internal/config/types.go` using the new constant
+3. Create a tool file in `internal/tools/` (see existing ones as examples)
+4. Add a case in `tools.RegisterConnection()` in `internal/tools/tools.go`
+5. Add a TOML example in `config.example.toml`
+6. Document in `docs/connections.md`
 
 ## Pull Requests
 

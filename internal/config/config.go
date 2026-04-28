@@ -119,7 +119,7 @@ func MigrateLegacyDir() {
 // Connection represents a database or proxy backend.
 type Connection struct {
 	Name         string `toml:"name" json:"name"`
-	Type         string `toml:"type" json:"type"` // "postgresql", "clickhouse", "mariadb", "proxy"
+	Type         string `toml:"type" json:"type"` // see Type* constants in identifiers.go
 	Host         string `toml:"host,omitempty" json:"host,omitempty"`
 	Port         int    `toml:"port,omitzero" json:"port,omitempty"`
 	User         string `toml:"user,omitempty" json:"user,omitempty"`
@@ -129,36 +129,36 @@ type Connection struct {
 	Secure       bool   `toml:"secure,omitempty" json:"secure,omitempty"`
 	URL          string `toml:"url,omitempty" json:"url,omitempty"`
 	Token        string `toml:"-" json:"token,omitempty"`
-	OAuth        bool   `toml:"oauth,omitempty" json:"oauth,omitempty"` // proxy: use OAuth instead of bearer token
+	OAuth        bool   `toml:"oauth,omitempty" json:"oauth,omitempty"`        // proxy: use OAuth instead of bearer token
 	ClientID     string `toml:"client_id,omitempty" json:"clientId,omitempty"` // OAuth client ID (microsoft-graph: Azure App Registration ID)
 	Scopes       string `toml:"scopes,omitempty" json:"scopes,omitempty"`
 	Instructions string `toml:"instructions,omitempty" json:"instructions,omitempty"`
-	TokenHeader  string `toml:"token_header,omitempty" json:"tokenHeader,omitempty"` // custom header name for token (default: "Authorization: Bearer {token}")
+	TokenHeader  string `toml:"token_header,omitempty" json:"tokenHeader,omitempty"`  // custom header name for token (default: "Authorization: Bearer {token}")
 	Tunnel       string `toml:"tunnel,omitempty" json:"tunnel,omitempty"`             // name of a defined tunnel
 	MonthlyLimit int    `toml:"monthly_limit,omitzero" json:"monthlyLimit,omitempty"` // optional request limit per month
-	Source       string `toml:"-" json:"source,omitempty"`                             // "local" or "provisioning"
+	Source       string `toml:"-" json:"source,omitempty"`                            // see Source* constants in identifiers.go
 }
 
 // Enabled reports whether the connection has enough config to attempt a connection.
 func (c *Connection) Enabled() bool {
 	switch {
-	case IsProxyType(c.Type), c.Type == "http":
+	case IsProxyType(c.Type), c.Type == TypeHTTP:
 		return c.URL != ""
-	case c.Type == "microsoft-graph":
+	case c.Type == TypeMicrosoftGraph:
 		// Azure App Registration (Client ID) must be configured — there is no
 		// longer a built-in default. Auth is interactive via MCP tools.
 		return c.ClientID != ""
-	case c.Type == "firecrawl", c.Type == "brave", c.Type == "google-tagmanager",
-		c.Type == "openai", c.Type == "elevenlabs", c.Type == "recraft", c.Type == "ideogram",
-		c.Type == "asana", c.Type == "gemini", c.Type == "fal-ai":
+	case c.Type == TypeFirecrawl, c.Type == TypeBrave, c.Type == TypeGoogleTagManager,
+		c.Type == TypeOpenAI, c.Type == TypeElevenLabs, c.Type == TypeRecraft, c.Type == TypeIdeogram,
+		c.Type == TypeAsana, c.Type == TypeGemini, c.Type == TypeFalAI:
 		return c.Token != ""
-	case c.Type == "youtrack-agile":
+	case c.Type == TypeYouTrackAgile:
 		return c.URL != "" && c.Token != "" && c.Database != ""
-	case c.Type == "meilisearch":
+	case c.Type == TypeMeilisearch:
 		return c.Host != "" && c.Database != ""
-	case c.Type == "imap":
+	case c.Type == TypeIMAP:
 		return c.Host != "" && c.User != "" && c.Password != ""
-	case c.Type == "git":
+	case c.Type == TypeGit:
 		// Token is fetched from vault at request time, not at startup.
 		// Only require host and user for the connection to be considered enabled.
 		return c.Host != "" && c.User != ""
@@ -170,7 +170,7 @@ func (c *Connection) Enabled() bool {
 // IsProxyType reports whether a connection type proxies an upstream MCP server.
 func IsProxyType(typ string) bool {
 	switch typ {
-	case "proxy", "youtrack", "sentry", "netdata", "notion", "asana-mcp", "google-workspace":
+	case TypeProxy, TypeYouTrack, TypeSentry, TypeNetdata, TypeNotion, TypeAsanaMCP, TypeGoogleWorkspace:
 		return true
 	}
 	return false
@@ -178,8 +178,8 @@ func IsProxyType(typ string) bool {
 
 // TunnelConfig represents a WireGuard or SSH tunnel definition.
 type TunnelConfig struct {
-	Name          string `toml:"name" json:"name"`
-	Type          string `toml:"type,omitempty" json:"type,omitempty"` // "wireguard" (default) or "ssh"
+	Name string `toml:"name" json:"name"`
+	Type string `toml:"type,omitempty" json:"type,omitempty"` // see TunnelType* constants in identifiers.go (default: wireguard)
 
 	// WireGuard fields
 	PeerPublicKey string `toml:"peer_public_key,omitempty" json:"peerPublicKey,omitempty"`
@@ -192,20 +192,20 @@ type TunnelConfig struct {
 	KeepAlive     int    `toml:"keepalive,omitzero" json:"keepalive,omitempty"`
 
 	// SSH fields
-	Host              string `toml:"host,omitempty" json:"host,omitempty"`
-	Port              int    `toml:"port,omitzero" json:"port,omitempty"`
-	User              string `toml:"user,omitempty" json:"user,omitempty"`
-	KeyFile           string `toml:"key_file,omitempty" json:"keyFile,omitempty"`                         // path to SSH private key file
-	InsecureHostKey   bool   `toml:"insecure_host_key,omitempty" json:"insecureHostKey,omitempty"`        // skip host key verification (default: false)
+	Host            string `toml:"host,omitempty" json:"host,omitempty"`
+	Port            int    `toml:"port,omitzero" json:"port,omitempty"`
+	User            string `toml:"user,omitempty" json:"user,omitempty"`
+	KeyFile         string `toml:"key_file,omitempty" json:"keyFile,omitempty"`                  // path to SSH private key file
+	InsecureHostKey bool   `toml:"insecure_host_key,omitempty" json:"insecureHostKey,omitempty"` // skip host key verification (default: false)
 
 	// Shared
-	PrivateKey string `toml:"-" json:"-"` // WG: base64 key; SSH: PEM key content — never serialize
-	Source     string `toml:"-" json:"source,omitempty"` // "local" or "provisioning"
+	PrivateKey string `toml:"-" json:"-"`                // WG: base64 key; SSH: PEM key content — never serialize
+	Source     string `toml:"-" json:"source,omitempty"` // see Source* constants in identifiers.go
 }
 
 // IsSSH reports whether the tunnel is an SSH tunnel.
 func (t *TunnelConfig) IsSSH() bool {
-	return t.Type == "ssh"
+	return t.Type == TunnelTypeSSH
 }
 
 // Enabled reports whether the tunnel has enough config to be started.
@@ -244,10 +244,10 @@ func (p ProvisioningConfig) SecretKey() string {
 
 type ServerConfig struct {
 	Port    int    `toml:"port"`
-	Mode    string `toml:"mode,omitempty" json:"mode,omitempty"`       // "desktop", "headless", or "" (auto-detect)
+	Mode    string `toml:"mode,omitempty" json:"mode,omitempty"`        // "desktop", "headless", or "" (auto-detect)
 	TLSCert string `toml:"tls_cert,omitempty" json:"tlsCert,omitempty"` // path to TLS certificate
 	TLSKey  string `toml:"tls_key,omitempty" json:"tlsKey,omitempty"`   // path to TLS private key
-	TLSPort int    `toml:"tls_port,omitzero" json:"tlsPort,omitempty"` // HTTPS port for WebAuthn/Vault (default: port + 1)
+	TLSPort int    `toml:"tls_port,omitzero" json:"tlsPort,omitempty"`  // HTTPS port for WebAuthn/Vault (default: port + 1)
 }
 
 // EffectiveTLSPort returns the configured TLS port, defaulting to Port + 1.
@@ -261,11 +261,11 @@ func (s ServerConfig) EffectiveTLSPort() int {
 // VaultConfig holds settings for the encrypted secret vault.
 type VaultConfig struct {
 	Enabled           bool     `toml:"enabled,omitempty" json:"enabled,omitempty"`
-	Exclusive         bool     `toml:"exclusive,omitempty" json:"exclusive,omitempty"`                     // when true, vault-stored secrets skip legacy keyring/file
-	InactivityTimeout string   `toml:"inactivity_timeout,omitempty" json:"inactivityTimeout,omitempty"`   // e.g. "30m"
-	WebAuthnRPID      string   `toml:"webauthn_rp_id,omitempty" json:"webauthnRpId,omitempty"`            // e.g. "mux.local"
-	WebAuthnOrigins   []string `toml:"webauthn_origins,omitempty" json:"webauthnOrigins,omitempty"`        // e.g. ["https://mux.local:7700"]
-	BaseURL           string   `toml:"base_url,omitempty" json:"baseUrl,omitempty"`                        // public URL for approval links, e.g. "https://mux.example.com:7701"
+	Exclusive         bool     `toml:"exclusive,omitempty" json:"exclusive,omitempty"`                  // when true, vault-stored secrets skip legacy keyring/file
+	InactivityTimeout string   `toml:"inactivity_timeout,omitempty" json:"inactivityTimeout,omitempty"` // e.g. "30m"
+	WebAuthnRPID      string   `toml:"webauthn_rp_id,omitempty" json:"webauthnRpId,omitempty"`          // e.g. "mux.local"
+	WebAuthnOrigins   []string `toml:"webauthn_origins,omitempty" json:"webauthnOrigins,omitempty"`     // e.g. ["https://mux.local:7700"]
+	BaseURL           string   `toml:"base_url,omitempty" json:"baseUrl,omitempty"`                     // public URL for approval links, e.g. "https://mux.example.com:7701"
 }
 
 // Config is the application configuration.
@@ -367,11 +367,11 @@ func (cfg *Config) SetProvisioned(endpointName string, tunnels []TunnelConfig, c
 
 	for i := range connections {
 		if connections[i].Source == "" {
-			connections[i].Source = "provisioning"
+			connections[i].Source = SourceProvisioning
 		}
 		// Provisioned http connections without their own token reuse this endpoint's
 		// bearer token if they point to the same host as the endpoint URL.
-		if connections[i].Type == "http" && connections[i].Token == "" && provToken != "" {
+		if connections[i].Type == TypeHTTP && connections[i].Token == "" && provToken != "" {
 			if provHost != "" && hostFromURL(connections[i].URL) == provHost {
 				connections[i].Token = provToken
 			}
@@ -392,7 +392,7 @@ func (cfg *Config) SetProvisioned(endpointName string, tunnels []TunnelConfig, c
 	}
 	for i := range tunnels {
 		if tunnels[i].Source == "" {
-			tunnels[i].Source = "provisioning"
+			tunnels[i].Source = SourceProvisioning
 		}
 		if tunnels[i].IsSSH() {
 			if tunnels[i].Port == 0 {
@@ -507,20 +507,20 @@ func migrateFromLegacy(cfg *Config, legacy *legacyConfigFile) {
 	if legacy.YouTrack != nil && legacy.YouTrack.URL != "" && !existing["youtrack"] {
 		cfg.Connections = append(cfg.Connections, Connection{
 			Name:   "youtrack",
-			Type:   "proxy",
+			Type:   TypeProxy,
 			URL:    legacy.YouTrack.URL,
 			Token:  legacy.YouTrack.Token,
-			Source: "local",
+			Source: SourceLocal,
 		})
 	}
 
 	if legacy.Sentry != nil && legacy.Sentry.URL != "" && !existing["sentry"] {
 		cfg.Connections = append(cfg.Connections, Connection{
 			Name:   "sentry",
-			Type:   "proxy",
+			Type:   TypeProxy,
 			URL:    legacy.Sentry.URL,
 			OAuth:  true,
-			Source: "local",
+			Source: SourceLocal,
 		})
 	}
 
@@ -531,14 +531,14 @@ func migrateFromLegacy(cfg *Config, legacy *legacyConfigFile) {
 		}
 		cfg.Connections = append(cfg.Connections, Connection{
 			Name:     "mariadb",
-			Type:     "mariadb",
+			Type:     TypeMariaDB,
 			Host:     legacy.MariaDB.Host,
 			Port:     port,
 			User:     legacy.MariaDB.User,
 			Password: legacy.MariaDB.Password,
 			Database: legacy.MariaDB.Database,
 			ReadOnly: legacy.MariaDB.ReadOnly,
-			Source:   "local",
+			Source:   SourceLocal,
 		})
 	}
 
@@ -553,14 +553,14 @@ func migrateFromLegacy(cfg *Config, legacy *legacyConfigFile) {
 		}
 		cfg.Connections = append(cfg.Connections, Connection{
 			Name:     "clickhouse",
-			Type:     "clickhouse",
+			Type:     TypeClickHouse,
 			Host:     legacy.ClickHouse.Host,
 			Port:     port,
 			User:     legacy.ClickHouse.User,
 			Password: legacy.ClickHouse.Password,
 			Database: db,
 			Secure:   legacy.ClickHouse.Secure,
-			Source:   "local",
+			Source:   SourceLocal,
 		})
 	}
 
@@ -571,13 +571,13 @@ func migrateFromLegacy(cfg *Config, legacy *legacyConfigFile) {
 		}
 		cfg.Connections = append(cfg.Connections, Connection{
 			Name:     "postgresql",
-			Type:     "postgresql",
+			Type:     TypePostgreSQL,
 			Host:     legacy.PostgreSQL.Host,
 			Port:     port,
 			User:     legacy.PostgreSQL.User,
 			Password: legacy.PostgreSQL.Password,
 			Database: legacy.PostgreSQL.Database,
-			Source:   "local",
+			Source:   SourceLocal,
 		})
 	}
 }
@@ -618,12 +618,12 @@ func Load(path string) (*Config, error) {
 	// Mark local connections
 	for i := range cfg.Connections {
 		if cfg.Connections[i].Source == "" {
-			cfg.Connections[i].Source = "local"
+			cfg.Connections[i].Source = SourceLocal
 		}
 	}
 	for i := range cfg.Tunnels {
 		if cfg.Tunnels[i].Source == "" {
-			cfg.Tunnels[i].Source = "local"
+			cfg.Tunnels[i].Source = SourceLocal
 		}
 	}
 
@@ -685,44 +685,44 @@ func Load(path string) (*Config, error) {
 
 func ApplyConnectionDefaults(c *Connection) {
 	switch c.Type {
-	case "mariadb":
+	case TypeMariaDB:
 		if c.Port == 0 {
 			c.Port = 3306
 		}
-	case "clickhouse":
+	case TypeClickHouse:
 		if c.Port == 0 {
 			c.Port = 8123
 		}
 		if c.Database == "" {
 			c.Database = "default"
 		}
-	case "postgresql":
+	case TypePostgreSQL:
 		if c.Port == 0 {
 			c.Port = 5432
 		}
-	case "asana-mcp":
+	case TypeAsanaMCP:
 		c.OAuth = true
 		if c.URL == "" {
 			c.URL = "https://mcp.asana.com/v2/mcp"
 		}
-	case "notion":
+	case TypeNotion:
 		c.OAuth = true
 		if c.URL == "" {
 			c.URL = "https://mcp.notion.com/mcp"
 		}
-	case "gemini":
+	case TypeGemini:
 		if c.URL == "" {
 			c.URL = "https://generativelanguage.googleapis.com/v1beta"
 		}
-	case "fal-ai":
+	case TypeFalAI:
 		if c.URL == "" {
 			c.URL = "https://queue.fal.run"
 		}
-	case "imap":
+	case TypeIMAP:
 		if c.Port == 0 {
 			c.Port = 993
 		}
-	case "meilisearch":
+	case TypeMeilisearch:
 		if c.Port == 0 {
 			c.Port = 7700
 		}
@@ -842,80 +842,80 @@ func loadEnv(cfg *Config) {
 func applyLegacyEnv(cfg *Config) {
 	// YouTrack
 	if url := os.Getenv("YOUTRACK_MCP_URL"); url != "" {
-		c := findOrCreateConnection(cfg, "youtrack", "proxy")
+		c := findOrCreateConnection(cfg, "youtrack", TypeProxy)
 		c.URL = url
 	}
 	if token := os.Getenv("YOUTRACK_MCP_TOKEN"); token != "" {
-		c := findOrCreateConnection(cfg, "youtrack", "proxy")
+		c := findOrCreateConnection(cfg, "youtrack", TypeProxy)
 		c.Token = token
 	}
 
 	// Sentry
 	if url := os.Getenv("SENTRY_MCP_URL"); url != "" {
-		c := findOrCreateConnection(cfg, "sentry", "proxy")
+		c := findOrCreateConnection(cfg, "sentry", TypeProxy)
 		c.URL = url
 		c.OAuth = true
 	}
 	if token := os.Getenv("SENTRY_MCP_TOKEN"); token != "" {
-		c := findOrCreateConnection(cfg, "sentry", "proxy")
+		c := findOrCreateConnection(cfg, "sentry", TypeProxy)
 		c.Token = token
 	}
 
 	// MariaDB
 	if v := os.Getenv("MARIADB_DB_HOST"); v != "" {
-		findOrCreateConnection(cfg, "mariadb", "mariadb").Host = v
+		findOrCreateConnection(cfg, "mariadb", TypeMariaDB).Host = v
 	}
 	if v := os.Getenv("MARIADB_DB_PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil {
-			findOrCreateConnection(cfg, "mariadb", "mariadb").Port = p
+			findOrCreateConnection(cfg, "mariadb", TypeMariaDB).Port = p
 		}
 	}
 	if v := os.Getenv("MARIADB_DB_USER"); v != "" {
-		findOrCreateConnection(cfg, "mariadb", "mariadb").User = v
+		findOrCreateConnection(cfg, "mariadb", TypeMariaDB).User = v
 	}
 	if v := os.Getenv("MARIADB_DB_PASSWORD"); v != "" {
-		findOrCreateConnection(cfg, "mariadb", "mariadb").Password = v
+		findOrCreateConnection(cfg, "mariadb", TypeMariaDB).Password = v
 	}
 	if v := os.Getenv("MARIADB_DB_NAME"); v != "" {
-		findOrCreateConnection(cfg, "mariadb", "mariadb").Database = v
+		findOrCreateConnection(cfg, "mariadb", TypeMariaDB).Database = v
 	}
 
 	// ClickHouse
 	if v := os.Getenv("CLICKHOUSE_HOST"); v != "" {
-		findOrCreateConnection(cfg, "clickhouse", "clickhouse").Host = v
+		findOrCreateConnection(cfg, "clickhouse", TypeClickHouse).Host = v
 	}
 	if v := os.Getenv("CLICKHOUSE_PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil {
-			findOrCreateConnection(cfg, "clickhouse", "clickhouse").Port = p
+			findOrCreateConnection(cfg, "clickhouse", TypeClickHouse).Port = p
 		}
 	}
 	if v := os.Getenv("CLICKHOUSE_USER"); v != "" {
-		findOrCreateConnection(cfg, "clickhouse", "clickhouse").User = v
+		findOrCreateConnection(cfg, "clickhouse", TypeClickHouse).User = v
 	}
 	if v := os.Getenv("CLICKHOUSE_PASSWORD"); v != "" {
-		findOrCreateConnection(cfg, "clickhouse", "clickhouse").Password = v
+		findOrCreateConnection(cfg, "clickhouse", TypeClickHouse).Password = v
 	}
 	if v := os.Getenv("CLICKHOUSE_SECURE"); v != "" {
-		findOrCreateConnection(cfg, "clickhouse", "clickhouse").Secure = v == "true" || v == "1"
+		findOrCreateConnection(cfg, "clickhouse", TypeClickHouse).Secure = v == "true" || v == "1"
 	}
 
 	// PostgreSQL
 	if v := os.Getenv("POSTGRESQL_DB_HOST"); v != "" {
-		findOrCreateConnection(cfg, "postgresql", "postgresql").Host = v
+		findOrCreateConnection(cfg, "postgresql", TypePostgreSQL).Host = v
 	}
 	if v := os.Getenv("POSTGRESQL_DB_PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil {
-			findOrCreateConnection(cfg, "postgresql", "postgresql").Port = p
+			findOrCreateConnection(cfg, "postgresql", TypePostgreSQL).Port = p
 		}
 	}
 	if v := os.Getenv("POSTGRESQL_DB_USER"); v != "" {
-		findOrCreateConnection(cfg, "postgresql", "postgresql").User = v
+		findOrCreateConnection(cfg, "postgresql", TypePostgreSQL).User = v
 	}
 	if v := os.Getenv("POSTGRESQL_DB_PASSWORD"); v != "" {
-		findOrCreateConnection(cfg, "postgresql", "postgresql").Password = v
+		findOrCreateConnection(cfg, "postgresql", TypePostgreSQL).Password = v
 	}
 	if v := os.Getenv("POSTGRESQL_DB_NAME"); v != "" {
-		findOrCreateConnection(cfg, "postgresql", "postgresql").Database = v
+		findOrCreateConnection(cfg, "postgresql", TypePostgreSQL).Database = v
 	}
 }
 
@@ -930,7 +930,7 @@ func findOrCreateConnection(cfg *Config, name, typ string) *Connection {
 	cfg.Connections = append(cfg.Connections, Connection{
 		Name:   name,
 		Type:   typ,
-		Source: "local",
+		Source: SourceLocal,
 	})
 	return &cfg.Connections[len(cfg.Connections)-1]
 }

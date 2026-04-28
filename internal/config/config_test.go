@@ -68,27 +68,27 @@ func TestTunnelConfigEnabled(t *testing.T) {
 		},
 		{
 			name: "SSH with private key",
-			cfg:  TunnelConfig{Type: "ssh", Host: "host", User: "user", PrivateKey: "key"},
+			cfg:  TunnelConfig{Type: TunnelTypeSSH, Host: "host", User: "user", PrivateKey: "key"},
 			want: true,
 		},
 		{
 			name: "SSH with key file",
-			cfg:  TunnelConfig{Type: "ssh", Host: "host", User: "user", KeyFile: "~/.ssh/id_rsa"},
+			cfg:  TunnelConfig{Type: TunnelTypeSSH, Host: "host", User: "user", KeyFile: "~/.ssh/id_rsa"},
 			want: true,
 		},
 		{
 			name: "SSH missing host",
-			cfg:  TunnelConfig{Type: "ssh", User: "user", PrivateKey: "key"},
+			cfg:  TunnelConfig{Type: TunnelTypeSSH, User: "user", PrivateKey: "key"},
 			want: false,
 		},
 		{
 			name: "SSH missing user",
-			cfg:  TunnelConfig{Type: "ssh", Host: "host", PrivateKey: "key"},
+			cfg:  TunnelConfig{Type: TunnelTypeSSH, Host: "host", PrivateKey: "key"},
 			want: false,
 		},
 		{
 			name: "SSH missing key and keyfile",
-			cfg:  TunnelConfig{Type: "ssh", Host: "host", User: "user"},
+			cfg:  TunnelConfig{Type: TunnelTypeSSH, Host: "host", User: "user"},
 			want: false,
 		},
 	}
@@ -104,13 +104,13 @@ func TestTunnelConfigEnabled(t *testing.T) {
 }
 
 func TestTunnelConfigIsSSH(t *testing.T) {
-	if (&TunnelConfig{Type: "ssh"}).IsSSH() != true {
+	if (&TunnelConfig{Type: TunnelTypeSSH}).IsSSH() != true {
 		t.Error("Type=ssh should be SSH")
 	}
 	if (&TunnelConfig{Type: ""}).IsSSH() != false {
 		t.Error("Type=empty should not be SSH")
 	}
-	if (&TunnelConfig{Type: "wireguard"}).IsSSH() != false {
+	if (&TunnelConfig{Type: TunnelTypeWireGuard}).IsSSH() != false {
 		t.Error("Type=wireguard should not be SSH")
 	}
 }
@@ -123,17 +123,17 @@ func TestConnectionEnabled_IMAP(t *testing.T) {
 	}{
 		{
 			name: "IMAP complete",
-			conn: Connection{Type: "imap", Host: "imap.x.com", User: "user", Password: "pass"},
+			conn: Connection{Type: TypeIMAP, Host: "imap.x.com", User: "user", Password: "pass"},
 			want: true,
 		},
 		{
 			name: "IMAP missing password",
-			conn: Connection{Type: "imap", Host: "imap.x.com", User: "user"},
+			conn: Connection{Type: TypeIMAP, Host: "imap.x.com", User: "user"},
 			want: false,
 		},
 		{
 			name: "IMAP missing host",
-			conn: Connection{Type: "imap", User: "user", Password: "pass"},
+			conn: Connection{Type: TypeIMAP, User: "user", Password: "pass"},
 			want: false,
 		},
 	}
@@ -149,13 +149,13 @@ func TestConnectionEnabled_IMAP(t *testing.T) {
 }
 
 func TestValidType_IMAP(t *testing.T) {
-	if !ValidType("imap") {
+	if !ValidType(TypeIMAP) {
 		t.Error("imap should be a valid type")
 	}
 }
 
 func TestApplyConnectionDefaults_IMAP(t *testing.T) {
-	c := Connection{Type: "imap"}
+	c := Connection{Type: TypeIMAP}
 	ApplyConnectionDefaults(&c)
 	if c.Port != 993 {
 		t.Errorf("IMAP default port should be 993, got %d", c.Port)
