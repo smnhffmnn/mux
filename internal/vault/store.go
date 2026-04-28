@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/smnhffmnn/mux/internal/config"
 )
 
 const (
@@ -63,8 +65,7 @@ type StoredCredential struct {
 }
 
 func vaultDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".mux")
+	return config.Dir()
 }
 
 func vaultFilePath() string {

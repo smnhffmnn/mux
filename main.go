@@ -55,7 +55,7 @@ Usage:
   mux git-credential <op>      Git credential helper (get/store/erase)
 
 Options:
-  --config <path>    Config file (default: ~/.mux/config.toml)
+  --config <path>    Config file (default: $XDG_CONFIG_HOME/mux/config.toml or ~/.config/mux/config.toml)
   --port <port>      MCP HTTP port (default: 7700)
   --version          Print version and exit
 
@@ -84,6 +84,10 @@ More info: https://github.com/smnhffmnn/mux
 	if useStdio {
 		log.SetOutput(io.Discard)
 	}
+
+	// One-time migration of pre-XDG installations (~/.mux → ~/.config/mux).
+	// No-op on fresh installs and on Windows; logs and continues on failure.
+	config.MigrateLegacyDir()
 
 	// Load configuration
 	cfg, err := config.Load(flagConfig)
