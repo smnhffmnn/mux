@@ -358,7 +358,7 @@ More info: https://github.com/smnhffmnn/mux
 func gitHostsFromConfig(cfg *config.Config) []vault.GitHost {
 	var hosts []vault.GitHost
 	for _, c := range cfg.AllConnections() {
-		if c.Type == "git" && c.Host != "" && c.User != "" {
+		if c.Type == config.TypeGit && c.Host != "" && c.User != "" {
 			hosts = append(hosts, vault.GitHost{
 				Host:      c.Host,
 				Username:  c.User,

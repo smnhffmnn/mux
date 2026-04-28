@@ -24,116 +24,116 @@ type TypeDef struct {
 // When adding a new connection type, add it here and implement the
 // handler in internal/tools (RegisterConnection switch).
 var AllTypes = []TypeDef{
-	{Type: "postgresql", Label: "PostgreSQL", Fields: []TypeField{
+	{Type: TypePostgreSQL, Label: "PostgreSQL", Fields: []TypeField{
 		{Key: "host", Label: "Host", Placeholder: "localhost"},
 		{Key: "port", Label: "Port", Placeholder: "5432", Small: true},
 		{Key: "user", Label: "User", Placeholder: "postgres"},
 		{Key: "password", Label: "Password", Placeholder: "password", Secret: true},
 		{Key: "database", Label: "Database", Placeholder: "postgres"},
 	}},
-	{Type: "clickhouse", Label: "ClickHouse", Fields: []TypeField{
+	{Type: TypeClickHouse, Label: "ClickHouse", Fields: []TypeField{
 		{Key: "host", Label: "Host", Placeholder: "localhost"},
 		{Key: "port", Label: "Port", Placeholder: "8123", Small: true},
 		{Key: "user", Label: "User", Placeholder: "default"},
 		{Key: "password", Label: "Password", Placeholder: "password", Secret: true},
 		{Key: "database", Label: "Default Database", Placeholder: "default"},
 	}},
-	{Type: "mariadb", Label: "MariaDB", Fields: []TypeField{
+	{Type: TypeMariaDB, Label: "MariaDB", Fields: []TypeField{
 		{Key: "host", Label: "Host", Placeholder: "localhost"},
 		{Key: "port", Label: "Port", Placeholder: "3306", Small: true},
 		{Key: "user", Label: "User", Placeholder: "root"},
 		{Key: "password", Label: "Password", Placeholder: "password", Secret: true},
 		{Key: "database", Label: "Database", Placeholder: "mydb"},
 	}},
-	{Type: "proxy", Label: "MCP Proxy (generic)", Fields: []TypeField{
+	{Type: TypeProxy, Label: "MCP Proxy (generic)", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "https://example.com/mcp"},
 		{Key: "token", Label: "Token", Placeholder: "perm:...", Secret: true},
 	}},
-	{Type: "youtrack", Label: "YouTrack", Fields: []TypeField{
+	{Type: TypeYouTrack, Label: "YouTrack", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "https://instance.myjetbrains.com/mcp"},
 		{Key: "token", Label: "Token", Placeholder: "perm:...", Secret: true},
 	}},
-	{Type: "sentry", Label: "Sentry", Fields: []TypeField{
+	{Type: TypeSentry, Label: "Sentry", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "https://mcp.sentry.dev/mcp"},
 	}},
-	{Type: "netdata", Label: "Netdata", Fields: []TypeField{
+	{Type: TypeNetdata, Label: "Netdata", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "https://app.netdata.cloud/api/v1/mcp"},
 		{Key: "token", Label: "Token", Placeholder: "ndc.xxx", Secret: true},
 	}},
-	{Type: "notion", Label: "Notion", Fields: []TypeField{
+	{Type: TypeNotion, Label: "Notion", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "https://mcp.notion.com/mcp"},
 	}},
-	{Type: "http", Label: "HTTP API", Fields: []TypeField{
+	{Type: TypeHTTP, Label: "HTTP API", Fields: []TypeField{
 		{Key: "url", Label: "Base URL", Placeholder: "https://api.example.com"},
 		{Key: "token", Label: "API Token (optional)", Placeholder: "Bearer token", Secret: true},
 		{Key: "token_header", Label: "Token Header (optional)", Placeholder: "Authorization: Bearer (default)"},
 	}},
-	{Type: "firecrawl", Label: "Firecrawl", Fields: []TypeField{
+	{Type: TypeFirecrawl, Label: "Firecrawl", Fields: []TypeField{
 		{Key: "url", Label: "API URL", Placeholder: "https://api.firecrawl.dev (default)"},
 		{Key: "token", Label: "API Key", Placeholder: "fc-...", Secret: true},
 	}},
-	{Type: "brave", Label: "Brave Search", Fields: []TypeField{
+	{Type: TypeBrave, Label: "Brave Search", Fields: []TypeField{
 		{Key: "url", Label: "API URL", Placeholder: "https://api.search.brave.com (default)"},
 		{Key: "token", Label: "API Key", Placeholder: "BSA...", Secret: true},
 	}},
-	{Type: "microsoft-graph", Label: "Microsoft Graph", Fields: []TypeField{
+	{Type: TypeMicrosoftGraph, Label: "Microsoft Graph", Fields: []TypeField{
 		{Key: "client_id", Label: "Client ID (required)", Placeholder: "Azure App Registration (Application) ID"},
 		{Key: "scopes", Label: "Scopes", Placeholder: "Mail.ReadWrite Mail.Send offline_access (default: Mail-only)"},
 	}},
-	{Type: "google-tagmanager", Label: "Google Tag Manager", Fields: []TypeField{
+	{Type: TypeGoogleTagManager, Label: "Google Tag Manager", Fields: []TypeField{
 		{Key: "token", Label: "Service Account JSON Key", Placeholder: `{"client_email":"...","private_key":"..."}`, Secret: true},
 	}},
-	{Type: "openai", Label: "OpenAI", Fields: []TypeField{
+	{Type: TypeOpenAI, Label: "OpenAI", Fields: []TypeField{
 		{Key: "url", Label: "API URL", Placeholder: "https://api.openai.com (default)"},
 		{Key: "token", Label: "API Key", Placeholder: "sk-...", Secret: true},
 	}},
-	{Type: "elevenlabs", Label: "ElevenLabs", Fields: []TypeField{
+	{Type: TypeElevenLabs, Label: "ElevenLabs", Fields: []TypeField{
 		{Key: "url", Label: "API URL", Placeholder: "https://api.elevenlabs.io (default)"},
 		{Key: "token", Label: "API Key", Placeholder: "xi_...", Secret: true},
 	}},
-	{Type: "recraft", Label: "Recraft", Fields: []TypeField{
+	{Type: TypeRecraft, Label: "Recraft", Fields: []TypeField{
 		{Key: "url", Label: "API URL", Placeholder: "https://external.api.recraft.ai/v1 (default)"},
 		{Key: "token", Label: "API Key", Placeholder: "Recraft API token", Secret: true},
 	}},
-	{Type: "ideogram", Label: "Ideogram", Fields: []TypeField{
+	{Type: TypeIdeogram, Label: "Ideogram", Fields: []TypeField{
 		{Key: "url", Label: "API URL", Placeholder: "https://api.ideogram.ai (default)"},
 		{Key: "token", Label: "API Key", Placeholder: "Ideogram API key", Secret: true},
 	}},
-	{Type: "asana", Label: "Asana", Fields: []TypeField{
+	{Type: TypeAsana, Label: "Asana", Fields: []TypeField{
 		{Key: "token", Label: "Personal Access Token", Placeholder: "0/abc123...", Secret: true},
 	}},
-	{Type: "asana-mcp", Label: "Asana MCP", Fields: []TypeField{
+	{Type: TypeAsanaMCP, Label: "Asana MCP", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "https://mcp.asana.com/v2/mcp (default)"},
 	}},
-	{Type: "gemini", Label: "Google Gemini", Fields: []TypeField{
+	{Type: TypeGemini, Label: "Google Gemini", Fields: []TypeField{
 		{Key: "url", Label: "API URL", Placeholder: "https://generativelanguage.googleapis.com/v1beta (default)"},
 		{Key: "token", Label: "API Key (x-goog-api-key)", Placeholder: "AIzaSy...", Secret: true},
 	}},
-	{Type: "fal-ai", Label: "fal.ai", Fields: []TypeField{
+	{Type: TypeFalAI, Label: "fal.ai", Fields: []TypeField{
 		{Key: "url", Label: "API URL", Placeholder: "https://queue.fal.run (default)"},
 		{Key: "token", Label: "API Key", Placeholder: "fal_...", Secret: true},
 	}},
-	{Type: "imap", Label: "IMAP", Fields: []TypeField{
+	{Type: TypeIMAP, Label: "IMAP", Fields: []TypeField{
 		{Key: "host", Label: "IMAP Host", Placeholder: "imap.example.com"},
 		{Key: "port", Label: "Port", Placeholder: "993", Small: true},
 		{Key: "user", Label: "Email / Username", Placeholder: "user@example.com"},
 		{Key: "password", Label: "Password", Placeholder: "password", Secret: true},
 	}},
-	{Type: "git", Label: "Git Credential", Fields: []TypeField{
+	{Type: TypeGit, Label: "Git Credential", Fields: []TypeField{
 		{Key: "host", Label: "Git Host", Placeholder: "gitlab.com"},
 		{Key: "user", Label: "Username", Placeholder: "oauth2"},
 		{Key: "token", Label: "Personal Access Token", Placeholder: "glpat-... / ghp_...", Secret: true},
 	}},
-	{Type: "meilisearch", Label: "Meilisearch", Fields: []TypeField{
+	{Type: TypeMeilisearch, Label: "Meilisearch", Fields: []TypeField{
 		{Key: "host", Label: "Host", Placeholder: "localhost"},
 		{Key: "port", Label: "Port", Placeholder: "7700", Small: true},
 		{Key: "database", Label: "Index", Placeholder: "docs"},
 		{Key: "token", Label: "API Key", Placeholder: "master-key", Secret: true},
 	}},
-	{Type: "google-workspace", Label: "Google Workspace", Fields: []TypeField{
+	{Type: TypeGoogleWorkspace, Label: "Google Workspace", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "http://localhost:8000/mcp"},
 	}},
-	{Type: "youtrack-agile", Label: "YouTrack Agile", Fields: []TypeField{
+	{Type: TypeYouTrackAgile, Label: "YouTrack Agile", Fields: []TypeField{
 		{Key: "url", Label: "Base URL", Placeholder: "https://instance.myjetbrains.com/youtrack"},
 		{Key: "token", Label: "Permanent Token", Placeholder: "perm:...", Secret: true},
 		{Key: "database", Label: "Board ID", Placeholder: "123-45"},

@@ -86,12 +86,11 @@ read_only = true
 # url = "https://instance.myjetbrains.com/mcp"
 # Token stored as secret (key: "youtrack-token")
 
-# Proxy: OAuth 2.0 + PKCE (e.g. Sentry)
+# Proxy: OAuth 2.0 + PKCE (e.g. Sentry — type "sentry" defaults oauth=true)
 # [[connections]]
 # name = "sentry"
-# type = "proxy"
+# type = "sentry"
 # url = "https://mcp.sentry.dev/mcp"
-# oauth = true
 # OAuth tokens stored as secret (key: "sentry-oauth-token")
 
 # Google Gemini (image generation + multimodal AI)

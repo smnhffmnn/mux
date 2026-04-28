@@ -57,7 +57,9 @@ func Fetch(ctx context.Context, endpoint, token string) (*ProvisionResponse, err
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB
 
 	if resp.StatusCode != http.StatusOK {
-		var jsonErr struct{ Error string `json:"error"` }
+		var jsonErr struct {
+			Error string `json:"error"`
+		}
 		if json.Unmarshal(body, &jsonErr) == nil && jsonErr.Error != "" {
 			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, jsonErr.Error)
 		}
@@ -76,10 +78,10 @@ func Fetch(ctx context.Context, endpoint, token string) (*ProvisionResponse, err
 
 	// Mark all entries as provisioning-sourced
 	for i := range result.Tunnels {
-		result.Tunnels[i].Source = "provisioning"
+		result.Tunnels[i].Source = config.SourceProvisioning
 	}
 	for i := range result.Connections {
-		result.Connections[i].Source = "provisioning"
+		result.Connections[i].Source = config.SourceProvisioning
 	}
 
 	return &result, nil

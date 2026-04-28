@@ -49,118 +49,118 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 	var err error
 
 	switch conn.Type {
-	case "mariadb":
+	case config.TypeMariaDB:
 		var mdb *MariaDB
 		mdb, err = NewMariaDB(conn, dialer)
 		if err == nil {
 			toolDefs = mdb.Tools()
 			closer = mdb
 		}
-	case "clickhouse":
+	case config.TypeClickHouse:
 		var ch *ClickHouse
 		ch, err = NewClickHouse(conn, dialer)
 		if err == nil {
 			toolDefs = ch.Tools()
 			closer = ch
 		}
-	case "postgresql":
+	case config.TypePostgreSQL:
 		var pg *PostgreSQL
 		pg, err = NewPostgreSQL(conn, dialer)
 		if err == nil {
 			toolDefs = pg.Tools()
 			closer = pg
 		}
-	case "http":
+	case config.TypeHTTP:
 		var h *HTTP
 		h, err = NewHTTP(conn, dialer)
 		if err == nil {
 			toolDefs = h.Tools()
 		}
-	case "firecrawl":
+	case config.TypeFirecrawl:
 		var fc *Firecrawl
 		fc, err = NewFirecrawl(conn, dialer)
 		if err == nil {
 			toolDefs = fc.Tools()
 		}
-	case "brave":
+	case config.TypeBrave:
 		var br *Brave
 		br, err = NewBrave(conn, dialer)
 		if err == nil {
 			toolDefs = br.Tools()
 		}
-	case "openai":
+	case config.TypeOpenAI:
 		var oa *OpenAI
 		oa, err = NewOpenAI(conn, dialer)
 		if err == nil {
 			toolDefs = oa.Tools()
 		}
-	case "elevenlabs":
+	case config.TypeElevenLabs:
 		var el *ElevenLabs
 		el, err = NewElevenLabs(conn, dialer)
 		if err == nil {
 			toolDefs = el.Tools()
 		}
-	case "recraft":
+	case config.TypeRecraft:
 		var rc *Recraft
 		rc, err = NewRecraft(conn, dialer)
 		if err == nil {
 			toolDefs = rc.Tools()
 		}
-	case "ideogram":
+	case config.TypeIdeogram:
 		var ig *Ideogram
 		ig, err = NewIdeogram(conn, dialer)
 		if err == nil {
 			toolDefs = ig.Tools()
 		}
-	case "gemini":
+	case config.TypeGemini:
 		var gm *Gemini
 		gm, err = NewGemini(conn, dialer)
 		if err == nil {
 			toolDefs = gm.Tools()
 		}
-	case "fal-ai":
+	case config.TypeFalAI:
 		var fa *FalAI
 		fa, err = NewFalAI(conn, dialer)
 		if err == nil {
 			toolDefs = fa.Tools()
 		}
-	case "microsoft-graph":
+	case config.TypeMicrosoftGraph:
 		var mg *MicrosoftGraph
 		mg, err = NewMicrosoftGraph(conn, dialer)
 		if err == nil {
 			toolDefs = mg.Tools()
 		}
-	case "google-tagmanager":
+	case config.TypeGoogleTagManager:
 		var gtm *GoogleTagManager
 		gtm, err = NewGoogleTagManager(conn, dialer)
 		if err == nil {
 			toolDefs = gtm.Tools()
 		}
-	case "asana":
+	case config.TypeAsana:
 		var a *Asana
 		a, err = NewAsana(conn, dialer)
 		if err == nil {
 			toolDefs = a.Tools()
 		}
-	case "imap":
+	case config.TypeIMAP:
 		var im *IMAP
 		im, err = NewIMAP(conn, dialer)
 		if err == nil {
 			toolDefs = im.Tools()
 		}
-	case "meilisearch":
+	case config.TypeMeilisearch:
 		var ms *Meilisearch
 		ms, err = NewMeilisearch(conn, dialer)
 		if err == nil {
 			toolDefs = ms.Tools()
 		}
-	case "youtrack-agile":
+	case config.TypeYouTrackAgile:
 		var ya *YouTrackAgile
 		ya, err = NewYouTrackAgile(conn, dialer)
 		if err == nil {
 			toolDefs = ya.Tools()
 		}
-	case "git":
+	case config.TypeGit:
 		// Passive connection type — no MCP tools.
 		// Used by the git credential helper (mux git-credential) to look up
 		// PATs from the vault. Visible in connection_list for discoverability.
@@ -205,23 +205,23 @@ func withCallLogging(name string, handler server.ToolHandlerFunc) server.ToolHan
 // Returns empty string for types without default instructions.
 func DefaultInstructions(connType string) string {
 	switch connType {
-	case "openai":
+	case config.TypeOpenAI:
 		return DefaultOpenAIInstructions
-	case "elevenlabs":
+	case config.TypeElevenLabs:
 		return DefaultElevenLabsInstructions
-	case "recraft":
+	case config.TypeRecraft:
 		return DefaultRecraftInstructions
-	case "ideogram":
+	case config.TypeIdeogram:
 		return DefaultIdeogramInstructions
-	case "asana":
+	case config.TypeAsana:
 		return DefaultAsanaInstructions
-	case "asana-mcp":
+	case config.TypeAsanaMCP:
 		return DefaultAsanaMCPInstructions
-	case "gemini":
+	case config.TypeGemini:
 		return DefaultGeminiInstructions
-	case "imap":
+	case config.TypeIMAP:
 		return DefaultIMAPInstructions
-	case "google-workspace":
+	case config.TypeGoogleWorkspace:
 		return DefaultGoogleWorkspaceInstructions
 	default:
 		return ""

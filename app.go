@@ -99,7 +99,6 @@ func NewApp(cfg *config.Config, version, buildTime string, port int, mcpServer *
 	}
 }
 
-
 // --- Hot-reload: ToolReloader interface ---
 
 // ReloadConnection re-registers MCP tools for a connection (implements tools.ToolReloader).
@@ -258,11 +257,11 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 
 	var summary string
 	switch {
-	case config.IsProxyType(conn.Type), conn.Type == "http", conn.Type == "firecrawl", conn.Type == "brave", conn.Type == "openai", conn.Type == "elevenlabs", conn.Type == "recraft", conn.Type == "ideogram", conn.Type == "gemini":
+	case config.IsProxyType(conn.Type), conn.Type == config.TypeHTTP, conn.Type == config.TypeFirecrawl, conn.Type == config.TypeBrave, conn.Type == config.TypeOpenAI, conn.Type == config.TypeElevenLabs, conn.Type == config.TypeRecraft, conn.Type == config.TypeIdeogram, conn.Type == config.TypeGemini:
 		summary = conn.URL
-	case conn.Type == "microsoft-graph":
+	case conn.Type == config.TypeMicrosoftGraph:
 		summary = "Microsoft Graph API"
-	case conn.Type == "google-tagmanager":
+	case conn.Type == config.TypeGoogleTagManager:
 		summary = "Google Tag Manager"
 	default:
 		if conn.Host != "" {
@@ -321,7 +320,7 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 		oauthOK = tokenStore.HasToken()
 	}
 
-	isDeviceAuth := conn.Type == "microsoft-graph"
+	isDeviceAuth := conn.Type == config.TypeMicrosoftGraph
 	deviceAuthOK := false
 	if isDeviceAuth {
 		if rt, err := config.GetSecret(conn.Name + "-oauth-refresh-token"); err == nil && rt != "" {
@@ -330,22 +329,22 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 	}
 
 	return ConnInfo{
-		Name:         conn.Name,
-		Type:         conn.Type,
-		TypeLabel:    config.TypeLabel(conn.Type),
-		Configured:   conn.Enabled(),
-		Source:       conn.Source,
-		Tunnel:       conn.Tunnel,
-		Summary:      summary,
-		IsProxy:      config.IsProxyType(conn.Type),
-		IsOAuth:      isOAuth,
-		OAuthOK:      oauthOK,
-		IsProvisioned:        conn.Source == "provisioning",
-		IsDeviceAuth: isDeviceAuth,
-		DeviceAuthOK: deviceAuthOK,
-		ReadOnly:     conn.ReadOnly,
-		Instructions: conn.Instructions,
-		Fields:       fields,
+		Name:          conn.Name,
+		Type:          conn.Type,
+		TypeLabel:     config.TypeLabel(conn.Type),
+		Configured:    conn.Enabled(),
+		Source:        conn.Source,
+		Tunnel:        conn.Tunnel,
+		Summary:       summary,
+		IsProxy:       config.IsProxyType(conn.Type),
+		IsOAuth:       isOAuth,
+		OAuthOK:       oauthOK,
+		IsProvisioned: conn.Source == config.SourceProvisioning,
+		IsDeviceAuth:  isDeviceAuth,
+		DeviceAuthOK:  deviceAuthOK,
+		ReadOnly:      conn.ReadOnly,
+		Instructions:  conn.Instructions,
+		Fields:        fields,
 	}
 }
 
@@ -436,7 +435,7 @@ func (a *App) AddConnection(name, typ string) (*ConnInfo, error) {
 	conn := config.Connection{
 		Name:   name,
 		Type:   typ,
-		Source: "local",
+		Source: config.SourceLocal,
 	}
 	config.ApplyConnectionDefaults(&conn)
 	a.cfg.Connections = append(a.cfg.Connections, conn)
@@ -470,7 +469,7 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 	if conn == nil {
 		return nil, fmt.Errorf("connection not found: %s", name)
 	}
-	isProvisioned := conn.Source == "provisioning"
+	isProvisioned := conn.Source == config.SourceProvisioning
 
 	if !isProvisioned {
 		if fields.Host != "" {
@@ -537,7 +536,7 @@ func (a *App) DeleteConnection(name string) error {
 	var newConns []config.Connection
 	for _, c := range a.cfg.Connections {
 		if c.Name == name {
-			if c.Source == "provisioning" {
+			if c.Source == config.SourceProvisioning {
 				return fmt.Errorf("provisioned connections cannot be deleted")
 			}
 			found = true
@@ -565,7 +564,7 @@ func (a *App) AddTunnel(name, typ string) (*TunnelInfo, error) {
 		return nil, fmt.Errorf("name is required")
 	}
 
-	if typ != "wireguard" && typ != "ssh" {
+	if typ != config.TunnelTypeWireGuard && typ != config.TunnelTypeSSH {
 		return nil, fmt.Errorf("type must be 'wireguard' or 'ssh'")
 	}
 
@@ -576,9 +575,9 @@ func (a *App) AddTunnel(name, typ string) (*TunnelInfo, error) {
 	t := config.TunnelConfig{
 		Name:   name,
 		Type:   typ,
-		Source: "local",
+		Source: config.SourceLocal,
 	}
-	if typ == "ssh" {
+	if typ == config.TunnelTypeSSH {
 		t.Port = 22
 	} else {
 		t.MTU = 1420
@@ -600,7 +599,7 @@ func (a *App) SaveTunnel(name string, fields SaveTunnelRequest) (*TunnelInfo, er
 	if t == nil {
 		return nil, fmt.Errorf("tunnel not found: %s", name)
 	}
-	isProvisioned := t.Source == "provisioning"
+	isProvisioned := t.Source == config.SourceProvisioning
 
 	if !isProvisioned {
 		// WireGuard fields
@@ -678,7 +677,7 @@ func (a *App) DeleteTunnel(name string) error {
 	var newTunnels []config.TunnelConfig
 	for _, t := range a.cfg.Tunnels {
 		if t.Name == name {
-			if t.Source == "provisioning" {
+			if t.Source == config.SourceProvisioning {
 				return fmt.Errorf("provisioned tunnels cannot be deleted")
 			}
 			found = true
@@ -705,9 +704,9 @@ func (a *App) DeleteTunnel(name string) error {
 
 // buildTunnelInfo creates a TunnelInfo from a TunnelConfig.
 func buildTunnelInfo(t config.TunnelConfig, connected bool) TunnelInfo {
-	typ := "wireguard"
+	typ := config.TunnelTypeWireGuard
 	if t.IsSSH() {
-		typ = "ssh"
+		typ = config.TunnelTypeSSH
 	}
 	return TunnelInfo{
 		Name:            t.Name,
@@ -772,41 +771,41 @@ func (a *App) TestConnection(name string) *TestResult {
 	var result testResponse
 
 	switch conn.Type {
-	case "mariadb":
+	case config.TypeMariaDB:
 		result = a.testMariaDB(*conn)
-	case "clickhouse":
+	case config.TypeClickHouse:
 		result = a.testClickHouse(*conn)
-	case "postgresql":
+	case config.TypePostgreSQL:
 		result = a.testPostgreSQL(*conn)
-	case "http":
+	case config.TypeHTTP:
 		result = a.testHTTP(*conn)
-	case "firecrawl":
+	case config.TypeFirecrawl:
 		result = a.testFirecrawl(*conn)
-	case "brave":
+	case config.TypeBrave:
 		result = a.testBrave(*conn)
-	case "openai":
+	case config.TypeOpenAI:
 		result = a.testOpenAI(*conn)
-	case "elevenlabs":
+	case config.TypeElevenLabs:
 		result = a.testElevenLabs(*conn)
-	case "recraft":
+	case config.TypeRecraft:
 		result = a.testRecraft(*conn)
-	case "ideogram":
+	case config.TypeIdeogram:
 		result = a.testIdeogram(*conn)
-	case "microsoft-graph":
+	case config.TypeMicrosoftGraph:
 		result = a.testMicrosoftGraph(*conn)
-	case "google-tagmanager":
+	case config.TypeGoogleTagManager:
 		result = a.testGoogleTagManager(*conn)
-	case "meilisearch":
+	case config.TypeMeilisearch:
 		result = a.testMeilisearch(*conn)
-	case "youtrack-agile":
+	case config.TypeYouTrackAgile:
 		result = a.testYouTrackAgile(*conn)
-	case "asana":
+	case config.TypeAsana:
 		result = a.testAsana(*conn)
-	case "gemini":
+	case config.TypeGemini:
 		result = a.testGemini(*conn)
-	case "imap":
+	case config.TypeIMAP:
 		result = a.testIMAP(*conn)
-	case "git":
+	case config.TypeGit:
 		result = a.testGit(*conn)
 	default:
 		if config.IsProxyType(conn.Type) {
@@ -870,7 +869,7 @@ func (a *App) SyncProvisioning() (*PageData, error) {
 	// Collect old provisioned connection names before overwriting (per endpoint).
 	oldProvisioned := make(map[string]bool)
 	for _, c := range a.cfg.AllConnections() {
-		if c.Source == "provisioning" {
+		if c.Source == config.SourceProvisioning {
 			oldProvisioned[c.Name] = true
 		}
 	}
@@ -1124,7 +1123,7 @@ func (a *App) GetOAuthStatus(name string) *OAuthStatus {
 // StartDeviceAuth begins a device code auth flow (Microsoft Graph).
 func (a *App) StartDeviceAuth(name string) (*DeviceAuthStart, error) {
 	conn := a.cfg.FindAnyConnection(name)
-	if conn == nil || conn.Type != "microsoft-graph" {
+	if conn == nil || conn.Type != config.TypeMicrosoftGraph {
 		return nil, fmt.Errorf("device auth not supported for: %s", name)
 	}
 	if conn.ClientID == "" {
@@ -1477,7 +1476,7 @@ func (a *App) testHTTP(conn config.Connection) testResponse {
 	}
 
 	testURL := conn.URL
-	if conn.Source == "provisioning" {
+	if conn.Source == config.SourceProvisioning {
 		if epName, ok := a.cfg.ConnectionEndpointName(conn.Name); ok {
 			if ep := a.cfg.FindProvisioning(epName); ep != nil && ep.Endpoint != "" {
 				testURL = ep.Endpoint

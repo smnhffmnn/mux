@@ -455,16 +455,15 @@ url = "https://instance.myjetbrains.com/mcp"
 # OAuth proxy
 [[connections]]
 name = "sentry"
-type = "proxy"
+type = "sentry"
 url = "https://mcp.sentry.dev/mcp"
-oauth = true
 ```
 
 **MCP tools exposed**: All tools from the upstream server, prefixed with `{name}_`.
 
 URLs ending in `/sse` use SSE transport; everything else uses Streamable HTTP.
 
-Proxy-type aliases (`youtrack`, `sentry`, `netdata`, `notion`, `asana-mcp`) behave identically to `proxy` but provide semantic clarity. `asana-mcp` additionally defaults `oauth = true` and URL to `https://mcp.asana.com/v2/mcp`.
+Proxy-type aliases (`youtrack`, `sentry`, `netdata`, `notion`, `asana-mcp`) behave identically to `proxy` but provide semantic clarity. `sentry` and `notion` additionally default `oauth = true`. `asana-mcp` defaults `oauth = true` and URL to `https://mcp.asana.com/v2/mcp`.
 
 ### Google Workspace
 

@@ -15,7 +15,7 @@ import (
 func TestNewFalAI_RequiresToken(t *testing.T) {
 	conn := config.Connection{
 		Name: "test-fal",
-		Type: "fal-ai",
+		Type: config.TypeFalAI,
 		URL:  "https://queue.fal.run",
 	}
 	_, err := NewFalAI(conn, nil)
@@ -27,7 +27,7 @@ func TestNewFalAI_RequiresToken(t *testing.T) {
 func TestNewFalAI_DefaultURL(t *testing.T) {
 	conn := config.Connection{
 		Name:  "test-fal",
-		Type:  "fal-ai",
+		Type:  config.TypeFalAI,
 		Token: "fal_test",
 	}
 	fa, err := NewFalAI(conn, nil)
@@ -42,7 +42,7 @@ func TestNewFalAI_DefaultURL(t *testing.T) {
 func TestNewFalAI_CustomURL(t *testing.T) {
 	conn := config.Connection{
 		Name:  "test-fal",
-		Type:  "fal-ai",
+		Type:  config.TypeFalAI,
 		URL:   "https://custom.fal.run/",
 		Token: "fal_test",
 	}
@@ -58,7 +58,7 @@ func TestNewFalAI_CustomURL(t *testing.T) {
 func TestFalAI_ToolCount(t *testing.T) {
 	conn := config.Connection{
 		Name:  "test-fal",
-		Type:  "fal-ai",
+		Type:  config.TypeFalAI,
 		Token: "fal_test",
 	}
 	fa, err := NewFalAI(conn, nil)
@@ -82,13 +82,13 @@ func TestFalAI_ToolCount(t *testing.T) {
 }
 
 func TestFalAI_TypeRegistered(t *testing.T) {
-	if !config.ValidType("fal-ai") {
+	if !config.ValidType(config.TypeFalAI) {
 		t.Error("fal-ai should be a valid connection type")
 	}
 }
 
 func TestFalAI_EnabledRequiresToken(t *testing.T) {
-	conn := config.Connection{Type: "fal-ai"}
+	conn := config.Connection{Type: config.TypeFalAI}
 	if conn.Enabled() {
 		t.Error("fal-ai without token should not be enabled")
 	}
@@ -99,7 +99,7 @@ func TestFalAI_EnabledRequiresToken(t *testing.T) {
 }
 
 func TestFalAI_DefaultsApplied(t *testing.T) {
-	conn := config.Connection{Type: "fal-ai"}
+	conn := config.Connection{Type: config.TypeFalAI}
 	config.ApplyConnectionDefaults(&conn)
 	if conn.URL != "https://queue.fal.run" {
 		t.Errorf("expected default URL, got %q", conn.URL)
@@ -107,7 +107,7 @@ func TestFalAI_DefaultsApplied(t *testing.T) {
 }
 
 func TestFalAI_ValidateQueueURL(t *testing.T) {
-	fa, err := NewFalAI(config.Connection{Type: "fal-ai", Token: "t"}, nil)
+	fa, err := NewFalAI(config.Connection{Type: config.TypeFalAI, Token: "t"}, nil)
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestFalAI_HandleStatus_AcceptsInProgress(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			fa, err := NewFalAI(config.Connection{Type: "fal-ai", Token: "t", URL: srv.URL}, nil)
+			fa, err := NewFalAI(config.Connection{Type: config.TypeFalAI, Token: "t", URL: srv.URL}, nil)
 			if err != nil {
 				t.Fatalf("NewFalAI: %v", err)
 			}

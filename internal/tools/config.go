@@ -296,7 +296,7 @@ func (ct *ConfigTools) handleConnectionList(_ context.Context, _ mcp.CallToolReq
 			"source": t.Source,
 		}
 		if t.IsSSH() {
-			entry["type"] = "ssh"
+			entry["type"] = config.TunnelTypeSSH
 			entry["host"] = t.Host
 			entry["port"] = t.Port
 			entry["user"] = t.User
@@ -305,7 +305,7 @@ func (ct *ConfigTools) handleConnectionList(_ context.Context, _ mcp.CallToolReq
 			}
 			entry["private_key_set"] = t.PrivateKey != ""
 		} else {
-			entry["type"] = "wireguard"
+			entry["type"] = config.TunnelTypeWireGuard
 			entry["peer_endpoint"] = t.PeerEndpoint
 			entry["tunnel_address"] = t.TunnelAddress
 			if t.AllowedIPs != "" {
@@ -354,7 +354,7 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 	conn := config.Connection{
 		Name:   name,
 		Type:   typ,
-		Source: "local",
+		Source: config.SourceLocal,
 	}
 
 	// Optional fields
@@ -410,7 +410,7 @@ func (ct *ConfigTools) handleConnectionDelete(_ context.Context, req mcp.CallToo
 	var newConns []config.Connection
 	for _, c := range ct.cfg.Connections {
 		if c.Name == name {
-			if c.Source == "provisioning" {
+			if c.Source == config.SourceProvisioning {
 				return mcp.NewToolResultError(fmt.Sprintf("connection %q is provisioned and cannot be deleted", name)), nil
 			}
 			found = true
@@ -451,18 +451,18 @@ func (ct *ConfigTools) handleTunnelAdd(_ context.Context, req mcp.CallToolReques
 		return mcp.NewToolResultError(fmt.Sprintf("tunnel %q already exists", name)), nil
 	}
 
-	typ := req.GetString("type", "wireguard")
-	if typ != "wireguard" && typ != "ssh" {
+	typ := req.GetString("type", config.TunnelTypeWireGuard)
+	if typ != config.TunnelTypeWireGuard && typ != config.TunnelTypeSSH {
 		return mcp.NewToolResultError("type must be 'wireguard' or 'ssh'"), nil
 	}
 
 	t := config.TunnelConfig{
 		Name:   name,
 		Type:   typ,
-		Source: "local",
+		Source: config.SourceLocal,
 	}
 
-	if typ == "ssh" {
+	if typ == config.TunnelTypeSSH {
 		t.Host = req.GetString("host", "")
 		if v, ok := req.GetArguments()["port"].(float64); ok && v > 0 {
 			t.Port = int(v)
@@ -489,7 +489,7 @@ func (ct *ConfigTools) handleTunnelAdd(_ context.Context, req mcp.CallToolReques
 	}
 
 	hint := fmt.Sprintf("tunnel %q (%s) created", name, typ)
-	if typ == "ssh" {
+	if typ == config.TunnelTypeSSH {
 		hint += ". Use secret_set with key 'tunnel-" + name + "-private-key' to store the SSH private key (or set key_file)."
 	} else {
 		hint += ". Use secret_set with key 'tunnel-" + name + "-private-key' to store the WireGuard private key."
@@ -507,7 +507,7 @@ func (ct *ConfigTools) handleTunnelDelete(_ context.Context, req mcp.CallToolReq
 	var newTunnels []config.TunnelConfig
 	for _, t := range ct.cfg.Tunnels {
 		if t.Name == name {
-			if t.Source == "provisioning" {
+			if t.Source == config.SourceProvisioning {
 				return mcp.NewToolResultError(fmt.Sprintf("tunnel %q is provisioned and cannot be deleted", name)), nil
 			}
 			found = true
@@ -646,7 +646,7 @@ func (ct *ConfigTools) handleSecretCheck(_ context.Context, req mcp.CallToolRequ
 			_, err = config.GetSecret(c.Name + "-oauth-token")
 			secrets[c.Name+"-oauth-token"] = err == nil
 		}
-		if c.Type == "microsoft-graph" {
+		if c.Type == config.TypeMicrosoftGraph {
 			_, err = config.GetSecret(c.Name + "-oauth-refresh-token")
 			secrets[c.Name+"-oauth-refresh-token"] = err == nil
 		}
