@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"time"
+
+	"github.com/smnhffmnn/mux/internal/config"
 )
 
 const (
@@ -64,14 +65,7 @@ type StoredCredential struct {
 }
 
 func vaultDir() string {
-	home, _ := os.UserHomeDir()
-	if runtime.GOOS == "windows" {
-		return filepath.Join(home, ".mux")
-	}
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "mux")
-	}
-	return filepath.Join(home, ".config", "mux")
+	return config.Dir()
 }
 
 func vaultFilePath() string {
