@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -15,7 +16,12 @@ import (
 	"github.com/smnhffmnn/mux/internal/config"
 )
 
-const youtrackAgileMaxBody = 256 * 1024 // 256 KB
+const youtrackAgileMaxBody = 4 * 1024 * 1024 // 4 MB
+
+// youtrackAgileListFetchTop is the upper bound we request from YouTrack so we
+// can reverse the natural (ascending) order client-side and return the newest
+// sprints first. Generously sized — boards rarely accumulate this many sprints.
+const youtrackAgileListFetchTop = 10000
 
 // YouTrackAgile wraps the YouTrack Agile Board REST API as MCP tools.
 type YouTrackAgile struct {
@@ -97,14 +103,46 @@ func (y *YouTrackAgile) handleListSprints(ctx context.Context, req mcp.CallToolR
 		top = int(v)
 	}
 
-	path := fmt.Sprintf("/api/agiles/%s/sprints?fields=id,name,start,finish&$top=%d", y.boardID, top)
-	return y.doGet(ctx, path)
+	// YouTrack returns sprints in ascending order (oldest first) and exposes
+	// no $orderBy/$reverse parameter on this endpoint. To honor the documented
+	// "newest first" contract we fetch the full list, reverse it, and trim.
+	path := fmt.Sprintf("/api/agiles/%s/sprints?fields=id,name,start,finish&$top=%d", y.boardID, youtrackAgileListFetchTop)
+	body, err := y.fetch(ctx, path)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	var sprints []json.RawMessage
+	if err := json.Unmarshal(body, &sprints); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("decode sprints: %v", err)), nil
+	}
+
+	for i, j := 0, len(sprints)-1; i < j; i, j = i+1, j-1 {
+		sprints[i], sprints[j] = sprints[j], sprints[i]
+	}
+	if len(sprints) > top {
+		sprints = sprints[:top]
+	}
+
+	out, err := json.Marshal(sprints)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("encode sprints: %v", err)), nil
+	}
+	return mcp.NewToolResultText(string(out)), nil
 }
 
 func (y *YouTrackAgile) doGet(ctx context.Context, path string) (*mcp.CallToolResult, error) {
+	body, err := y.fetch(ctx, path)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(string(body)), nil
+}
+
+func (y *YouTrackAgile) fetch(ctx context.Context, path string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, y.baseURL+path, nil)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("create request: %v", err)), nil
+		return nil, fmt.Errorf("create request: %w", err)
 	}
 
 	req.Header.Set("Accept", "application/json")
@@ -112,18 +150,18 @@ func (y *YouTrackAgile) doGet(ctx context.Context, path string) (*mcp.CallToolRe
 
 	resp, err := y.client.Do(req)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("request failed: %v", err)), nil
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, youtrackAgileMaxBody))
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("read response: %v", err)), nil
+		return nil, fmt.Errorf("read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return mcp.NewToolResultError(fmt.Sprintf("YouTrack API error (HTTP %d): %s", resp.StatusCode, string(body))), nil
+		return nil, fmt.Errorf("YouTrack API error (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
-	return mcp.NewToolResultText(string(body)), nil
+	return body, nil
 }
