@@ -50,15 +50,68 @@ const (
 // Dir returns the mux configuration directory.
 // Windows: %USERPROFILE%\.mux
 // Otherwise: $XDG_CONFIG_HOME/mux if set, ~/.config/mux as fallback.
+//
+// As a transitional aid for installations created before the XDG layout: when
+// the preferred path does not yet exist but the legacy ~/.mux directory does,
+// Dir returns the legacy path. Callers should invoke MigrateLegacyDir once at
+// startup so the directory is moved on first run after the upgrade; until
+// that succeeds, mux keeps reading and writing the legacy location.
 func Dir() string {
 	home, _ := os.UserHomeDir()
 	if runtime.GOOS == "windows" {
 		return filepath.Join(home, ".mux")
 	}
+	preferred := preferredDir(home)
+	if _, err := os.Stat(preferred); err == nil {
+		return preferred
+	}
+	legacy := filepath.Join(home, ".mux")
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy
+	}
+	return preferred
+}
+
+// preferredDir returns the XDG-compliant config directory, preferring an
+// explicit XDG_CONFIG_HOME over the default ~/.config layout.
+func preferredDir(home string) string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, ServiceName)
 	}
 	return filepath.Join(home, ".config", ServiceName)
+}
+
+// MigrateLegacyDir performs a one-time migration of ~/.mux to the preferred
+// XDG path. It is safe to call on every startup — the function is a no-op
+// when there is nothing to migrate, when both paths already exist, or on
+// Windows. Failures are logged but not fatal: Dir falls back to the legacy
+// path so mux continues to find the user's data.
+func MigrateLegacyDir() {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	legacy := filepath.Join(home, ".mux")
+	if _, err := os.Stat(legacy); err != nil {
+		return
+	}
+	preferred := preferredDir(home)
+	if _, err := os.Stat(preferred); err == nil {
+		log.Printf("[config] WARN: both legacy %s and %s exist; using %s — please reconcile and remove the legacy directory", legacy, preferred, preferred)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(preferred), 0o700); err != nil {
+		log.Printf("[config] WARN: could not prepare %s (%v); continuing to read from %s", filepath.Dir(preferred), err, legacy)
+		return
+	}
+	if err := os.Rename(legacy, preferred); err != nil {
+		log.Printf("[config] WARN: could not migrate %s to %s (%v); continuing to read from the legacy path — please move it manually", legacy, preferred, err)
+		return
+	}
+	log.Printf("[config] Migrated config directory from %s to %s", legacy, preferred)
 }
 
 // --- Core types ---

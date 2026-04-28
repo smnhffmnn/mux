@@ -1,6 +1,9 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -156,5 +159,144 @@ func TestApplyConnectionDefaults_IMAP(t *testing.T) {
 	ApplyConnectionDefaults(&c)
 	if c.Port != 993 {
 		t.Errorf("IMAP default port should be 993, got %d", c.Port)
+	}
+}
+
+func TestDir_PreferenceAndFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Dir uses ~/.mux on Windows; XDG fallback test does not apply")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	preferred := filepath.Join(home, ".config", "mux")
+	legacy := filepath.Join(home, ".mux")
+
+	// Neither path exists → return preferred so first-write lands there.
+	if got := Dir(); got != preferred {
+		t.Errorf("empty home: Dir() = %q, want %q", got, preferred)
+	}
+
+	// Legacy exists, preferred does not → return legacy so existing
+	// installations keep finding their data.
+	if err := os.MkdirAll(legacy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := Dir(); got != legacy {
+		t.Errorf("legacy only: Dir() = %q, want %q", got, legacy)
+	}
+
+	// Preferred exists → always wins, regardless of legacy.
+	if err := os.MkdirAll(preferred, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := Dir(); got != preferred {
+		t.Errorf("both exist: Dir() = %q, want %q", got, preferred)
+	}
+}
+
+func TestDir_XDGConfigHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("XDG_CONFIG_HOME is not honored on Windows")
+	}
+
+	home := t.TempDir()
+	xdg := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	want := filepath.Join(xdg, "mux")
+	if got := Dir(); got != want {
+		t.Errorf("Dir() = %q, want %q", got, want)
+	}
+}
+
+func TestMigrateLegacyDir_MovesLegacy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("migration is non-Windows only")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	legacy := filepath.Join(home, ".mux")
+	preferred := filepath.Join(home, ".config", "mux")
+
+	if err := os.MkdirAll(legacy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(legacy, "config.toml")
+	if err := os.WriteFile(marker, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	MigrateLegacyDir()
+
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Errorf("legacy %s should be gone, stat err = %v", legacy, err)
+	}
+	moved := filepath.Join(preferred, "config.toml")
+	data, err := os.ReadFile(moved)
+	if err != nil {
+		t.Fatalf("expected file at %s, got err %v", moved, err)
+	}
+	if string(data) != "hello" {
+		t.Errorf("file content = %q, want %q", data, "hello")
+	}
+}
+
+func TestMigrateLegacyDir_NoLegacyIsNoOp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("migration is non-Windows only")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	MigrateLegacyDir()
+
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("home should remain empty, has %d entries", len(entries))
+	}
+}
+
+func TestMigrateLegacyDir_BothExistKeepsBoth(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("migration is non-Windows only")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	legacy := filepath.Join(home, ".mux")
+	preferred := filepath.Join(home, ".config", "mux")
+	for _, p := range []string{legacy, preferred} {
+		if err := os.MkdirAll(p, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacyMarker := filepath.Join(legacy, "old.toml")
+	preferredMarker := filepath.Join(preferred, "new.toml")
+	for _, p := range []string{legacyMarker, preferredMarker} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	MigrateLegacyDir()
+
+	for _, p := range []string{legacyMarker, preferredMarker} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s should still exist: %v", p, err)
+		}
 	}
 }

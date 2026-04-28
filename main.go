@@ -85,6 +85,10 @@ More info: https://github.com/smnhffmnn/mux
 		log.SetOutput(io.Discard)
 	}
 
+	// One-time migration of pre-XDG installations (~/.mux → ~/.config/mux).
+	// No-op on fresh installs and on Windows; logs and continues on failure.
+	config.MigrateLegacyDir()
+
 	// Load configuration
 	cfg, err := config.Load(flagConfig)
 	if err != nil {
