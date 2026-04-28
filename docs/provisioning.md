@@ -110,7 +110,7 @@ All fields use **camelCase** JSON keys.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | yes | Unique connection identifier |
-| `type` | string | yes | One of: `mariadb`, `postgresql`, `clickhouse`, `proxy`, `youtrack`, `sentry`, `netdata`, `notion`, `http`, `microsoft-graph`, `openai`, `elevenlabs`, `brave`, `firecrawl`, `google-tagmanager`, `google-workspace` |
+| `type` | string | yes | One of the connection types listed in [connections.md](connections.md). The canonical list lives in `internal/config/identifiers.go`. |
 | `host` | string | databases | Database hostname or IP |
 | `port` | integer | no | Port number (defaults applied per type: MariaDB 3306, PostgreSQL 5432, ClickHouse 8123) |
 | `user` | string | databases | Database username |
@@ -120,7 +120,7 @@ All fields use **camelCase** JSON keys.
 | `secure` | boolean | no | TLS for ClickHouse HTTP (default: false) |
 | `url` | string | proxy/http/api | Endpoint URL |
 | `token` | string | no | API key or Bearer token. If omitted, mux checks the secret store for `{name}-token`. |
-| `oauth` | boolean | no | Use OAuth 2.0 + PKCE for proxy connections (default: false) |
+| `oauth` | boolean | no | Use OAuth 2.0 + PKCE for proxy connections (default: false). The `sentry`, `notion`, and `asana-mcp` types force `oauth: true` regardless of the JSON value — these proxy types only support OAuth. |
 | `scopes` | string | no | OAuth scopes override (microsoft-graph only) |
 | `tunnel` | string | no | Name of a tunnel to route through |
 | `instructions` | string | no | Instructions for AI agents describing the connection |

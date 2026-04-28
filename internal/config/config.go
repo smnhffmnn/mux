@@ -710,6 +710,8 @@ func ApplyConnectionDefaults(c *Connection) {
 		if c.URL == "" {
 			c.URL = "https://mcp.notion.com/mcp"
 		}
+	case TypeSentry:
+		c.OAuth = true
 	case TypeGemini:
 		if c.URL == "" {
 			c.URL = "https://generativelanguage.googleapis.com/v1beta"
