@@ -99,7 +99,7 @@ tunnel = "office-vpn"
 
 ### Microsoft Graph
 
-Accesses Microsoft 365 mail and SharePoint via the Microsoft Graph REST API. Authentication uses the OAuth 2.0 device code flow -- no client secret needed, just sign in with your browser when prompted.
+Accesses Microsoft 365 mail, calendar, and SharePoint via the Microsoft Graph REST API. Authentication uses the OAuth 2.0 device code flow -- no client secret needed, just sign in with your browser when prompted.
 
 **Required fields**: `name`, `type`
 
@@ -107,7 +107,7 @@ Accesses Microsoft 365 mail and SharePoint via the Microsoft Graph REST API. Aut
 
 **Secret**: `{name}-oauth-refresh-token` in secret store (stored automatically after first login)
 
-Default scopes: `User.Read Mail.Read Mail.ReadWrite Mail.Send offline_access`
+Default scopes: `User.Read Mail.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Calendars.Read.Shared offline_access`
 
 ```toml
 [[connections]]
@@ -139,6 +139,12 @@ type = "microsoft-graph"
 | `{name}_sp_get_item_versions` | Get file version history. Parameters: `drive_id`, `item_id` (required). |
 | `{name}_sp_storage_report` | SharePoint storage usage report (admin only). Parameter: `period` (D7/D30/D90/D180). |
 | `{name}_sp_search` | Search files/folders in a drive. Parameters: `drive_id`, `query` (required), `top`. |
+| `{name}_cal_calendar_view` | List events in a time range. Recurring series are expanded into individual occurrences. Parameters: `start`, `end` (required), `top` (optional). |
+| `{name}_cal_get_event` | Get a single event by ID, including body, attendees, and online meeting info. Parameter: `event_id` (required). |
+| `{name}_cal_create_event` | Create a calendar event. Parameters: `subject`, `start`, `end` (required), plus `time_zone`, `body`, `location`, `attendees`, `online_meeting`, `all_day` (optional). |
+| `{name}_cal_update_event` | Update fields on an existing event. Parameter: `event_id` (required), plus any of `subject`, `start`, `end`, `time_zone`, `body`, `location`, `attendees`. |
+| `{name}_cal_delete_event` | Delete an event. Parameter: `event_id` (required). For meetings the user organized, this cancels and notifies attendees. |
+| `{name}_cal_get_schedule` | Get free/busy availability for one or more mailboxes. Parameters: `schedules`, `start`, `end` (required), `time_zone`, `interval` (optional, 5–1440 minutes). |
 
 ### OpenAI
 

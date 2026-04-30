@@ -20,16 +20,19 @@
    this is the value that goes in the `Client ID` connection field.
 6. Under **Authentication**, enable **Allow public client flows** (required for
    the device code flow).
-7. Under **API permissions**, add the Microsoft Graph permissions you need,
-   e.g. `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `Files.ReadWrite`,
-   `offline_access`. Grant admin consent if your tenant requires it.
+7. Under **API permissions**, add the Microsoft Graph permissions you need.
+   For mux's default tools you need `User.Read`, `Mail.Read`, `Mail.ReadWrite`,
+   `Mail.Send`, `Calendars.ReadWrite`, `Calendars.Read.Shared`, and
+   `offline_access`. Add `Files.ReadWrite` or others if you plan to override
+   `Scopes` to use additional tools. Grant admin consent if your tenant
+   requires it.
 
 ## Fields
 
 | Field | Description |
 |------|-------------|
 | **Client ID** (required) | Application (client) ID of your Azure App Registration. |
-| Scopes | Space-separated OAuth scopes. Default: `User.Read Mail.Read Mail.ReadWrite Mail.Send offline_access` (mail only). Override this if your app grants additional permissions (Calendar, Files, Teams, etc.) and you want them in the issued token. |
+| Scopes | Space-separated OAuth scopes. Default: `User.Read Mail.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Calendars.Read.Shared offline_access` (mail + calendar). Override this if your app grants additional permissions (Files, Teams, etc.) and you want them in the issued token. |
 
 ## After creating
 
