@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	hyperbrowserMaxBody            = 5 * 1024 * 1024 // 5 MB — screenshots & full-page HTML
+	hyperbrowserMaxBody            = 5 * 1024 * 1024  // 5 MB — most responses
+	hyperbrowserAgentMaxBody       = 50 * 1024 * 1024 // 50 MB — browser-use status can ship 1 MB of base64 screenshot per step
 	hyperbrowserScrapeTimeout      = 90 * time.Second
 	hyperbrowserExtractTimeout     = 180 * time.Second
 	hyperbrowserCrawlStartTimeout  = 30 * time.Second
@@ -32,6 +33,20 @@ const (
 // so user-supplied job_id / session_id values cannot inject path segments
 // or query strings into URLs we build.
 var validJobID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+// screenshotField matches "screenshot":"<base64>" pairs anywhere in a JSON
+// document. We strip these bytes-level on the agent_status response BEFORE
+// json.Unmarshal — purely an allocator optimisation: a 20-step Browser-Use
+// run ships ~20 MB of base64 that the post-Unmarshal allowlist would discard
+// anyway, but we'd materialise it as Go strings/maps first. Stripping early
+// keeps peak memory roughly one body's worth instead of three.
+//
+// Recovery from truncation is NOT a goal of this regex (the pattern requires
+// the closing quote, so a mid-string cut won't match). The real truncation
+// guard is the higher hyperbrowserAgentMaxBody cap on the response itself.
+//
+// Base64 cannot contain double quotes, so the simple `[^"]*` class is safe.
+var screenshotField = regexp.MustCompile(`"screenshot":\s*"[^"]*"`)
 
 // DefaultHyperbrowserInstructions are used when no custom instructions are set.
 const DefaultHyperbrowserInstructions = `Hyperbrowser — stealth headless Chrome with residential proxy rotation, CAPTCHA solving, and a Browser-Use agent for sites where direct scrape is blocked.
@@ -214,6 +229,12 @@ func (h *Hyperbrowser) Tools() []ToolDef {
 // doJSON sends a JSON request, reads the body up to hyperbrowserMaxBody, and
 // returns the raw body, status code, and any transport error.
 func (h *Hyperbrowser) doJSON(ctx context.Context, method, path string, body any) ([]byte, int, error) {
+	return h.doJSONLimit(ctx, method, path, body, hyperbrowserMaxBody)
+}
+
+// doJSONLimit is doJSON with an explicit body-size cap — needed for the
+// browser-use status endpoint, which dwarfs every other Hyperbrowser response.
+func (h *Hyperbrowser) doJSONLimit(ctx context.Context, method, path string, body any, maxBytes int64) ([]byte, int, error) {
 	var reqBody io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -240,7 +261,7 @@ func (h *Hyperbrowser) doJSON(ctx context.Context, method, path string, body any
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, hyperbrowserMaxBody))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("read response: %w", err)
 	}
@@ -746,7 +767,7 @@ func (h *Hyperbrowser) handleAgentStatus(ctx context.Context, req mcp.CallToolRe
 	apiCtx, cancel := context.WithTimeout(ctx, hyperbrowserSessionTimeout)
 	defer cancel()
 
-	data, status, err := h.doJSON(apiCtx, http.MethodGet, "/api/task/browser-use/"+jobID, nil)
+	data, status, err := h.doJSONLimit(apiCtx, http.MethodGet, "/api/task/browser-use/"+jobID, nil, hyperbrowserAgentMaxBody)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -772,9 +793,14 @@ func (h *Hyperbrowser) handleAgentStatus(ctx context.Context, req mcp.CallToolRe
 // and page state (url/title) — everything actionable for an agent reading
 // the result.
 //
-// Returns the original input if it cannot be parsed (caller decides what to
-// do with the error).
+// On parse failure, returns the pre-stripped input (not the truly original)
+// alongside the error — caller decides whether to surface it.
 func filterAgentStatusResponse(raw []byte) ([]byte, error) {
+	// Bytes-level pre-strip of "screenshot":"…" pairs before json.Unmarshal.
+	// See screenshotField for why: allocator optimisation, not truncation
+	// recovery.
+	raw = screenshotField.ReplaceAll(raw, []byte(`"screenshot":""`))
+
 	var parsed map[string]any
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return raw, err
