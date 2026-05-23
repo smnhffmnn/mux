@@ -1,12 +1,17 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,21 +25,21 @@ const openaiMaxBody = 512 * 1024 // 512 KB
 // DefaultOpenAIInstructions are used when no custom instructions are set.
 const DefaultOpenAIInstructions = `OpenAI API.
 
-Endpoints:
-- POST /v1/audio/transcriptions — Speech-to-Text (Whisper)
-  Models: gpt-4o-mini-transcribe ($0.003/min), gpt-4o-transcribe ($0.006/min), whisper-1 ($0.006/min)
-  Accepts: mp3, mp4, mpeg, mpga, m4a, wav, webm (max 25MB)
+Tools:
+- get   — GET requests (e.g. /v1/models)
+- request — POST/PUT/PATCH/DELETE with a JSON body
 
-- POST /v1/chat/completions — Chat Completions
-  Models: gpt-4o, gpt-4o-mini, o1, o3-mini, etc.
+Common POST endpoints (use the request tool):
+- /v1/chat/completions — Chat completions (gpt-4o, gpt-4o-mini, o1, o3-mini, …)
+- /v1/responses — Responses API
+- /v1/embeddings — Text embeddings (text-embedding-3-small/-large)
+- /v1/images/generations — Image generation (DALL·E, gpt-image-*)
 
-- POST /v1/embeddings — Text Embeddings
-  Models: text-embedding-3-small, text-embedding-3-large
+Multipart-upload endpoints (e.g. /v1/audio/transcriptions) are not supported
+here — the request tool sends application/json only.
 
-- POST /v1/images/generations — Image Generation (DALL-E)
-  Models: dall-e-3, dall-e-2
-
-- GET /v1/models — List available models
+For binary or large responses pass output_file to stream the body to disk
+instead of returning it inline.
 
 Auth: Authorization: Bearer {token} (automatic)`
 
@@ -78,6 +83,8 @@ func NewOpenAI(conn config.Connection, dialer Dialer) (*OpenAI, error) {
 
 // Tools returns the MCP tools for the OpenAI connection.
 func (o *OpenAI) Tools() []ToolDef {
+	outputFileDesc := "Save response body to this file path instead of returning it inline (supports ~ for home directory). Useful for large or binary responses (audio transcriptions, image bytes). Returns only metadata (status, content-type, path, size). Only writes on 2xx responses; errors are returned inline."
+
 	return []ToolDef{
 		{
 			Tool: mcp.NewTool("get",
@@ -90,13 +97,64 @@ func (o *OpenAI) Tools() []ToolDef {
 					o.baseURL,
 				)),
 				mcp.WithString("path", mcp.Required(), mcp.Description("Path to append to the base URL, e.g. /v1/models")),
+				mcp.WithString("output_file", mcp.Description(outputFileDesc)),
 			),
 			Handler: o.handleGet,
+		},
+		{
+			Tool: mcp.NewTool("request",
+				mcp.WithDescription(fmt.Sprintf(
+					"Make an HTTP request with a JSON body to %s. Supports POST, PUT, PATCH, and DELETE.\n\n"+
+						"Auth: Bearer token (automatic).\n\n"+
+						"Common POST endpoints:\n"+
+						"- POST /v1/chat/completions — Chat completions (gpt-4o, gpt-4o-mini, o1, o3-mini, …)\n"+
+						"- POST /v1/responses — Responses API\n"+
+						"- POST /v1/embeddings — Text embeddings\n"+
+						"- POST /v1/images/generations — Image generation (DALL·E, gpt-image-*)\n"+
+						"- POST /v1/audio/transcriptions, /v1/audio/translations — Whisper (multipart, not supported here)",
+					o.baseURL,
+				)),
+				mcp.WithString("method",
+					mcp.Required(),
+					mcp.Description("HTTP method: POST, PUT, PATCH, or DELETE"),
+					mcp.Enum("POST", "PUT", "PATCH", "DELETE"),
+				),
+				mcp.WithString("path",
+					mcp.Required(),
+					mcp.Description("Path to append to the base URL, e.g. /v1/chat/completions"),
+				),
+				mcp.WithString("body",
+					mcp.Description("JSON request body (optional)"),
+				),
+				mcp.WithString("output_file", mcp.Description(outputFileDesc)),
+			),
+			Handler: o.handleRequest,
 		},
 	}
 }
 
 func (o *OpenAI) handleGet(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return o.doRequest(ctx, http.MethodGet, req)
+}
+
+func (o *OpenAI) handleRequest(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	method, _ := req.RequireString("method")
+	if method == "" {
+		return mcp.NewToolResultError("method is required (POST, PUT, PATCH, or DELETE)"), nil
+	}
+	method = strings.ToUpper(method)
+
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		// valid
+	default:
+		return mcp.NewToolResultError(fmt.Sprintf("unsupported method: %s (use POST, PUT, PATCH, or DELETE)", method)), nil
+	}
+
+	return o.doRequest(ctx, method, req)
+}
+
+func (o *OpenAI) doRequest(ctx context.Context, method string, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, _ := req.RequireString("path")
 	if path == "" {
 		return mcp.NewToolResultError("path is required"), nil
@@ -106,12 +164,20 @@ func (o *OpenAI) handleGet(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 		path = "/" + path
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+path, nil)
+	var bodyReader io.Reader
+	if body := req.GetString("body", ""); body != "" {
+		bodyReader = bytes.NewBufferString(body)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, method, o.baseURL+path, bodyReader)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid request: %v", err)), nil
 	}
 
 	httpReq.Header.Set("Accept", "application/json")
+	if bodyReader != nil {
+		httpReq.Header.Set("Content-Type", "application/json")
+	}
 	httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
 
 	resp, err := o.client.Do(httpReq)
@@ -120,11 +186,58 @@ func (o *OpenAI) handleGet(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	}
 	defer resp.Body.Close()
 
+	if outputFile := req.GetString("output_file", ""); outputFile != "" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return saveResponseToFile(resp, outputFile)
+	}
+
 	body, err := io.ReadAll(io.LimitReader(resp.Body, openaiMaxBody))
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("read response: %v", err)), nil
 	}
 
 	result := fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, resp.Status, string(body))
+	return mcp.NewToolResultText(result), nil
+}
+
+// saveResponseToFile streams an HTTP response body to a file and returns metadata.
+// Used by openai and http connectors when output_file is set on a successful
+// (2xx) response.
+//
+// Safety: absolute path required, O_EXCL refuses to overwrite. This blocks
+// open-then-clobber on a known path but is not a sandbox — a confused caller
+// can still write into anywhere they have permission for, and a hostile
+// directory symlink on the parent path could redirect the write.
+func saveResponseToFile(resp *http.Response, outputFile string) (*mcp.CallToolResult, error) {
+	outputFile = config.ExpandHome(outputFile)
+	clean := filepath.Clean(outputFile)
+	if !filepath.IsAbs(clean) {
+		return mcp.NewToolResultError(fmt.Sprintf("output_file must be an absolute path: %s", outputFile)), nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(clean), 0o755); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("create directory: %v", err)), nil
+	}
+
+	f, err := os.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return mcp.NewToolResultError(fmt.Sprintf("output_file already exists (refusing to overwrite): %s", clean)), nil
+		}
+		return mcp.NewToolResultError(fmt.Sprintf("create file: %v", err)), nil
+	}
+
+	n, err := io.Copy(f, resp.Body)
+	if err != nil {
+		f.Close()
+		os.Remove(clean)
+		return mcp.NewToolResultError(fmt.Sprintf("write file: %v", err)), nil
+	}
+	if err := f.Close(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("close file: %v", err)), nil
+	}
+
+	result := fmt.Sprintf("HTTP %d %s\n\nSaved to: %s\nContent-Type: %s\nSize: %d bytes",
+		resp.StatusCode, resp.Status, clean,
+		resp.Header.Get("Content-Type"), n)
 	return mcp.NewToolResultText(result), nil
 }

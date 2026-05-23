@@ -166,9 +166,10 @@ type = "openai"
 
 | Tool | Description |
 |------|-------------|
-| `{name}_get` | HTTP GET request to the OpenAI API. Parameter: `path` (required, e.g. `/v1/models`). |
+| `{name}_get` | HTTP GET to the OpenAI API. Params: `path` (required, e.g. `/v1/models`), `output_file` (optional, stream binary/large responses to disk). |
+| `{name}_request` | HTTP POST/PUT/PATCH/DELETE with a JSON body. Params: `method`, `path`, `body` (JSON string), `output_file`. Use for `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/images/generations`. Multipart endpoints (e.g. `/v1/audio/transcriptions`) are not supported. |
 
-Default instructions describe available endpoints (audio transcriptions, chat completions, embeddings, image generation, models).
+Default instructions describe both tools and list common POST endpoints.
 
 ### ElevenLabs
 
@@ -317,6 +318,39 @@ type = "firecrawl"
 | `{name}_crawl_status` | Check crawl job status. Parameter: `id` (required). |
 | `{name}_map` | Discover URLs on a website. Parameter: `url` (required). |
 | `{name}_usage` | Show Firecrawl credit usage for the current billing period. |
+
+### Hyperbrowser
+
+Stealth headless Chrome with residential proxy rotation and CAPTCHA solving via
+the Hyperbrowser API. Complements Firecrawl: use it when Firecrawl fails on
+Anti-Bot-protected sites (Imperva, Cloudflare, DataDome) or JS-heavy SPAs that
+need a real browser.
+
+**Required fields**: `name`, `type`
+
+**Optional fields**: `url` (default: `https://api.hyperbrowser.ai`), `instructions`
+
+**Secret**: `{name}-token` in secret store (API key — sent as `x-api-key` header)
+
+```toml
+[[connections]]
+name = "hyperbrowser"
+type = "hyperbrowser"
+```
+
+**MCP tools exposed**:
+
+| Tool | Description |
+|------|-------------|
+| `{name}_scrape` | Scrape a single URL. Blocks until done (max ~90s). Params: `url` (required), `formats` (csv: markdown/html/links/screenshot), `only_main_content`, `session_options`, `proxy_country`. |
+| `{name}_extract` | Extract structured data with AI from one or more URLs. Blocks (max ~180s). Params: `urls` (csv, required), `prompt` and/or `schema` (JSON), `system_prompt`, `session_options`, `proxy_country`. |
+| `{name}_crawl` | Start a multi-page crawl. Async — returns `jobId`. Params: `url` (required), `max_pages` (default 10, max 100), `follow_links`, `ignore_sitemap`, `formats`, `session_options`, `proxy_country`. |
+| `{name}_crawl_status` | Poll a crawl job and retrieve results when completed. Param: `job_id` (required). |
+
+`session_options` is a comma-separated list of toggles: `use_stealth`,
+`use_proxy`, `solve_captchas`, `accept_cookies`. Setting `proxy_country`
+implicitly enables `use_proxy`. Proxy usage and CAPTCHA solving require a paid
+Hyperbrowser plan and noticeably slow down requests — enable only when needed.
 
 ### Google Tag Manager
 

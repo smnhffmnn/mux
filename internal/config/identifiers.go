@@ -40,6 +40,7 @@ const (
 	TypeRecraft          = "recraft"
 	TypeIdeogram         = "ideogram"
 	TypeGit              = "git"
+	TypeHyperbrowser     = "hyperbrowser"
 )
 
 // Connection.Source / Tunnel.Source values. SourceLocal marks entries

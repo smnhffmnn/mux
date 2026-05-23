@@ -150,7 +150,7 @@ func (c *Connection) Enabled() bool {
 		return c.ClientID != ""
 	case c.Type == TypeFirecrawl, c.Type == TypeBrave, c.Type == TypeGoogleTagManager,
 		c.Type == TypeOpenAI, c.Type == TypeElevenLabs, c.Type == TypeRecraft, c.Type == TypeIdeogram,
-		c.Type == TypeAsana, c.Type == TypeGemini, c.Type == TypeFalAI:
+		c.Type == TypeAsana, c.Type == TypeGemini, c.Type == TypeFalAI, c.Type == TypeHyperbrowser:
 		return c.Token != ""
 	case c.Type == TypeYouTrackAgile:
 		return c.URL != "" && c.Token != "" && c.Database != ""

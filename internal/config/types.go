@@ -138,6 +138,10 @@ var AllTypes = []TypeDef{
 		{Key: "token", Label: "Permanent Token", Placeholder: "perm:...", Secret: true},
 		{Key: "database", Label: "Board ID", Placeholder: "123-45"},
 	}},
+	{Type: TypeHyperbrowser, Label: "Hyperbrowser", Fields: []TypeField{
+		{Key: "url", Label: "API URL", Placeholder: "https://api.hyperbrowser.ai (default)"},
+		{Key: "token", Label: "API Key (x-api-key)", Placeholder: "hb_...", Secret: true},
+	}},
 }
 
 // typeIndex is a lazily-built lookup map from type string to TypeDef.
