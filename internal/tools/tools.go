@@ -160,6 +160,12 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		if err == nil {
 			toolDefs = ya.Tools()
 		}
+	case config.TypeHyperbrowser:
+		var hb *Hyperbrowser
+		hb, err = NewHyperbrowser(conn, dialer)
+		if err == nil {
+			toolDefs = hb.Tools()
+		}
 	case config.TypeGit:
 		// Passive connection type — no MCP tools.
 		// Used by the git credential helper (mux git-credential) to look up
@@ -223,6 +229,8 @@ func DefaultInstructions(connType string) string {
 		return DefaultIMAPInstructions
 	case config.TypeGoogleWorkspace:
 		return DefaultGoogleWorkspaceInstructions
+	case config.TypeHyperbrowser:
+		return DefaultHyperbrowserInstructions
 	default:
 		return ""
 	}

@@ -257,7 +257,7 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 
 	var summary string
 	switch {
-	case config.IsProxyType(conn.Type), conn.Type == config.TypeHTTP, conn.Type == config.TypeFirecrawl, conn.Type == config.TypeBrave, conn.Type == config.TypeOpenAI, conn.Type == config.TypeElevenLabs, conn.Type == config.TypeRecraft, conn.Type == config.TypeIdeogram, conn.Type == config.TypeGemini:
+	case config.IsProxyType(conn.Type), conn.Type == config.TypeHTTP, conn.Type == config.TypeFirecrawl, conn.Type == config.TypeBrave, conn.Type == config.TypeOpenAI, conn.Type == config.TypeElevenLabs, conn.Type == config.TypeRecraft, conn.Type == config.TypeIdeogram, conn.Type == config.TypeGemini, conn.Type == config.TypeHyperbrowser:
 		summary = conn.URL
 	case conn.Type == config.TypeMicrosoftGraph:
 		summary = "Microsoft Graph API"
@@ -803,6 +803,8 @@ func (a *App) TestConnection(name string) *TestResult {
 		result = a.testAsana(*conn)
 	case config.TypeGemini:
 		result = a.testGemini(*conn)
+	case config.TypeHyperbrowser:
+		result = a.testHyperbrowser(*conn)
 	case config.TypeIMAP:
 		result = a.testIMAP(*conn)
 	case config.TypeGit:
@@ -1844,6 +1846,38 @@ func (a *App) testGemini(conn config.Connection) testResponse {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
 	}
 	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Gemini API (HTTP %d)", resp.StatusCode)}
+}
+
+func (a *App) testHyperbrowser(conn config.Connection) testResponse {
+	if conn.Token == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "API key not configured"}
+	}
+
+	apiURL := conn.URL
+	if apiURL == "" {
+		apiURL = "https://api.hyperbrowser.ai"
+	}
+	apiURL = strings.TrimRight(apiURL, "/")
+
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	// /api/sessions lists active sessions — auth check without spending scrape credits.
+	req, err := http.NewRequest(http.MethodGet, apiURL+"/api/sessions", nil)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("x-api-key", conn.Token)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
+	}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Hyperbrowser API (HTTP %d)", resp.StatusCode)}
 }
 
 func (a *App) testIMAP(conn config.Connection) testResponse {
