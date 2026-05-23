@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -70,6 +71,9 @@ Agent (when direct scrape is blocked):
 - browser_use_agent_start  — LLM-driven browser agent that navigates the page like a human (clicks, scrolls, types). Returns jobId + liveUrl.
 - browser_use_agent_status — Poll an agent task; returns the steps it took and the final result.
 
+DOM inspection inside an active session:
+- cdp_evaluate   — Run a JavaScript expression in the page context of a running session via Chrome DevTools Protocol. Use after the agent has navigated to the target page (with keep_browser_open=true) to read DOM attributes (href, data-*, …) that the Browser-Use agent does not surface in its text-only view.
+
 Session options (pass on scrape/extract/crawl):
 - use_stealth    — fingerprint masking (recommended for Anti-Bot sites)
 - use_proxy      — residential proxy rotation (PAID plan)
@@ -89,6 +93,13 @@ type Hyperbrowser struct {
 	client  *http.Client
 	baseURL string
 	apiKey  string
+
+	// cdpMu guards cdpSessions. A persistent CDP WebSocket is kept open per
+	// Hyperbrowser session-id because Hyperbrowser only allows one CDP
+	// connection per session lifetime — see hyperbrowser_cdp.go for the
+	// empirical evidence.
+	cdpMu       sync.Mutex
+	cdpSessions map[string]*cdpSession
 }
 
 // NewHyperbrowser creates a Hyperbrowser connection from config.
@@ -117,8 +128,9 @@ func NewHyperbrowser(conn config.Connection, dialer Dialer) (*Hyperbrowser, erro
 			// No client-level timeout — per-job ctx deadlines bound polling instead.
 			// A short Timeout here would kill long-running waitForJob loops.
 		},
-		baseURL: baseURL,
-		apiKey:  conn.Token,
+		baseURL:     baseURL,
+		apiKey:      conn.Token,
+		cdpSessions: map[string]*cdpSession{},
 	}, nil
 }
 
@@ -220,6 +232,20 @@ func (h *Hyperbrowser) Tools() []ToolDef {
 				mcp.WithString("job_id", mcp.Required(), mcp.Description("Job ID from browser_use_agent_start.")),
 			),
 			Handler: h.handleAgentStatus,
+		},
+
+		// --- CDP evaluate (DOM inspection in an active session) ---
+		{
+			Tool: mcp.NewTool("cdp_evaluate",
+				mcp.WithDescription("Evaluate a JavaScript expression in the page context of an active Hyperbrowser session via Chrome DevTools Protocol. Use to read DOM attributes (href, data-*, computed styles, etc.) that the Browser-Use agent's text-only view does not surface. The session must be active — typically created via session_create and warmed by browser_use_agent_start with keep_browser_open=true. Returns {result, type, execution_time_ms, target} on success, {error: {message, type, stack}} on JS exception."),
+				mcp.WithString("session_id", mcp.Required(), mcp.Description("Active Hyperbrowser session ID. The session must still be running — call session_list to verify.")),
+				mcp.WithString("expression", mcp.Required(), mcp.Description("JavaScript expression to evaluate in the page's top frame. Example: \"document.title\" or \"Array.from(document.querySelectorAll('a[href*=\\\"/products/\\\"]')).map(a => a.href)\".")),
+				mcp.WithBoolean("await_promise", mcp.Description("If the expression returns a Promise, wait for it to resolve and return the resolved value. Default: true.")),
+				mcp.WithBoolean("return_by_value", mcp.Description("Serialize the result as JSON. If false, returns a CDP RemoteObject handle (rarely useful here). Default: true.")),
+				mcp.WithNumber("timeout_ms", mcp.Description("Hard limit for the evaluation, in milliseconds. Default: 30000. Capped at 300000 (5 min).")),
+				mcp.WithString("target_url_pattern", mcp.Description("Optional substring match against the candidate page targets' URLs. Useful when the session may have multiple tabs open and you want to pin evaluation to a specific page (e.g. \"example.com\"). If omitted, the first page target wins.")),
+			),
+			Handler: h.handleCDPEvaluate,
 		},
 	}
 }
@@ -650,6 +676,10 @@ func (h *Hyperbrowser) handleSessionStop(ctx context.Context, req mcp.CallToolRe
 	if !validJobID.MatchString(sid) {
 		return mcp.NewToolResultError("session_id must contain only letters, digits, dashes, and underscores"), nil
 	}
+
+	// Close any cached CDP WebSocket before the session-stop call so the
+	// server-side cleanup is graceful (otherwise the WS dies abruptly).
+	h.closeCDPSession(sid)
 
 	apiCtx, cancel := context.WithTimeout(ctx, hyperbrowserSessionTimeout)
 	defer cancel()
