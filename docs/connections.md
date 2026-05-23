@@ -340,17 +340,40 @@ type = "hyperbrowser"
 
 **MCP tools exposed**:
 
+Web-scraping (stateless):
+
 | Tool | Description |
 |------|-------------|
-| `{name}_scrape` | Scrape a single URL. Blocks until done (max ~90s). Params: `url` (required), `formats` (csv: markdown/html/links/screenshot), `only_main_content`, `session_options`, `proxy_country`. |
-| `{name}_extract` | Extract structured data with AI from one or more URLs. Blocks (max ~180s). Params: `urls` (csv, required), `prompt` and/or `schema` (JSON), `system_prompt`, `session_options`, `proxy_country`. |
-| `{name}_crawl` | Start a multi-page crawl. Async — returns `jobId`. Params: `url` (required), `max_pages` (default 10, max 100), `follow_links`, `ignore_sitemap`, `formats`, `session_options`, `proxy_country`. |
+| `{name}_scrape` | Scrape a single URL. Blocks until done (max ~90s). Params: `url` (required), `formats` (csv: markdown/html/links/screenshot), `only_main_content`, `session_options`, `proxy_country`, `session_id`. |
+| `{name}_extract` | Extract structured data with AI from one or more URLs. Blocks (max ~180s). Params: `urls` (csv, required), `prompt` and/or `schema` (JSON), `system_prompt`, `session_options`, `proxy_country`, `session_id`. |
+| `{name}_crawl` | Start a multi-page crawl. Async — returns `jobId`. Params: `url` (required), `max_pages` (default 10, max 100), `follow_links`, `ignore_sitemap`, `formats`, `session_options`, `proxy_country`, `session_id`. |
 | `{name}_crawl_status` | Poll a crawl job and retrieve results when completed. Param: `job_id` (required). |
+
+Session lifecycle:
+
+| Tool | Description |
+|------|-------------|
+| `{name}_session_create` | Start a persistent browser session. Returns `id` + `liveUrl` (VNC). Params: `session_options`, `proxy_country`, `timeout_minutes`, `profile_id`. Sessions are billed while active. |
+| `{name}_session_stop` | Stop a running session. Param: `session_id` (required). |
+| `{name}_session_list` | List all active sessions. No params. |
+
+Browser-Use agent (LLM-driven navigation, for sites where direct scrape is blocked):
+
+| Tool | Description |
+|------|-------------|
+| `{name}_browser_use_agent_start` | Start an agent task. Returns `jobId` + `liveUrl`. Params: `task` (required), `llm` (default gemini-2.0-flash), `session_id`, `keep_browser_open`, `max_steps`, `session_options`, `proxy_country`. Costs ~$0.10/run + LLM tokens. |
+| `{name}_browser_use_agent_status` | Poll an agent task. Returns status, steps with model decisions/actions/page-state, and `data.finalResult`. **Screenshots are stripped server-side** to keep response sizes manageable. |
 
 `session_options` is a comma-separated list of toggles: `use_stealth`,
 `use_proxy`, `solve_captchas`, `accept_cookies`. Setting `proxy_country`
 implicitly enables `use_proxy`. Proxy usage and CAPTCHA solving require a paid
-Hyperbrowser plan and noticeably slow down requests — enable only when needed.
+Hyperbrowser plan and noticeably slow down requests.
+
+`session_id` lets stateless tools (`scrape`, `extract`, `crawl`) reuse a
+session previously started with `session_create` so cookies and storage
+carry forward. Note: some sites (e.g. Imperva on ImmoScout24) profile
+behaviour in real time and still block direct scrapes even with a warm
+session — in those cases use the Browser-Use agent.
 
 ### Google Tag Manager
 
