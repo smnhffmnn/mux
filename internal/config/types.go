@@ -142,6 +142,9 @@ var AllTypes = []TypeDef{
 		{Key: "url", Label: "API URL", Placeholder: "https://api.hyperbrowser.ai (default)"},
 		{Key: "token", Label: "API Key (x-api-key)", Placeholder: "hb_...", Secret: true},
 	}},
+	{Type: TypeHiggsfield, Label: "Higgsfield", Fields: []TypeField{
+		{Key: "url", Label: "MCP URL", Placeholder: "https://mcp.higgsfield.ai/mcp (default)"},
+	}},
 }
 
 // typeIndex is a lazily-built lookup map from type string to TypeDef.

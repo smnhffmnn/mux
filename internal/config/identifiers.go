@@ -41,6 +41,7 @@ const (
 	TypeIdeogram         = "ideogram"
 	TypeGit              = "git"
 	TypeHyperbrowser     = "hyperbrowser"
+	TypeHiggsfield       = "higgsfield"
 )
 
 // Connection.Source / Tunnel.Source values. SourceLocal marks entries

@@ -93,6 +93,15 @@ read_only = true
 # url = "https://mcp.sentry.dev/mcp"
 # OAuth tokens stored as secret (key: "sentry-oauth-token")
 
+# Higgsfield (cinematic image/video generation) — OAuth 2.0 + PKCE with
+# dynamic client registration. type "higgsfield" defaults oauth=true, the URL
+# below, and scopes "openid email offline_access".
+# [[connections]]
+# name = "higgsfield"
+# type = "higgsfield"
+# url = "https://mcp.higgsfield.ai/mcp"  # optional, this is the default
+# OAuth tokens stored as secret (key: "higgsfield-oauth-token")
+
 # Google Gemini (image generation + multimodal AI)
 # [[connections]]
 # name = "gemini"

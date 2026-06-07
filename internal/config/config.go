@@ -170,7 +170,7 @@ func (c *Connection) Enabled() bool {
 // IsProxyType reports whether a connection type proxies an upstream MCP server.
 func IsProxyType(typ string) bool {
 	switch typ {
-	case TypeProxy, TypeYouTrack, TypeSentry, TypeNetdata, TypeNotion, TypeAsanaMCP, TypeGoogleWorkspace:
+	case TypeProxy, TypeYouTrack, TypeSentry, TypeNetdata, TypeNotion, TypeAsanaMCP, TypeGoogleWorkspace, TypeHiggsfield:
 		return true
 	}
 	return false
@@ -712,6 +712,18 @@ func ApplyConnectionDefaults(c *Connection) {
 		}
 	case TypeSentry:
 		c.OAuth = true
+	case TypeHiggsfield:
+		c.OAuth = true
+		if c.URL == "" {
+			c.URL = "https://mcp.higgsfield.ai/mcp"
+		}
+		// offline_access yields a refresh token so the proxy can refresh
+		// silently instead of re-prompting — essential for headless and
+		// long-running sessions. openid and email are the identity scopes
+		// the server advertises in its OAuth challenge.
+		if c.Scopes == "" {
+			c.Scopes = "openid email offline_access"
+		}
 	case TypeGemini:
 		if c.URL == "" {
 			c.URL = "https://generativelanguage.googleapis.com/v1beta"
