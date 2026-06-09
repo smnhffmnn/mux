@@ -4,6 +4,11 @@
 
   let { provisioning, onSync }: { provisioning: ProvisioningInfo; onSync: () => void } = $props()
 
+  // Defensive: the backend should always send an array, but a nil Go slice
+  // marshals to JSON `null`. Guard so a single render-throw can't freeze the
+  // whole window (the tab swap aborts and the previous view stays on screen).
+  const endpoints = $derived(provisioning?.endpoints ?? [])
+
   // Selected endpoint to edit. Empty string = the default (unnamed) endpoint,
   // which matches how the backend treats the legacy single-endpoint case.
   let selectedName = $state<string>('')
@@ -16,7 +21,7 @@
 
   $effect(() => {
     // Reset form values when switching endpoint selection
-    const sel = provisioning.endpoints.find(e => e.name === selectedName)
+    const sel = endpoints.find(e => e.name === selectedName)
     endpoint = sel?.endpoint ?? ''
     token = ''
   })
@@ -66,9 +71,9 @@
   </div>
 
   <div class="provisioning-card">
-    {#if provisioning.endpoints.length > 0}
+    {#if endpoints.length > 0}
       <div class="endpoint-list">
-        {#each provisioning.endpoints as ep, i (ep.name || `__default_${i}`)}
+        {#each endpoints as ep, i (ep.name || `__default_${i}`)}
           <div class="endpoint-row" class:active={ep.name === selectedName}>
             <button class="endpoint-label" onclick={() => (selectedName = ep.name)}>
               <span class="dot" class:green={ep.tokenSet && ep.endpoint} class:gray={!ep.tokenSet || !ep.endpoint}></span>
@@ -88,7 +93,7 @@
       </div>
       <div class="field">
         <label for="provisioning-token">Token (Default)</label>
-        <input id="provisioning-token" type="password" placeholder={provisioning.endpoints.find(e => e.name === '')?.tokenSet ? '••••• (stored)' : 'Bearer token'} bind:value={token} />
+        <input id="provisioning-token" type="password" placeholder={endpoints.find(e => e.name === '')?.tokenSet ? '••••• (stored)' : 'Bearer token'} bind:value={token} />
       </div>
     </div>
     <p class="hint">
@@ -103,7 +108,7 @@
 
     {#if provisioning.configured}
       <div class="provisioning-status">
-        <span>Total: {provisioning.tunnels} tunnels, {provisioning.connections} connections across {provisioning.endpoints.length} endpoint{provisioning.endpoints.length === 1 ? '' : 's'}</span>
+        <span>Total: {provisioning.tunnels} tunnels, {provisioning.connections} connections across {endpoints.length} endpoint{endpoints.length === 1 ? '' : 's'}</span>
       </div>
     {/if}
 
