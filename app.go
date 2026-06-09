@@ -361,6 +361,11 @@ func (a *App) GetPageData() PageData {
 			CanSelfUpdate: selfUpdateURL() != "",
 		},
 		Types: allTypes(),
+		// Initialize as empty (non-nil) slices: a nil Go slice marshals to JSON
+		// `null`, which crashes the frontend's `.length`/`.map` access on a fresh
+		// install with no tunnels/connections configured.
+		Tunnels:     []TunnelInfo{},
+		Connections: []ConnInfo{},
 	}
 
 	data.Provisioning = a.buildProvisioningInfo("", false)
@@ -934,6 +939,10 @@ func (a *App) buildProvisioningInfo(resultMsg string, resultSuccess bool) Provis
 		Connections:   totalC,
 		ResultMessage: resultMsg,
 		ResultSuccess: resultSuccess,
+		// Non-nil so it marshals to JSON `[]`, not `null`. Without provisioning
+		// endpoints configured the loop below never runs, leaving Endpoints nil,
+		// which crashes the frontend's `endpoints.find`/`.length` access.
+		Endpoints: []ProvisioningEndpointInfo{},
 	}
 	for _, p := range a.cfg.Provisioning {
 		tc, cc := a.cfg.ProvisionedCountFor(p.Name)
