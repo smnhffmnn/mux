@@ -162,6 +162,33 @@ func TestApplyConnectionDefaults_IMAP(t *testing.T) {
 	}
 }
 
+func TestApplyConnectionDefaults_Higgsfield(t *testing.T) {
+	c := Connection{Type: TypeHiggsfield}
+	ApplyConnectionDefaults(&c)
+	if !c.OAuth {
+		t.Error("Higgsfield should default oauth=true")
+	}
+	if c.URL != "https://mcp.higgsfield.ai/mcp" {
+		t.Errorf("Higgsfield default URL mismatch, got %q", c.URL)
+	}
+	if c.Scopes != "openid email offline_access" {
+		t.Errorf("Higgsfield default scopes mismatch, got %q", c.Scopes)
+	}
+	if !IsProxyType(c.Type) {
+		t.Error("Higgsfield should be a proxy type")
+	}
+
+	// Explicit values must not be overwritten.
+	custom := Connection{Type: TypeHiggsfield, URL: "https://self-hosted/mcp", Scopes: "openid"}
+	ApplyConnectionDefaults(&custom)
+	if custom.URL != "https://self-hosted/mcp" {
+		t.Errorf("explicit URL should win, got %q", custom.URL)
+	}
+	if custom.Scopes != "openid" {
+		t.Errorf("explicit scopes should win, got %q", custom.Scopes)
+	}
+}
+
 func TestDir_PreferenceAndFallback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Dir uses ~/.mux on Windows; XDG fallback test does not apply")

@@ -120,8 +120,8 @@ All fields use **camelCase** JSON keys.
 | `secure` | boolean | no | TLS for ClickHouse HTTP (default: false) |
 | `url` | string | proxy/http/api | Endpoint URL |
 | `token` | string | no | API key or Bearer token. If omitted, mux checks the secret store for `{name}-token`. |
-| `oauth` | boolean | no | Use OAuth 2.0 + PKCE for proxy connections (default: false). The `sentry`, `notion`, and `asana-mcp` types force `oauth: true` regardless of the JSON value — these proxy types only support OAuth. |
-| `scopes` | string | no | OAuth scopes override (microsoft-graph only) |
+| `oauth` | boolean | no | Use OAuth 2.0 + PKCE for proxy connections (default: false). The `sentry`, `notion`, `asana-mcp`, and `higgsfield` types force `oauth: true` regardless of the JSON value — these proxy types only support OAuth. |
+| `scopes` | string | no | OAuth scopes. Used by `microsoft-graph` and OAuth proxy types (e.g. `higgsfield` defaults to `openid email offline_access`). |
 | `tunnel` | string | no | Name of a tunnel to route through |
 | `instructions` | string | no | Instructions for AI agents describing the connection |
 | `monthlyLimit` | integer | no | Monthly request limit (brave only) |

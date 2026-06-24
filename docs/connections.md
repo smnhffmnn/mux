@@ -526,7 +526,7 @@ url = "https://mcp.sentry.dev/mcp"
 
 URLs ending in `/sse` use SSE transport; everything else uses Streamable HTTP.
 
-Proxy-type aliases (`youtrack`, `sentry`, `netdata`, `notion`, `asana-mcp`) behave identically to `proxy` but provide semantic clarity. `sentry` and `notion` additionally default `oauth = true`. `asana-mcp` defaults `oauth = true` and URL to `https://mcp.asana.com/v2/mcp`.
+Proxy-type aliases (`youtrack`, `sentry`, `netdata`, `notion`, `asana-mcp`, `higgsfield`) behave identically to `proxy` but provide semantic clarity. `sentry` and `notion` additionally default `oauth = true`. `asana-mcp` defaults `oauth = true` and URL to `https://mcp.asana.com/v2/mcp`. `higgsfield` defaults `oauth = true`, URL to `https://mcp.higgsfield.ai/mcp`, and scopes to `openid email offline_access` (the `offline_access` scope obtains a refresh token, so the proxy keeps working without re-authentication).
 
 ### Google Workspace
 
