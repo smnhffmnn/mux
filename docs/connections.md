@@ -123,13 +123,15 @@ type = "microsoft-graph"
 | `{name}_auth_login` | Start device code flow. Returns a `user_code` and verification URL. |
 | `{name}_auth_poll` | Poll for device code completion. Parameter: `device_code` (required). |
 | `{name}_list_conversations` | List inbox conversations grouped by thread. Parameter: `limit` (default: 20). |
-| `{name}_get_conversation` | Get all messages in a conversation. Parameter: `conversation_id` (required). |
+| `{name}_get_conversation` | Get all messages in a conversation, with full body. Scans recent messages across all folders by default; pass `folder_id` to scope to one folder. For a specific older/archived message, use `get_message`. Parameters: `conversation_id` (required), `folder_id` (optional). |
+| `{name}_get_message` | Get a single message by ID with full body, regardless of folder (incl. archived). Use to fetch the full body of a message found via `search_messages` (which returns only `bodyPreview`). Parameter: `message_id` (required). |
 | `{name}_archive_conversation` | Move all inbox messages of a conversation to Archive. Parameter: `conversation_id` (required). |
 | `{name}_delete_conversation` | Delete all inbox messages of a conversation. Parameter: `conversation_id` (required). |
 | `{name}_search_messages` | Search messages across all mail folders using KQL. Parameters: `query` (required), `limit` (optional). |
 | `{name}_create_reply_draft` | Create a reply draft (does NOT send). Parameters: `conversation_id`, `body` (required). |
 | `{name}_create_draft` | Create a new email draft from scratch (does NOT send). Parameters: `to`, `subject`, `body` (required), `cc`, `bcc` (optional). |
 | `{name}_create_forward_draft` | Create a forward draft (does NOT send). Parameters: `conversation_id`, `to` (required), `body`, `cc`, `bcc` (optional). |
+| `{name}_send_draft` | Send an existing draft (created by `create_draft` / `create_reply_draft` / `create_forward_draft`). Dispatches immediately and moves it to Sent Items. Parameter: `draft_id` (required). |
 | `{name}_list_attachments` | List attachments of a message. Parameter: `message_id` (required). |
 | `{name}_get_attachment` | Get attachment content (base64-encoded). Parameters: `message_id`, `attachment_id` (required). |
 | `{name}_sp_list_sites` | Search SharePoint sites. Parameter: `query` (default: `*`). |

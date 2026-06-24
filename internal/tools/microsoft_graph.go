@@ -137,10 +137,18 @@ func (mg *MicrosoftGraph) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("get_conversation",
-				mcp.WithDescription("Get all messages in a conversation."),
+				mcp.WithDescription("Get all messages in a conversation, with full body. Scans recent messages across all mail folders by default; pass folder_id to scope to a single folder. For a specific older or archived message, use get_message (direct fetch by ID, no scan window)."),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
+				mcp.WithString("folder_id", mcp.Description("Optional mail folder to scope the lookup to — a folder ID from list_mail_folders or a well-known name like \"inbox\"/\"archive\". Default: search all folders.")),
 			),
 			Handler: mg.handleGetConversation,
+		},
+		{
+			Tool: mcp.NewTool("get_message",
+				mcp.WithDescription("Get a single message by ID with full body, regardless of which folder it lives in. Use this to fetch the complete body of a message found via search_messages (which returns only bodyPreview), including archived mail."),
+				mcp.WithString("message_id", mcp.Required(), mcp.Description("Message ID (e.g. from search_messages or a conversation's messageIds)")),
+			),
+			Handler: mg.handleGetMessage,
 		},
 		{
 			Tool: mcp.NewTool("archive_conversation",
@@ -185,6 +193,13 @@ func (mg *MicrosoftGraph) Tools() []ToolDef {
 				mcp.WithString("bcc", mcp.Description("BCC recipient(s), comma-separated (optional)")),
 			),
 			Handler: mg.handleCreateForwardDraft,
+		},
+		{
+			Tool: mcp.NewTool("send_draft",
+				mcp.WithDescription("Send an existing draft message (e.g. one created by create_draft, create_reply_draft, or create_forward_draft). This dispatches the email immediately and moves it to Sent Items."),
+				mcp.WithString("draft_id", mcp.Required(), mcp.Description("Draft message ID returned by create_draft / create_reply_draft / create_forward_draft")),
+			),
+			Handler: mg.handleSendDraft,
 		},
 		{
 			Tool: mcp.NewTool("list_attachments",
@@ -502,15 +517,43 @@ func (mg *MicrosoftGraph) handleGetConversation(ctx context.Context, req mcp.Cal
 		return mcp.NewToolResultError("conversation_id is required"), nil
 	}
 
-	msgs, err := mg.getConversationMessages(ctx, convID, "id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,isRead,flag,bodyPreview,body,hasAttachments")
+	folderID := strings.TrimSpace(req.GetString("folder_id", ""))
+	msgs, err := mg.getConversationMessages(ctx, convID, "id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,isRead,flag,bodyPreview,body,hasAttachments", folderID)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if len(msgs) == 0 {
-		return mcp.NewToolResultError(fmt.Sprintf("no inbox messages found for conversation %s — it may be older than the search window", convID)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("no messages found for conversation %s — it may be older than the scan window; fetch a specific message with get_message instead", convID)), nil
 	}
 
 	return jsonResult(msgs)
+}
+
+func (mg *MicrosoftGraph) handleGetMessage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	msgID, _ := req.RequireString("message_id")
+	if msgID == "" {
+		return mcp.NewToolResultError("message_id is required"), nil
+	}
+
+	// Fetch by message ID directly — works across all folders (archive, sent, …),
+	// unlike the folder-scoped conversation lookup. Same field set as get_conversation.
+	fields := "id,conversationId,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,isRead,flag,bodyPreview,body,hasAttachments"
+	path := "/me/messages/" + url.PathEscape(msgID) + "?$select=" + fields
+
+	data, status, err := mg.doGraph(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if status != http.StatusOK {
+		return mcp.NewToolResultError(fmt.Sprintf("Graph API error (HTTP %d): %s", status, string(data))), nil
+	}
+
+	var msg graphRawMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return mcp.NewToolResultError("parse message: " + err.Error()), nil
+	}
+
+	return jsonResult(msg)
 }
 
 func (mg *MicrosoftGraph) handleArchiveConversation(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -524,18 +567,18 @@ func (mg *MicrosoftGraph) handleArchiveConversation(ctx context.Context, req mcp
 		return mcp.NewToolResultError("find archive folder: " + err.Error()), nil
 	}
 
-	msgs, err := mg.getConversationMessages(ctx, convID, "id")
+	msgs, err := mg.getConversationMessages(ctx, convID, "id", "inbox")
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if len(msgs) == 0 {
-		return mcp.NewToolResultError(fmt.Sprintf("no inbox messages found for conversation %s — it may be older than the search window", convID)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("no inbox messages found for conversation %s — it may be older than the scan window", convID)), nil
 	}
 
 	moved := 0
 	for _, m := range msgs {
 		payload := map[string]string{"destinationId": archiveID}
-		_, status, err := mg.doGraph(ctx, http.MethodPost, "/me/messages/"+m.ID+"/move", payload)
+		_, status, err := mg.doGraph(ctx, http.MethodPost, "/me/messages/"+url.PathEscape(m.ID)+"/move", payload)
 		if err == nil && status == http.StatusCreated {
 			moved++
 		}
@@ -550,17 +593,17 @@ func (mg *MicrosoftGraph) handleDeleteConversation(ctx context.Context, req mcp.
 		return mcp.NewToolResultError("conversation_id is required"), nil
 	}
 
-	msgs, err := mg.getConversationMessages(ctx, convID, "id")
+	msgs, err := mg.getConversationMessages(ctx, convID, "id", "inbox")
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if len(msgs) == 0 {
-		return mcp.NewToolResultError(fmt.Sprintf("no inbox messages found for conversation %s — it may be older than the search window", convID)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("no inbox messages found for conversation %s — it may be older than the scan window", convID)), nil
 	}
 
 	deleted := 0
 	for _, m := range msgs {
-		_, status, err := mg.doGraph(ctx, http.MethodDelete, "/me/messages/"+m.ID, nil)
+		_, status, err := mg.doGraph(ctx, http.MethodDelete, "/me/messages/"+url.PathEscape(m.ID), nil)
 		if err == nil && (status == http.StatusNoContent || status == http.StatusOK) {
 			deleted++
 		}
@@ -705,6 +748,24 @@ func (mg *MicrosoftGraph) handleCreateForwardDraft(ctx context.Context, req mcp.
 	return jsonResult(map[string]any{"draft_id": draft.ID, "forward_from": latest.ID, "to": to})
 }
 
+func (mg *MicrosoftGraph) handleSendDraft(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	draftID, _ := req.RequireString("draft_id")
+	if draftID == "" {
+		return mcp.NewToolResultError("draft_id is required"), nil
+	}
+
+	data, status, err := mg.doGraph(ctx, http.MethodPost, "/me/messages/"+url.PathEscape(draftID)+"/send", nil)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	// Graph returns 202 Accepted on success; the message moves to Sent Items.
+	if status != http.StatusAccepted {
+		return mcp.NewToolResultError(fmt.Sprintf("send failed (HTTP %d): %s", status, string(data))), nil
+	}
+
+	return jsonResult(map[string]any{"sent": true, "draft_id": draftID})
+}
+
 // --- HTTP helpers ---
 
 // ensureAccessToken checks the cached token and refreshes if needed.
@@ -828,18 +889,23 @@ func (mg *MicrosoftGraph) doGraph(ctx context.Context, method, path string, body
 
 // --- Conversation helpers ---
 
-func (mg *MicrosoftGraph) getConversationMessages(ctx context.Context, convID, fields string) ([]graphRawMessage, error) {
+func (mg *MicrosoftGraph) getConversationMessages(ctx context.Context, convID, fields, folderID string) ([]graphRawMessage, error) {
 	// conversationId is not efficiently filterable in Graph API — $filter combined
-	// with $orderby returns InefficientFilter error. Fetch inbox messages in pages
-	// and filter client-side. Paginates up to maxPages (~1000 messages) to find
-	// conversations that may be beyond the first page.
+	// with $orderby returns InefficientFilter error. Fetch messages in pages and
+	// filter client-side. folderID scopes the lookup to a single mail folder; an
+	// empty folderID searches across all folders (needed to find archived threads).
+	// Paginates up to maxPages to find conversations beyond the first page.
 	selectFields := fields + ",conversationId"
 	// Reduce page size when fetching full body to avoid hitting response size limits.
 	pageSize := 250
 	if strings.Contains(fields, "body") {
 		pageSize = 25
 	}
-	path := fmt.Sprintf("/me/mailFolders/inbox/messages?$orderby=receivedDateTime+desc&$select=%s&$top=%d", selectFields, pageSize)
+	basePath := "/me/messages"
+	if folderID != "" {
+		basePath = "/me/mailFolders/" + url.PathEscape(folderID) + "/messages"
+	}
+	path := fmt.Sprintf("%s?$orderby=receivedDateTime+desc&$select=%s&$top=%d", basePath, selectFields, pageSize)
 
 	const maxPages = 4
 	var matched []graphRawMessage
@@ -896,7 +962,7 @@ func (mg *MicrosoftGraph) getConversationMessages(ctx context.Context, convID, f
 
 func (mg *MicrosoftGraph) getLatestMessage(ctx context.Context, convID string) (*graphRawMessage, error) {
 	// getConversationMessages returns chronological order (oldest first)
-	msgs, err := mg.getConversationMessages(ctx, convID, "id")
+	msgs, err := mg.getConversationMessages(ctx, convID, "id", "inbox")
 	if err != nil {
 		return nil, err
 	}
