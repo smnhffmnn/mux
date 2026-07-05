@@ -137,7 +137,10 @@ func RegisterMount(ctx context.Context, s *server.MCPServer, m Mount) error {
 	count := 0
 	for _, tool := range toolsResult.Tools {
 		originalName := tool.Name
-		prefixedName := m.Name + "_" + tool.Name
+		// Mount names are human-readable display names — sanitize so the
+		// result satisfies the strictest MCP client pattern
+		// (^[a-zA-Z0-9_-]{1,64}$).
+		prefixedName := config.SanitizeToolName(m.Name + "_" + tool.Name)
 
 		// Create a copy of the tool with the prefixed name
 		tool.Name = prefixedName

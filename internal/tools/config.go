@@ -109,6 +109,9 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 			mcp.WithString("token_header",
 				mcp.Description("Custom header name for the API token (e.g. 'x-goog-api-key'). Default: sends as 'Authorization: Bearer {token}'."),
 			),
+			mcp.WithString("headers",
+				mcp.Description("Extra HTTP headers sent with every request (http type), one 'Name: Value' per line (e.g. 'Notion-Version: 2022-06-28')."),
+			),
 		),
 		Handler: ct.handleConnectionAdd,
 	}
@@ -380,10 +383,17 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 		conn.Instructions = v
 	}
 	if v := req.GetString("token_header", ""); v != "" {
-		if !validHeaderName(v) {
+		if !config.ValidHeaderName(v) {
 			return mcp.NewToolResultError(fmt.Sprintf("invalid token_header %q: must be a valid HTTP header name (e.g. 'x-goog-api-key')", v)), nil
 		}
 		conn.TokenHeader = v
+	}
+	if v := req.GetString("headers", ""); v != "" {
+		headers, err := config.ParseHeaderLines(v)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid headers: %v", err)), nil
+		}
+		conn.Headers = headers
 	}
 
 	config.ApplyConnectionDefaults(&conn)
@@ -711,17 +721,4 @@ func (ct *ConfigTools) handleProvisioningSet(_ context.Context, req mcp.CallTool
 		msg += ". Token is already set — provisioning will activate on next mux restart."
 	}
 	return mcp.NewToolResultText(msg), nil
-}
-
-// validHeaderName checks that s is a valid HTTP header field name (RFC 7230 token).
-func validHeaderName(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, c := range s {
-		if c <= ' ' || c >= 0x7f || strings.ContainsRune("\"(),/:;<=>?@[\\]{}", c) {
-			return false
-		}
-	}
-	return true
 }

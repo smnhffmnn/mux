@@ -4,6 +4,12 @@
 
 - A Notion account.
 - Authentication uses OAuth — no manual token required.
+- The AI query tools (`query-data-sources`, `query-database-view`) require a
+  **Notion Business plan or higher with Notion AI** — Notion gates them
+  server-side. Reading, searching, and creating pages works on every plan.
+  On lower plans, query databases via the Notion REST API instead: create an
+  internal integration and add an **HTTP API** connection to
+  `https://api.notion.com` with a `Notion-Version` header.
 
 ## Fields
 

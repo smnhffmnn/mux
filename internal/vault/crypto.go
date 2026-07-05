@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	keySize   = 32 // AES-256
-	saltSize  = 32
+	keySize  = 32 // AES-256
+	saltSize = 32
 
 	// Argon2id parameters (OWASP recommended)
 	argon2Time    = 3

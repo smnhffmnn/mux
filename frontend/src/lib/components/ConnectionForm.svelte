@@ -38,6 +38,10 @@
         if (val) {
           const jsonKey = fieldKeyMap[f.key] ?? f.key
           ;(req as any)[jsonKey] = val
+        } else if (f.multiline) {
+          // Multiline fields (headers) are always sent so they can be cleared
+          const jsonKey = fieldKeyMap[f.key] ?? f.key
+          ;(req as any)[jsonKey] = ''
         }
       }
       req.tunnel = formValues['tunnel'] ?? ''
@@ -55,7 +59,7 @@
 <div class="form">
   <div class="form-grid">
     {#each conn.fields as field (field.key)}
-      <div class="form-field" class:small={field.small}>
+      <div class="form-field" class:small={field.small} class:full={field.multiline}>
         <label for={field.key}>{field.label}</label>
         {#if field.secret}
           <input
@@ -65,6 +69,14 @@
             bind:value={formValues[field.key]}
             disabled={conn.readOnly && !field.secret}
           />
+        {:else if field.multiline}
+          <textarea
+            id={field.key}
+            rows="2"
+            placeholder={field.placeholder}
+            bind:value={formValues[field.key]}
+            disabled={conn.readOnly}
+          ></textarea>
         {:else}
           <input
             id={field.key}

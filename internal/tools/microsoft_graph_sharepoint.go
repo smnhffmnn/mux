@@ -420,7 +420,7 @@ func sanitizeOrderBy(input string) string {
 		"name":                 "name",
 		"size":                 "size",
 		"lastmodifieddatetime": "lastModifiedDateTime",
-		"createddatetime":     "createdDateTime",
+		"createddatetime":      "createdDateTime",
 	}
 
 	proper, ok := fieldMap[parts[0]]

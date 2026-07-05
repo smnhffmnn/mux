@@ -555,11 +555,13 @@ Generic HTTP client for any REST API. Useful for internal APIs or services witho
 
 **Required fields**: `name`, `type`, `url`
 
-**Optional fields**: `read_only` (default: false), `token_header`, `tunnel`, `instructions`
+**Optional fields**: `read_only` (default: false), `token_header`, `headers`, `tunnel`, `instructions`
 
 **Secret**: `{name}-token` in secret store (optional auth token)
 
 By default, the token is sent as `Authorization: Bearer {token}`. Set `token_header` to use a custom header name instead (e.g. `x-goog-api-key` for Google APIs).
+
+Use `headers` for extra headers the API requires on every request, e.g. API version headers. The token header always wins over a custom header of the same name.
 
 ```toml
 [[connections]]
@@ -568,6 +570,9 @@ type = "http"
 url = "https://api.internal.example.com"
 token_header = "x-api-key"
 instructions = "Internal product API. Use /api/v1/products to list products."
+
+[connections.headers]
+"Notion-Version" = "2022-06-28"
 ```
 
 **MCP tools exposed**:

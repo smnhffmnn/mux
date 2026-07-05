@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	imapFetchLimit  = 200       // max messages to fetch for threading
+	imapFetchLimit  = 200        // max messages to fetch for threading
 	imapBodyMaxSize = 256 * 1024 // max raw message size for body extraction
 	imapTextMaxSize = 64 * 1024  // max extracted text body size
 )
@@ -900,8 +900,8 @@ func (im *IMAP) handleCreateReplyDraft(ctx context.Context, req mcp.CallToolRequ
 			[]string{latest.From},
 			nil,
 			subject,
-			latest.MessageID,            // In-Reply-To
-			strings.Join(refs, " "),     // References: full chain
+			latest.MessageID,        // In-Reply-To
+			strings.Join(refs, " "), // References: full chain
 			normalizeCRLF(body),
 		)
 
@@ -966,8 +966,8 @@ func (im *IMAP) handleCreateForwardDraft(ctx context.Context, req mcp.CallToolRe
 			[]string{to},
 			nil,
 			subject,
-			"",  // no In-Reply-To
-			"",  // no References
+			"", // no In-Reply-To
+			"", // no References
 			fwdBody,
 		)
 

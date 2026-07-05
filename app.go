@@ -221,9 +221,11 @@ func (a *App) registerProxyConnection(conn config.Connection) {
 }
 
 // trackProxyTools discovers which tools were registered for a proxy connection
-// by scanning the MCPServer's tool list for the connection prefix.
+// by scanning the MCPServer's tool list for the connection prefix. Registered
+// tool names are sanitized (see config.SanitizeToolName), so the prefix must
+// be sanitized the same way.
 func (a *App) trackProxyTools(connName string) {
-	prefix := connName + "_"
+	prefix := config.SanitizeToolName(connName) + "_"
 	var names []string
 	for name := range a.mcpServer.ListTools() {
 		if strings.HasPrefix(name, prefix) {
@@ -278,6 +280,7 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 				Placeholder: fd.Placeholder,
 				Secret:      fd.Secret,
 				Small:       fd.Small,
+				Multiline:   fd.Multiline,
 			}
 			if !fd.Secret {
 				switch fd.Key {
@@ -299,6 +302,8 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 					fi.Value = conn.Scopes
 				case "token_header":
 					fi.Value = conn.TokenHeader
+				case "headers":
+					fi.Value = config.FormatHeaderLines(conn.Headers)
 				}
 			}
 			if fd.Secret {
@@ -505,6 +510,11 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 		conn.Tunnel = fields.Tunnel
 		conn.Instructions = fields.Instructions
 		conn.TokenHeader = fields.TokenHeader
+		headers, err := config.ParseHeaderLines(fields.Headers)
+		if err != nil {
+			return nil, fmt.Errorf("invalid headers: %w", err)
+		}
+		conn.Headers = headers
 	}
 
 	if fields.Password != "" {
@@ -838,6 +848,12 @@ func (a *App) TestConnection(name string) *TestResult {
 func (a *App) SetupProvisioning(endpoint, token string) (*ProvisioningInfo, error) {
 	if endpoint == "" && token == "" {
 		return nil, fmt.Errorf("enter at least an endpoint or token")
+	}
+	if endpoint != "" {
+		u, err := url.Parse(endpoint)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("endpoint must be a valid http(s) URL")
+		}
 	}
 
 	// Upsert the default (unnamed) endpoint. Multi-endpoint setups are configured
@@ -1901,7 +1917,7 @@ func (a *App) testIMAP(conn config.Connection) testResponse {
 	if port == 0 {
 		port = 993
 	}
-	addr := fmt.Sprintf("%s:%d", conn.Host, port)
+	addr := net.JoinHostPort(conn.Host, fmt.Sprintf("%d", port))
 
 	d := &net.Dialer{Timeout: 10 * time.Second}
 	rawConn, err := d.Dial("tcp", addr)

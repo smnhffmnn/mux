@@ -9,6 +9,7 @@ type TypeField struct {
 	Placeholder string
 	Secret      bool
 	Small       bool
+	Multiline   bool // render as textarea (e.g. header lines)
 }
 
 // TypeDef defines a connection type with its UI metadata and fields.
@@ -67,6 +68,7 @@ var AllTypes = []TypeDef{
 		{Key: "url", Label: "Base URL", Placeholder: "https://api.example.com"},
 		{Key: "token", Label: "API Token (optional)", Placeholder: "Bearer token", Secret: true},
 		{Key: "token_header", Label: "Token Header (optional)", Placeholder: "Authorization: Bearer (default)"},
+		{Key: "headers", Label: "Headers (optional)", Placeholder: "One \"Name: Value\" per line, e.g. Notion-Version: 2022-06-28", Multiline: true},
 	}},
 	{Type: TypeFirecrawl, Label: "Firecrawl", Fields: []TypeField{
 		{Key: "url", Label: "API URL", Placeholder: "https://api.firecrawl.dev (default)"},

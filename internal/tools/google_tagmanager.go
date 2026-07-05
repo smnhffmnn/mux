@@ -26,10 +26,10 @@ import (
 )
 
 const (
-	gtmBaseURL   = "https://tagmanager.googleapis.com/tagmanager/v2"
-	gtmTokenURL  = "https://oauth2.googleapis.com/token"
-	gtmScope     = "https://www.googleapis.com/auth/tagmanager.edit.containers https://www.googleapis.com/auth/tagmanager.publish"
-	gtmMaxBody   = 1024 * 1024 // 1 MB
+	gtmBaseURL  = "https://tagmanager.googleapis.com/tagmanager/v2"
+	gtmTokenURL = "https://oauth2.googleapis.com/token"
+	gtmScope    = "https://www.googleapis.com/auth/tagmanager.edit.containers https://www.googleapis.com/auth/tagmanager.publish"
+	gtmMaxBody  = 1024 * 1024 // 1 MB
 )
 
 // GoogleTagManager wraps the GTM API v2 as MCP tools.

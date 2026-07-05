@@ -93,6 +93,7 @@ type FieldInfo struct {
 	Placeholder  string `json:"placeholder"`
 	Secret       bool   `json:"secret"`
 	Small        bool   `json:"small"`
+	Multiline    bool   `json:"multiline"`
 	SecretStored bool   `json:"secretStored"`
 }
 
@@ -174,4 +175,5 @@ type SaveConnectionRequest struct {
 	Tunnel       string `json:"tunnel,omitempty"`
 	Instructions string `json:"instructions,omitempty"`
 	TokenHeader  string `json:"tokenHeader,omitempty"`
+	Headers      string `json:"headers,omitempty"` // newline-separated "Name: Value" lines
 }

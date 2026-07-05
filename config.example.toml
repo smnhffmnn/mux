@@ -116,6 +116,9 @@ read_only = true
 # url = "https://api.example.com"
 # token_header = "x-api-key"               # custom auth header (default: Authorization: Bearer)
 # Token stored as secret (key: "my-api-token")
+# Extra headers sent with every request (e.g. API version headers):
+# [connections.headers]
+# "Notion-Version" = "2022-06-28"
 
 # --- WireGuard Tunnels ---
 # Connections can reference tunnels by name to route traffic through WireGuard.

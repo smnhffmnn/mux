@@ -200,7 +200,7 @@
     letter-spacing: 0.3px;
   }
 
-  input, select {
+  input {
     width: 100%;
   }
 

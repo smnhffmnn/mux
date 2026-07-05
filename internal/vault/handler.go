@@ -364,8 +364,8 @@ func handleSSHUnload(mgr *SSHManager) http.HandlerFunc {
 func handleSSHImport(mgr *SSHManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			KeyPath    string `json:"key_path"`    // path to key file (must be under ~/.ssh/)
-			KeyData    string `json:"key_data"`    // raw PEM key content (alternative to key_path)
+			KeyPath    string `json:"key_path"` // path to key file (must be under ~/.ssh/)
+			KeyData    string `json:"key_data"` // raw PEM key content (alternative to key_path)
 			Passphrase string `json:"passphrase"`
 		}
 		if !readJSON(r, &req) {

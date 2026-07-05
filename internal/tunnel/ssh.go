@@ -299,4 +299,3 @@ func defaultKnownHostsPath() string {
 	}
 	return filepath.Join(home, ".ssh", "known_hosts")
 }
-

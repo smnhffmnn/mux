@@ -11,7 +11,7 @@ jobs:
   create-release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -55,13 +55,13 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
@@ -162,9 +162,19 @@ jobs:
     needs: [build, checksums]
     runs-on: ubuntu-latest
     steps:
+      # Pushes via a repo-scoped SSH deploy key on smnhffmnn/homebrew-tap
+      # (secret TAP_DEPLOY_KEY). Deploy keys do not expire — unlike the PAT
+      # this replaced, which silently broke the tap update when it lapsed.
+      - name: Set up tap deploy key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.TAP_DEPLOY_KEY }}" > ~/.ssh/tap_deploy_key
+          chmod 600 ~/.ssh/tap_deploy_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+
       - name: Update Homebrew tap
         env:
-          TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/tap_deploy_key -o IdentitiesOnly=yes
         run: |
           VERSION=${GITHUB_REF_NAME#v}
 
@@ -178,7 +188,7 @@ jobs:
           FORMULA_SHA=$(sha256sum formula.tar.gz | cut -d' ' -f1)
           CASK_SHA=$(sha256sum cask.tar.gz | cut -d' ' -f1)
 
-          git clone https://x-access-token:${TAP_TOKEN}@github.com/smnhffmnn/homebrew-tap.git tap
+          git clone git@github.com:smnhffmnn/homebrew-tap.git tap
           cd tap
 
           cat > Formula/mux.rb << FORMULA
