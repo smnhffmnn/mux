@@ -185,8 +185,10 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 
 	var names []string
 	for _, t := range toolDefs {
-		// Prefix tool name with connection name
-		prefixedName := conn.Name + "_" + t.Tool.Name
+		// Prefix tool name with connection name. Connection names are
+		// human-readable display names — sanitize so the result satisfies
+		// the strictest MCP client pattern (^[a-zA-Z0-9_-]{1,64}$).
+		prefixedName := config.SanitizeToolName(conn.Name + "_" + t.Tool.Name)
 		t.Tool.Name = prefixedName
 		s.AddTool(t.Tool, withCallLogging(prefixedName, t.Handler))
 		log.Printf("[mux] Registered: %s", prefixedName)

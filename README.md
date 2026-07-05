@@ -8,10 +8,11 @@ mux is a [Model Context Protocol](https://modelcontextprotocol.io) gateway that 
 
 ## Features
 
-- **Databases** -- MariaDB, PostgreSQL, ClickHouse with schema introspection and query tools
-- **MCP Proxy** -- forward tool calls to upstream MCP servers (YouTrack, Sentry, Notion, Netdata, etc.)
-- **API Integrations** -- Microsoft Graph (mail, calendar, SharePoint), Google Workspace (Drive, Docs, Sheets, Gmail, Calendar, Tasks), Google Tag Manager, Google Gemini, OpenAI, ElevenLabs, Brave Search, Firecrawl, Hyperbrowser (stealth browser), fal.ai (async inference queue)
-- **Generic HTTP** -- connect any REST API with optional auth headers and file output
+- **Databases** -- MariaDB, PostgreSQL, ClickHouse with schema introspection and query tools; Meilisearch full-text search
+- **MCP Proxy** -- forward tool calls to upstream MCP servers with token or OAuth auth (YouTrack, Sentry, Notion, Asana MCP, Netdata, or any MCP endpoint)
+- **API Integrations** -- Microsoft Graph (mail, calendar, SharePoint), Google Workspace (Drive, Docs, Sheets, Gmail, Calendar, Tasks), Google Tag Manager, Google Gemini, OpenAI, ElevenLabs, Brave Search, Firecrawl, Hyperbrowser (stealth browser), fal.ai (async inference queue), Higgsfield (image/video generation via its hosted MCP), Recraft + Ideogram (image generation), Asana, YouTrack Agile (sprint boards), IMAP mail
+- **Generic HTTP** -- connect any REST API with token auth, custom headers, and file output
+- **Git Credentials** -- serve PATs from the secret store to git via `mux git-credential`
 - **WireGuard Tunnels** -- reach databases on private networks through userspace WireGuard (no root, no VPN client)
 - **Remote Provisioning** -- centrally manage connections and tunnels for your team from one or more HTTP endpoints (configure multiple `[[provisioning]]` blocks to combine sources)
 - **Two Transports, Three Modes** -- stdio (Claude Desktop) and Streamable HTTP (`/mcp`), with auto-detection of desktop, headless, and stdio modes

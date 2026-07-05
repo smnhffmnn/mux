@@ -23,7 +23,8 @@ type HTTP struct {
 	client       *http.Client
 	baseURL      string
 	token        string
-	tokenHeader  string // custom header name (e.g. "x-goog-api-key"); empty = "Authorization: Bearer"
+	tokenHeader  string            // custom header name (e.g. "x-goog-api-key"); empty = "Authorization: Bearer"
+	headers      map[string]string // extra headers sent with every request (e.g. "Notion-Version")
 	readOnly     bool
 	instructions string
 }
@@ -55,6 +56,7 @@ func NewHTTP(conn config.Connection, dialer Dialer) (*HTTP, error) {
 		baseURL:      baseURL,
 		token:        conn.Token,
 		tokenHeader:  conn.TokenHeader,
+		headers:      conn.Headers,
 		readOnly:     conn.ReadOnly,
 		instructions: conn.Instructions,
 	}, nil
@@ -158,6 +160,11 @@ func (h *HTTP) doRequest(ctx context.Context, method string, req mcp.CallToolReq
 	httpReq.Header.Set("Accept", "application/json")
 	if bodyReader != nil {
 		httpReq.Header.Set("Content-Type", "application/json")
+	}
+	// Custom headers may override the defaults above; the token header below
+	// wins over a custom header of the same name (auth stays vault-managed).
+	for name, value := range h.headers {
+		httpReq.Header.Set(name, value)
 	}
 	if h.token != "" {
 		if h.tokenHeader != "" {

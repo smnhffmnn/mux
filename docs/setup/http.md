@@ -12,6 +12,7 @@
 | Base URL | Base URL of the API (e.g. `https://api.example.com`). |
 | API Token (optional) | Bearer token for authentication. Stored in the Keychain. |
 | Token Header (optional) | Name of the authorization header. Default: `Authorization: Bearer`. Change if the API expects a different header. |
+| Headers (optional) | Extra headers sent with every request, one `Name: Value` per line — e.g. API version headers like `Notion-Version: 2022-06-28`. The token header wins over a custom header of the same name. |
 
 ## After creating
 

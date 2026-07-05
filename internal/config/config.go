@@ -137,6 +137,11 @@ type Connection struct {
 	Tunnel       string `toml:"tunnel,omitempty" json:"tunnel,omitempty"`             // name of a defined tunnel
 	MonthlyLimit int    `toml:"monthly_limit,omitzero" json:"monthlyLimit,omitempty"` // optional request limit per month
 	Source       string `toml:"-" json:"source,omitempty"`                            // see Source* constants in identifiers.go
+
+	// Headers are extra HTTP headers sent with every request (http type),
+	// e.g. API version headers like "Notion-Version: 2022-06-28". The
+	// vault-managed token header always wins over an entry of the same name.
+	Headers map[string]string `toml:"headers,omitempty" json:"headers,omitempty"`
 }
 
 // Enabled reports whether the connection has enough config to attempt a connection.

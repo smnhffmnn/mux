@@ -7,6 +7,7 @@
   let { types, onAdd, onClose }: { types: TypeListEntry[]; onAdd: () => void; onClose: () => void } = $props()
 
   let name = $state('')
+  // svelte-ignore state_referenced_locally — deliberate: seed the picker with the first type once; `types` is static per mount
   let selectedType = $state(types[0]?.type ?? '')
   let adding = $state(false)
   let error = $state('')
@@ -49,9 +50,9 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-<div class="overlay" onclick={onClose}>
+<div class="overlay" role="presentation" onclick={onClose}>
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="modal" onclick={(e) => e.stopPropagation()}>
+  <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
     <div class="modal-header">
       <h3>Add Connection</h3>
       <button class="close-btn" onclick={onClose}>×</button>
@@ -59,6 +60,7 @@
     <div class="modal-body">
       <div class="field">
         <label for="conn-name">Name</label>
+        <!-- svelte-ignore a11y_autofocus — focus the name field when the modal opens -->
         <input
           id="conn-name"
           type="text"

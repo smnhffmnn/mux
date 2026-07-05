@@ -48,6 +48,8 @@ register.go     # Connection registration and hot-reload
 4. Add a case in `tools.RegisterConnection()` in `internal/tools/tools.go`
 5. Add a TOML example in `config.example.toml`
 6. Document in `docs/connections.md`
+7. Create a setup guide in `docs/setup/<type>.md` — it is embedded into the binary and shown in the Add-Connection dialog
+8. Add the type to the Features list in `README.md`
 
 ## Pull Requests
 

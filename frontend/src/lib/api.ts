@@ -93,6 +93,7 @@ export interface FieldInfo {
   placeholder: string
   secret: boolean
   small: boolean
+  multiline: boolean
   secretStored: boolean
 }
 
@@ -171,6 +172,7 @@ export interface SaveConnectionRequest {
   tunnel?: string
   instructions?: string
   tokenHeader?: string
+  headers?: string
 }
 
 // API functions

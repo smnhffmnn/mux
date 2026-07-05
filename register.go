@@ -439,8 +439,10 @@ func (r *simpleReloader) registerProxy(conn config.Connection) {
 	}
 }
 
+// Registered tool names are sanitized (see config.SanitizeToolName), so the
+// prefix must be sanitized the same way.
 func (r *simpleReloader) trackProxyTools(connName string) {
-	prefix := connName + "_"
+	prefix := config.SanitizeToolName(connName) + "_"
 	var names []string
 	for name := range r.mcpServer.ListTools() {
 		if strings.HasPrefix(name, prefix) {

@@ -12,7 +12,27 @@
 
   let showAddModal = $state(false)
   let showAddTunnelModal = $state(false)
+  let connectionFilter = $state('')
+  let tunnelFilter = $state('')
   let serverInfoInterval: ReturnType<typeof setInterval>
+
+  // Every whitespace-separated term must occur in the name (case-insensitive),
+  // so "you agile" matches "Youtrack Agile Board".
+  function matchesFilter(name: string, query: string): boolean {
+    const haystack = name.toLowerCase()
+    return query
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean)
+      .every((term) => haystack.includes(term))
+  }
+
+  const filteredConnections = $derived(
+    $pageData ? $pageData.connections.filter((c) => matchesFilter(c.name, connectionFilter)) : []
+  )
+  const filteredTunnels = $derived(
+    $pageData ? $pageData.tunnels.filter((t) => matchesFilter(t.name, tunnelFilter)) : []
+  )
 
   onMount(async () => {
     $loading = true
@@ -103,13 +123,23 @@
         <div class="section">
           <div class="section-header">
             <h2>Connections</h2>
+            {#if $pageData.connections.length > 1}
+              <input
+                class="filter-input"
+                type="search"
+                placeholder="Filter by name..."
+                bind:value={connectionFilter}
+              />
+            {/if}
             <button class="primary" onclick={() => (showAddModal = true)}>+ Add</button>
           </div>
           {#if $pageData.connections.length === 0}
             <div class="empty">No connections configured. Click "+ Add" to create one.</div>
+          {:else if filteredConnections.length === 0}
+            <div class="empty">No connections match "{connectionFilter}".</div>
           {:else}
             <div class="card-list">
-              {#each $pageData.connections as conn (conn.name)}
+              {#each filteredConnections as conn (conn.name)}
                 <ConnectionCard {conn} tunnelNames={$pageData.tunnels.map(t => t.name)} onUpdate={refreshData} />
               {/each}
             </div>
@@ -120,13 +150,23 @@
         <div class="section">
           <div class="section-header">
             <h2>Tunnels</h2>
+            {#if $pageData.tunnels.length > 1}
+              <input
+                class="filter-input"
+                type="search"
+                placeholder="Filter by name..."
+                bind:value={tunnelFilter}
+              />
+            {/if}
             <button class="primary" onclick={() => (showAddTunnelModal = true)}>+ Add</button>
           </div>
           {#if $pageData.tunnels.length === 0}
             <div class="empty">No tunnels configured. Click "+ Add" to create one.</div>
+          {:else if filteredTunnels.length === 0}
+            <div class="empty">No tunnels match "{tunnelFilter}".</div>
           {:else}
             <div class="card-list">
-              {#each $pageData.tunnels as tunnel (tunnel.name)}
+              {#each filteredTunnels as tunnel (tunnel.name)}
                 <TunnelRow {tunnel} onUpdate={refreshData} />
               {/each}
             </div>
@@ -254,12 +294,19 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 10px;
     margin-bottom: 12px;
   }
 
   .section-header h2 {
     font-size: 15px;
     font-weight: 600;
+    flex: 1;
+  }
+
+  .filter-input {
+    width: 220px;
+    font-size: 12px;
   }
 
   .card-list {

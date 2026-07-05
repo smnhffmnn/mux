@@ -34,9 +34,9 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-<div class="overlay" onclick={onClose}>
+<div class="overlay" role="presentation" onclick={onClose}>
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="modal" onclick={(e) => e.stopPropagation()}>
+  <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
     <div class="modal-header">
       <h3>Add Tunnel</h3>
       <button class="close-btn" onclick={onClose}>&times;</button>
@@ -44,6 +44,7 @@
     <div class="modal-body">
       <div class="field">
         <label for="tunnel-name">Name</label>
+        <!-- svelte-ignore a11y_autofocus — focus the name field when the modal opens -->
         <input
           id="tunnel-name"
           type="text"
