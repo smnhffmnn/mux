@@ -194,8 +194,8 @@ func (f *Firecrawl) handleSearch(ctx context.Context, req mcp.CallToolRequest) (
 	}
 
 	payload := map[string]any{
-		"query":           query,
-		"scrapeOptions":   map[string]any{"formats": []string{"markdown"}},
+		"query":         query,
+		"scrapeOptions": map[string]any{"formats": []string{"markdown"}},
 	}
 
 	if limit, ok := req.GetArguments()["limit"].(float64); ok && limit > 0 {

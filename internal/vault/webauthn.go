@@ -206,8 +206,8 @@ type vaultUser struct {
 }
 
 func (u *vaultUser) WebAuthnID() []byte          { return u.id }
-func (u *vaultUser) WebAuthnName() string         { return u.name }
-func (u *vaultUser) WebAuthnDisplayName() string   { return u.displayName }
+func (u *vaultUser) WebAuthnName() string        { return u.name }
+func (u *vaultUser) WebAuthnDisplayName() string { return u.displayName }
 
 func (u *vaultUser) WebAuthnCredentials() []webauthn.Credential {
 	stored := u.vault.Credentials()
@@ -229,7 +229,7 @@ func (u *vaultUser) WebAuthnCredentials() []webauthn.Credential {
 		}
 		creds = append(creds, webauthn.Credential{
 			ID:              id,
-			PublicKey:        pk,
+			PublicKey:       pk,
 			AttestationType: "none",
 			Flags: webauthn.CredentialFlags{
 				BackupEligible: sc.BackupEligible,

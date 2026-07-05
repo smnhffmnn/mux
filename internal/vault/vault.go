@@ -295,7 +295,7 @@ func (v *Vault) lockInternal() {
 	if v.dek != nil {
 		wipeBytes(v.dek)
 		v.dek = nil
-		v.sessionToken.Store("")  // invalidate session token on lock
+		v.sessionToken.Store("") // invalidate session token on lock
 		v.sessionTokenAt.Store(0)
 		log.Printf("[vault] Locked")
 	}

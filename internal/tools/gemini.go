@@ -21,7 +21,7 @@ import (
 	"github.com/smnhffmnn/mux/internal/config"
 )
 
-const geminiMaxBody = 10 * 1024 * 1024  // 10 MB (base64 images are large)
+const geminiMaxBody = 10 * 1024 * 1024      // 10 MB (base64 images are large)
 const geminiMaxImageRead = 20 * 1024 * 1024 // 20 MB per input image
 
 // validModelName matches safe Gemini model identifiers.

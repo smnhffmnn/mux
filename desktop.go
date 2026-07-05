@@ -97,7 +97,7 @@ func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx 
 		Height: 680,
 		Mac: application.MacWindow{
 			InvisibleTitleBarHeight: 50,
-			Backdrop:               application.MacBackdropTranslucent,
+			Backdrop:                application.MacBackdropTranslucent,
 		},
 		URL: "/",
 	})

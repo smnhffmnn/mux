@@ -43,10 +43,10 @@ type credentialResponse struct {
 // CredentialSocket serves git credential requests over a Unix domain socket.
 // Only responds to hosts configured as git connections. Secrets never leave localhost.
 type CredentialSocket struct {
-	vault    *Vault
-	hosts    map[string]GitHost // host → config
-	listener net.Listener
-	wg       sync.WaitGroup
+	vault     *Vault
+	hosts     map[string]GitHost // host → config
+	listener  net.Listener
+	wg        sync.WaitGroup
 	closeOnce sync.Once
 	closed    chan struct{}
 }

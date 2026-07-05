@@ -386,4 +386,3 @@ func TestStripHTMLTags(t *testing.T) {
 		})
 	}
 }
-

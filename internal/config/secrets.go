@@ -29,7 +29,7 @@ type secretsFile struct {
 }
 
 var (
-	fileStoreMu   sync.Mutex
+	fileStoreMu sync.Mutex
 	skipKeyring atomic.Bool // set in headless mode or after first keyring failure
 
 	// activeVault is set when the vault feature is enabled.

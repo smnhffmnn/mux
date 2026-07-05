@@ -54,12 +54,12 @@ type EncryptedValue struct {
 
 // StoredCredential is a WebAuthn credential persisted in the vault.
 type StoredCredential struct {
-	ID             string    `json:"id"`              // base64 credential ID
-	PublicKey      string    `json:"public_key"`      // base64 COSE public key
-	AAGUID         string    `json:"aaguid"`          // hex authenticator GUID
+	ID             string    `json:"id"`         // base64 credential ID
+	PublicKey      string    `json:"public_key"` // base64 COSE public key
+	AAGUID         string    `json:"aaguid"`     // hex authenticator GUID
 	SignCount      uint32    `json:"sign_count"`
-	BackupEligible bool     `json:"backup_eligible"` // passkey can be synced (iCloud, Google)
-	BackupState    bool     `json:"backup_state"`    // passkey is currently synced
+	BackupEligible bool      `json:"backup_eligible"` // passkey can be synced (iCloud, Google)
+	BackupState    bool      `json:"backup_state"`    // passkey is currently synced
 	Name           string    `json:"name"`            // user-given label (e.g. "iPhone FaceID")
 	CreatedAt      time.Time `json:"created_at"`
 }

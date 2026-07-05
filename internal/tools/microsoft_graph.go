@@ -1047,13 +1047,13 @@ type graphConversation struct {
 }
 
 type graphMessageBrief struct {
-	ID           string   `json:"id"`
-	Sender       string   `json:"sender"`
-	SenderName   string   `json:"senderName"`
-	To           []string `json:"to"`
-	CC           []string `json:"cc"`
-	Date         string   `json:"date"`
-	BodyPreview  string   `json:"bodyPreview"`
+	ID          string   `json:"id"`
+	Sender      string   `json:"sender"`
+	SenderName  string   `json:"senderName"`
+	To          []string `json:"to"`
+	CC          []string `json:"cc"`
+	Date        string   `json:"date"`
+	BodyPreview string   `json:"bodyPreview"`
 }
 
 func groupByConversation(messages []graphRawMessage, limit int) []graphConversation {
