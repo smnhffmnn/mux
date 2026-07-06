@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net"
 	"net/netip"
 	"strings"
@@ -41,21 +42,7 @@ func New(cfg config.TunnelConfig) (*WGTunnel, error) {
 		return nil, fmt.Errorf("parse tunnel address %q: %w", cfg.TunnelAddress, err)
 	}
 
-	// Parse DNS servers
-	var dnsAddrs []netip.Addr
-	if cfg.DNS != "" {
-		for _, d := range strings.Split(cfg.DNS, ",") {
-			d = strings.TrimSpace(d)
-			if d == "" {
-				continue
-			}
-			a, err := netip.ParseAddr(d)
-			if err != nil {
-				return nil, fmt.Errorf("parse DNS %q: %w", d, err)
-			}
-			dnsAddrs = append(dnsAddrs, a)
-		}
-	}
+	dnsAddrs := parseDNS(cfg.Name, cfg.DNS)
 
 	mtu := cfg.MTU
 	if mtu == 0 {
@@ -207,4 +194,28 @@ func keyToHex(b64 string) (string, error) {
 		return "", fmt.Errorf("key must be 32 bytes, got %d", len(raw))
 	}
 	return hex.EncodeToString(raw), nil
+}
+
+// parseDNS extracts resolver addresses from a wg-quick-style DNS value.
+// wg-quick allows search domains alongside resolver IPs in the DNS field
+// (e.g. "fd00::1, ~corp.example.com" — systemd-style routing domains with a
+// "~" prefix, or plain domain names). Tunnel configs often arrive verbatim
+// from such .conf files, so tolerate those entries: only IP addresses become
+// resolvers, non-IP entries are logged and skipped. Search domains don't
+// apply here — hosts are dialed by FQDN.
+func parseDNS(tunnelName, dns string) []netip.Addr {
+	var out []netip.Addr
+	for _, d := range strings.Split(dns, ",") {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		a, err := netip.ParseAddr(d)
+		if err != nil {
+			log.Printf("[wg] Tunnel %q: ignoring non-IP DNS entry %q (search domain)", tunnelName, d)
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
