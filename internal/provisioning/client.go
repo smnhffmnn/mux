@@ -11,10 +11,29 @@ import (
 	"github.com/smnhffmnn/mux/internal/config"
 )
 
-// ProvisionResponse is the expected JSON structure from the provisioning endpoint.
+// ProvisionResponse is the parsed provisioning payload.
 type ProvisionResponse struct {
-	Tunnels     []config.TunnelConfig `json:"tunnels,omitempty"`
-	Connections []config.Connection   `json:"connections"`
+	Tunnels     []config.TunnelConfig
+	Connections []config.Connection
+}
+
+// wireTunnel captures tunnel fields from the provisioning JSON that
+// TunnelConfig deliberately refuses to (de)serialize. PrivateKey is tagged
+// `json:"-"` on TunnelConfig so the key can never leak through outbound
+// serialization (UI page data, config writes) — but the provisioning
+// endpoint is the one legitimate inbound path that may carry it (e.g.
+// managed tunnels whose key material is relayed live from the VPN
+// provisioner and never stored anywhere). The outer field shadows the
+// embedded one during unmarshal; Fetch copies it over explicitly.
+type wireTunnel struct {
+	config.TunnelConfig
+	PrivateKey string `json:"privateKey,omitempty"`
+}
+
+// wireResponse is the raw JSON shape of the provisioning endpoint.
+type wireResponse struct {
+	Tunnels     []wireTunnel        `json:"tunnels,omitempty"`
+	Connections []config.Connection `json:"connections"`
 }
 
 // Fetch retrieves the provisioning config from the provisioning endpoint.
@@ -71,14 +90,19 @@ func Fetch(ctx context.Context, endpoint, token string) (*ProvisionResponse, err
 		return nil, fmt.Errorf("provisioning server returned HTML instead of JSON — token is likely expired or invalid")
 	}
 
-	var result ProvisionResponse
-	if err := json.Unmarshal(body, &result); err != nil {
+	var wire wireResponse
+	if err := json.Unmarshal(body, &wire); err != nil {
 		return nil, fmt.Errorf("invalid JSON from %s: %w", endpoint, err)
 	}
 
-	// Mark all entries as provisioning-sourced
-	for i := range result.Tunnels {
-		result.Tunnels[i].Source = config.SourceProvisioning
+	// Mark all entries as provisioning-sourced and carry over the inbound-only
+	// secret fields (see wireTunnel).
+	result := ProvisionResponse{Connections: wire.Connections}
+	for _, wt := range wire.Tunnels {
+		t := wt.TunnelConfig
+		t.PrivateKey = wt.PrivateKey
+		t.Source = config.SourceProvisioning
+		result.Tunnels = append(result.Tunnels, t)
 	}
 	for i := range result.Connections {
 		result.Connections[i].Source = config.SourceProvisioning

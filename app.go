@@ -899,6 +899,7 @@ func (a *App) SyncProvisioning() (*PageData, error) {
 
 	var totalTunnels, totalConns int
 	var errs []string
+	var toRegister []config.Connection
 	for i := range a.cfg.Provisioning {
 		p := a.cfg.Provisioning[i]
 		if !p.Enabled() {
@@ -921,9 +922,20 @@ func (a *App) SyncProvisioning() (*PageData, error) {
 		for _, c := range resp.Connections {
 			delete(oldProvisioned, c.Name)
 		}
-		for _, conn := range resp.Connections {
-			a.registerConnectionTools(conn)
-		}
+		toRegister = append(toRegister, resp.Connections...)
+	}
+
+	// Start any provisioned tunnels that aren't running yet BEFORE registering
+	// connections — a freshly provisioned connection may reference a tunnel mux
+	// has never started, and registration is fail-closed on missing tunnels.
+	// Read the list back from cfg (not resp) so keychain-supplemented secrets
+	// from SetProvisioned are in effect.
+	for name, err := range a.tm.StartMissing(a.cfg.AllTunnels()) {
+		log.Printf("[app] Provisioned tunnel %q failed to start: %v — connections using it will be skipped", name, err)
+	}
+
+	for _, conn := range toRegister {
+		a.registerConnectionTools(conn)
 	}
 
 	// Unregister connections that were removed from any provisioning source.
