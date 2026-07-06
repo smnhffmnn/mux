@@ -64,6 +64,35 @@ func (tm *tunnelManager) Get(name string) tools.Dialer {
 	return nil
 }
 
+// StartMissing starts every tunnel in the list that isn't registered yet
+// (WireGuard and SSH alike); already-known tunnels are left untouched. This
+// lets a provisioning sync pass the full tunnel list after new entries
+// appeared — without it, tunnels provisioned at runtime would only ever
+// start on the next full mux restart. Returns errors keyed by tunnel name.
+func (tm *tunnelManager) StartMissing(tunnels []config.TunnelConfig) map[string]error {
+	var wgNew, sshNew []config.TunnelConfig
+	for _, t := range tunnels {
+		if tm.Get(t.Name) != nil {
+			continue
+		}
+		if t.IsSSH() {
+			sshNew = append(sshNew, t)
+		} else {
+			wgNew = append(wgNew, t)
+		}
+	}
+	errs := make(map[string]error)
+	if len(wgNew) > 0 {
+		for name, err := range tm.wg.Start(wgNew) {
+			errs[name] = err
+		}
+	}
+	for name, err := range tm.StartSSH(sshNew) {
+		errs[name] = err
+	}
+	return errs
+}
+
 // IsUp reports whether the named tunnel is running.
 func (tm *tunnelManager) IsUp(name string) bool {
 	if tm.wg.IsUp(name) {
