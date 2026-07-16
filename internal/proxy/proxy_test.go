@@ -1,6 +1,9 @@
 package proxy
 
-import "testing"
+import (
+	"encoding/base64"
+	"testing"
+)
 
 func TestTokenProviderHeaderFunc(t *testing.T) {
 	t.Run("bearer default", func(t *testing.T) {
@@ -39,6 +42,33 @@ func TestTokenProviderHeaderFunc(t *testing.T) {
 		tp := NewTokenProviderWithHeader("abc", "")
 		if got := tp.HeaderFunc(nil)["Authorization"]; got != "Bearer abc" {
 			t.Fatalf("Authorization = %q, want %q", got, "Bearer abc")
+		}
+	})
+
+	t.Run("basic scheme encodes token:basicSuffix", func(t *testing.T) {
+		// Graylog idiom: the token is the Basic username, password is "token".
+		tp := NewTokenProviderBasic("mytoken", "token")
+		// base64("mytoken:token")
+		want := "Basic " + base64.StdEncoding.EncodeToString([]byte("mytoken:token"))
+		if got := tp.HeaderFunc(nil)["Authorization"]; got != want {
+			t.Fatalf("Authorization = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("basic scheme with empty password (Stripe idiom)", func(t *testing.T) {
+		tp := NewTokenProviderBasic("sk_live_x", "")
+		want := "Basic " + base64.StdEncoding.EncodeToString([]byte("sk_live_x:"))
+		if got := tp.HeaderFunc(nil)["Authorization"]; got != want {
+			t.Fatalf("Authorization = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("basic scheme rotates token via Set", func(t *testing.T) {
+		tp := NewTokenProviderBasic("old", "token")
+		tp.Set("new")
+		want := "Basic " + base64.StdEncoding.EncodeToString([]byte("new:token"))
+		if got := tp.HeaderFunc(nil)["Authorization"]; got != want {
+			t.Fatalf("Authorization = %q, want %q", got, want)
 		}
 	})
 

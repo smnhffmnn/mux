@@ -134,6 +134,8 @@ type Connection struct {
 	Scopes       string `toml:"scopes,omitempty" json:"scopes,omitempty"`
 	Instructions string `toml:"instructions,omitempty" json:"instructions,omitempty"`
 	TokenHeader  string `toml:"token_header,omitempty" json:"tokenHeader,omitempty"`  // custom header name for token (default: "Authorization: Bearer {token}")
+	TokenScheme  string `toml:"token_scheme,omitempty" json:"tokenScheme,omitempty"`  // auth scheme: "" (bearer) or "basic"
+	BasicSuffix  string `toml:"basic_suffix,omitempty" json:"basicSuffix,omitempty"`  // non-secret constant placed after the token in Basic auth (token:suffix) when token_scheme=basic; a public constant, not a secret (e.g. Graylog "token", GitHub "x-oauth-basic")
 	Tunnel       string `toml:"tunnel,omitempty" json:"tunnel,omitempty"`             // name of a defined tunnel
 	MonthlyLimit int    `toml:"monthly_limit,omitzero" json:"monthlyLimit,omitempty"` // optional request limit per month
 	Source       string `toml:"-" json:"source,omitempty"`                            // see Source* constants in identifiers.go

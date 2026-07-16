@@ -26,6 +26,8 @@
   const fieldKeyMap: Record<string, string> = {
     client_id: 'clientId',
     token_header: 'tokenHeader',
+    token_scheme: 'tokenScheme',
+    basic_suffix: 'basicSuffix',
   }
 
   async function handleSave() {

@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -52,6 +53,38 @@ func TestHTTP_CustomHeaders(t *testing.T) {
 	}
 	if v := got.Get("Authorization"); v != "Bearer secret-token" {
 		t.Errorf("Authorization = %q, want vault-managed token to win", v)
+	}
+}
+
+func TestHTTP_BasicScheme(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h, err := NewHTTP(config.Connection{
+		Type:        config.TypeHTTP,
+		URL:         srv.URL,
+		Token:       "mytoken",
+		TokenScheme: "basic",
+		BasicSuffix: "token", // Graylog idiom: token is the username, password is "token"
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewHTTP: %v", err)
+	}
+
+	req := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Arguments: map[string]any{"path": "/ping"},
+	}}
+	if _, err := h.handleGet(context.Background(), req); err != nil {
+		t.Fatalf("handleGet: %v", err)
+	}
+
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("mytoken:token"))
+	if v := got.Get("Authorization"); v != want {
+		t.Errorf("Authorization = %q, want %q", v, want)
 	}
 }
 

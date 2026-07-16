@@ -183,7 +183,11 @@ func newProxyTokenMount(conn config.Connection, token string, tm *tunnelManager)
 		m.HTTPClient = proxyTunnelClient(dialer)
 	}
 	if token != "" {
-		m.Token = proxy.NewTokenProviderWithHeader(token, conn.TokenHeader)
+		if conn.TokenScheme == "basic" {
+			m.Token = proxy.NewTokenProviderBasic(token, conn.BasicSuffix)
+		} else {
+			m.Token = proxy.NewTokenProviderWithHeader(token, conn.TokenHeader)
+		}
 	}
 	return m, true
 }

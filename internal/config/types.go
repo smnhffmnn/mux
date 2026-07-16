@@ -48,7 +48,9 @@ var AllTypes = []TypeDef{
 	}},
 	{Type: TypeProxy, Label: "MCP Proxy (generic)", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "https://example.com/mcp"},
-		{Key: "token", Label: "Token", Placeholder: "perm:... (Basic: 'Basic <base64>' + set Token Header)", Secret: true},
+		{Key: "token", Label: "Token", Placeholder: "perm:... (or your raw token for Basic)", Secret: true},
+		{Key: "token_scheme", Label: "Token Scheme (optional)", Placeholder: "bearer (default) | basic"},
+		{Key: "basic_suffix", Label: "Basic Suffix (optional)", Placeholder: "non-secret constant after 'token:' when scheme=basic (e.g. 'token')"},
 		{Key: "token_header", Label: "Token Header (optional)", Placeholder: "Authorization: Bearer (default)"},
 		{Key: "headers", Label: "Headers (optional)", Placeholder: "One \"Name: Value\" per line", Multiline: true},
 	}},
@@ -69,6 +71,8 @@ var AllTypes = []TypeDef{
 	{Type: TypeHTTP, Label: "HTTP API", Fields: []TypeField{
 		{Key: "url", Label: "Base URL", Placeholder: "https://api.example.com"},
 		{Key: "token", Label: "API Token (optional)", Placeholder: "Bearer token", Secret: true},
+		{Key: "token_scheme", Label: "Token Scheme (optional)", Placeholder: "bearer (default) | basic"},
+		{Key: "basic_suffix", Label: "Basic Suffix (optional)", Placeholder: "non-secret constant after 'token:' when scheme=basic (e.g. 'token')"},
 		{Key: "token_header", Label: "Token Header (optional)", Placeholder: "Authorization: Bearer (default)"},
 		{Key: "headers", Label: "Headers (optional)", Placeholder: "One \"Name: Value\" per line, e.g. Notion-Version: 2022-06-28", Multiline: true},
 	}},
