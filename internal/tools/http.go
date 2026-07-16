@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -24,6 +25,8 @@ type HTTP struct {
 	baseURL      string
 	token        string
 	tokenHeader  string            // custom header name (e.g. "x-goog-api-key"); empty = "Authorization: Bearer"
+	tokenScheme  string            // "" (bearer) or "basic"
+	basicSuffix  string            // fixed password component when tokenScheme=basic (token is the Basic username)
 	headers      map[string]string // extra headers sent with every request (e.g. "Notion-Version")
 	readOnly     bool
 	instructions string
@@ -56,6 +59,8 @@ func NewHTTP(conn config.Connection, dialer Dialer) (*HTTP, error) {
 		baseURL:      baseURL,
 		token:        conn.Token,
 		tokenHeader:  conn.TokenHeader,
+		tokenScheme:  conn.TokenScheme,
+		basicSuffix:  conn.BasicSuffix,
 		headers:      conn.Headers,
 		readOnly:     conn.ReadOnly,
 		instructions: conn.Instructions,
@@ -167,9 +172,13 @@ func (h *HTTP) doRequest(ctx context.Context, method string, req mcp.CallToolReq
 		httpReq.Header.Set(name, value)
 	}
 	if h.token != "" {
-		if h.tokenHeader != "" {
+		switch {
+		case h.tokenScheme == "basic":
+			cred := base64.StdEncoding.EncodeToString([]byte(h.token + ":" + h.basicSuffix))
+			httpReq.Header.Set("Authorization", "Basic "+cred)
+		case h.tokenHeader != "":
 			httpReq.Header.Set(h.tokenHeader, h.token)
-		} else {
+		default:
 			httpReq.Header.Set("Authorization", "Bearer "+h.token)
 		}
 	}

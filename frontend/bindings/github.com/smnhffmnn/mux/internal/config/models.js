@@ -24,7 +24,7 @@ export class Connection {
         }
         if (!("type" in $$source)) {
             /**
-             * "postgresql", "clickhouse", "mariadb", "proxy"
+             * see Type* constants in identifiers.go
              * @member
              * @type {string}
              */
@@ -103,6 +103,14 @@ export class Connection {
         }
         if (/** @type {any} */(false)) {
             /**
+             * OAuth client ID (microsoft-graph: Azure App Registration ID)
+             * @member
+             * @type {string | undefined}
+             */
+            this["clientId"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
              * @member
              * @type {string | undefined}
              */
@@ -125,6 +133,22 @@ export class Connection {
         }
         if (/** @type {any} */(false)) {
             /**
+             * auth scheme: "" (bearer) or "basic"
+             * @member
+             * @type {string | undefined}
+             */
+            this["tokenScheme"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * non-secret constant placed after the token in Basic auth (token:suffix) when token_scheme=basic; a public constant, not a secret (e.g. Graylog "token", GitHub "x-oauth-basic")
+             * @member
+             * @type {string | undefined}
+             */
+            this["basicSuffix"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
              * name of a defined tunnel
              * @member
              * @type {string | undefined}
@@ -141,11 +165,21 @@ export class Connection {
         }
         if (/** @type {any} */(false)) {
             /**
-             * "local" or "provisioning"
+             * see Source* constants in identifiers.go
              * @member
              * @type {string | undefined}
              */
             this["source"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * Headers are extra HTTP headers sent with every request (http and proxy
+             * types), e.g. API version headers like "Notion-Version: 2022-06-28". The
+             * vault-managed token header always wins over an entry of the same name.
+             * @member
+             * @type {{ [_ in string]?: string } | undefined}
+             */
+            this["headers"] = undefined;
         }
 
         Object.assign(this, $$source);
@@ -157,7 +191,14 @@ export class Connection {
      * @returns {Connection}
      */
     static createFrom($$source = {}) {
+        const $$createField21_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("headers" in $$parsedSource) {
+            $$parsedSource["headers"] = $$createField21_0($$parsedSource["headers"]);
+        }
         return new Connection(/** @type {Partial<Connection>} */($$parsedSource));
     }
 }
+
+// Private type creation functions
+const $$createType0 = $Create.Map($Create.Any, $Create.Any);

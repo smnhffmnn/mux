@@ -212,7 +212,7 @@ export function StartOAuth(name) {
 }
 
 /**
- * SyncProvisioning fetches config from the provisioning server and returns updated page data.
+ * SyncProvisioning fetches config from every configured endpoint and returns updated page data.
  * @returns {$CancellablePromise<$models.PageData | null>}
  */
 export function SyncProvisioning() {

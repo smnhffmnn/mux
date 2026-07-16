@@ -304,6 +304,10 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 					fi.Value = conn.Scopes
 				case "token_header":
 					fi.Value = conn.TokenHeader
+				case "token_scheme":
+					fi.Value = conn.TokenScheme
+				case "basic_suffix":
+					fi.Value = conn.BasicSuffix
 				case "headers":
 					fi.Value = config.FormatHeaderLines(conn.Headers)
 				}
@@ -515,6 +519,14 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 			return nil, fmt.Errorf("invalid token_header %q: must be a valid HTTP header name", fields.TokenHeader)
 		}
 		conn.TokenHeader = fields.TokenHeader
+		if fields.TokenScheme != "" && fields.TokenScheme != "bearer" && fields.TokenScheme != "basic" {
+			return nil, fmt.Errorf("invalid token_scheme %q: must be 'bearer' or 'basic'", fields.TokenScheme)
+		}
+		if fields.TokenScheme == "basic" && fields.TokenHeader != "" {
+			return nil, fmt.Errorf("token_scheme=basic ignores token_header (Basic always uses the Authorization header) — set only one")
+		}
+		conn.TokenScheme = fields.TokenScheme
+		conn.BasicSuffix = fields.BasicSuffix
 		headers, err := config.ParseHeaderLines(fields.Headers)
 		if err != nil {
 			return nil, fmt.Errorf("invalid headers: %w", err)

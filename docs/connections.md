@@ -502,15 +502,21 @@ instructions = "Semantic search over documentation. Use when grep is insufficien
 
 ### MCP Proxy
 
-Connects to an upstream MCP server, discovers its tools, and re-exposes them with a `{name}_` prefix. Supports Bearer token, custom-header (e.g. Basic), and OAuth 2.0 + PKCE authentication.
+Connects to an upstream MCP server, discovers its tools, and re-exposes them with a `{name}_` prefix. Supports Bearer token, custom-header, HTTP Basic, and OAuth 2.0 + PKCE authentication.
 
 **Required fields**: `name`, `type`, `url`
 
-**Optional fields**: `oauth` (default: false), `token_header`, `headers`, `tunnel`, `instructions`
+**Optional fields**: `oauth` (default: false), `token_scheme`, `basic_suffix`, `token_header`, `headers`, `tunnel`, `instructions`
 
 **Secret**: `{name}-token` in secret store (token auth) or `{name}-oauth-token` (OAuth)
 
-By default the token is sent as `Authorization: Bearer {token}`. Set `token_header` to send it under a custom header name, verbatim — this is how non-bearer schemes are expressed: bake the scheme into the token value. For **Basic auth**, store `Basic {base64}` as the token and set `token_header = "Authorization"` (the credential stays in the secret store, not in plaintext config). `headers` adds extra static headers on every request; the token header wins over a static header of the same name.
+Auth precedence for the `{name}-token` secret:
+
+- **Bearer** (default) — `Authorization: Bearer {token}`.
+- **`token_scheme = "basic"`** — `Authorization: Basic base64({token}:{basic_suffix})`. The token is the Basic *username* and `basic_suffix` a fixed constant, which is the common API-token-as-Basic idiom (Graylog uses `token`, GitHub `x-oauth-basic`, Stripe an empty value). This lets a user supply just their **raw token** — mux does the base64 encoding — so it is the right choice for a per-user token on a provisioned connection.
+- **`token_header = "X"`** — sends the token verbatim under header `X` (e.g. `x-goog-api-key`).
+
+`headers` adds extra static headers on every request; the token header wins over a static header of the same name.
 
 When `tunnel` is set, the upstream connection is dialed through that tunnel (WireGuard or SSH) — required for MCP servers that are only routable on an internal network. This is fail-closed: if the tunnel is unavailable the proxy is skipped rather than connected directly.
 
@@ -521,13 +527,14 @@ name = "youtrack"
 type = "proxy"
 url = "https://instance.myjetbrains.com/mcp"
 
-# Basic-auth proxy over an internal tunnel
-# Store the token as: secret_set {name}-token = "Basic <base64 of user:pass>"
+# Basic-auth proxy over an internal tunnel — each user sets only their raw token
+# via: secret_set {name}-token = "<raw access token>"
 [[connections]]
 name = "internal-logs"
 type = "proxy"
 url = "https://logs.internal.example.com/api/mcp"
-token_header = "Authorization"
+token_scheme = "basic"
+basic_suffix = "token"
 tunnel = "office-vpn"
 
 # OAuth proxy
@@ -568,11 +575,11 @@ Generic HTTP client for any REST API. Useful for internal APIs or services witho
 
 **Required fields**: `name`, `type`, `url`
 
-**Optional fields**: `read_only` (default: false), `token_header`, `headers`, `tunnel`, `instructions`
+**Optional fields**: `read_only` (default: false), `token_scheme`, `basic_suffix`, `token_header`, `headers`, `tunnel`, `instructions`
 
 **Secret**: `{name}-token` in secret store (optional auth token)
 
-By default, the token is sent as `Authorization: Bearer {token}`. Set `token_header` to use a custom header name instead (e.g. `x-goog-api-key` for Google APIs).
+By default, the token is sent as `Authorization: Bearer {token}`. Set `token_header` to use a custom header name instead (e.g. `x-goog-api-key` for Google APIs). Set `token_scheme = "basic"` to send `Authorization: Basic base64({token}:{basic_suffix})` — the token is the Basic username (see the MCP Proxy section for the idiom).
 
 Use `headers` for extra headers the API requires on every request, e.g. API version headers. The token header always wins over a custom header of the same name.
 

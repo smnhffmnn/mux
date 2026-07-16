@@ -175,5 +175,7 @@ type SaveConnectionRequest struct {
 	Tunnel       string `json:"tunnel,omitempty"`
 	Instructions string `json:"instructions,omitempty"`
 	TokenHeader  string `json:"tokenHeader,omitempty"`
+	TokenScheme  string `json:"tokenScheme,omitempty"`
+	BasicSuffix  string `json:"basicSuffix,omitempty"`
 	Headers      string `json:"headers,omitempty"` // newline-separated "Name: Value" lines
 }

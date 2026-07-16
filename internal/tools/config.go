@@ -107,7 +107,13 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("Instructions for AI agents describing when/how to use this connection."),
 			),
 			mcp.WithString("token_header",
-				mcp.Description("Custom header name for the API token, sent verbatim (http and proxy types), e.g. 'x-goog-api-key'. Default: sends as 'Authorization: Bearer {token}'. For Basic auth on a proxy, set this to 'Authorization' and store the token as 'Basic <base64>'."),
+				mcp.Description("Custom header name for the API token, sent verbatim (http and proxy types), e.g. 'x-goog-api-key'. Default: sends as 'Authorization: Bearer {token}'."),
+			),
+			mcp.WithString("token_scheme",
+				mcp.Description("Auth scheme for the token (http and proxy types): 'bearer' (default) or 'basic'. With 'basic', mux sends 'Authorization: Basic base64({token}:{basic_suffix})' — the token is the Basic username, so a user can supply just their raw token (e.g. a Graylog access token)."),
+			),
+			mcp.WithString("basic_suffix",
+				mcp.Description("Fixed password component used when token_scheme=basic (the token is the Basic username). E.g. Graylog uses 'token', GitHub 'x-oauth-basic', Stripe an empty value."),
 			),
 			mcp.WithString("headers",
 				mcp.Description("Extra HTTP headers sent with every request (http and proxy types), one 'Name: Value' per line (e.g. 'Notion-Version: 2022-06-28')."),
@@ -387,6 +393,18 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 			return mcp.NewToolResultError(fmt.Sprintf("invalid token_header %q: must be a valid HTTP header name (e.g. 'x-goog-api-key')", v)), nil
 		}
 		conn.TokenHeader = v
+	}
+	if v := req.GetString("token_scheme", ""); v != "" {
+		if v != "bearer" && v != "basic" {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid token_scheme %q: must be 'bearer' or 'basic'", v)), nil
+		}
+		if v == "basic" && conn.TokenHeader != "" {
+			return mcp.NewToolResultError("token_scheme=basic ignores token_header (Basic always uses the Authorization header) — set only one"), nil
+		}
+		conn.TokenScheme = v
+	}
+	if v := req.GetString("basic_suffix", ""); v != "" {
+		conn.BasicSuffix = v
 	}
 	if v := req.GetString("headers", ""); v != "" {
 		headers, err := config.ParseHeaderLines(v)

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -18,13 +19,15 @@ import (
 	"github.com/smnhffmnn/mux/internal/config"
 )
 
-// TokenProvider holds an auth token that can be updated at runtime and knows
-// which header to send it under. Safe for concurrent use (lock-free reads via
-// atomic.Value). The header name is fixed at construction; only the token value
-// is mutable.
+// TokenProvider holds an auth token that can be updated at runtime and knows how
+// to present it. Safe for concurrent use (lock-free reads via atomic.Value). The
+// presentation (header name / basic scheme) is fixed at construction; only the
+// token value is mutable, so secret_set can rotate it live.
 type TokenProvider struct {
-	token  atomic.Value // stores string
-	header string       // header name; empty => "Authorization: Bearer <token>"
+	token       atomic.Value // stores string
+	header      string       // custom header name; empty => "Authorization: Bearer <token>"
+	basic       bool         // if true, emit "Authorization: Basic base64(<token>:<basicSuffix>)"
+	basicSuffix string       // fixed password component when basic (the token is the Basic username)
 }
 
 // NewTokenProvider creates a TokenProvider that sends the token as a bearer
@@ -36,10 +39,20 @@ func NewTokenProvider(token string) *TokenProvider {
 // NewTokenProviderWithHeader creates a TokenProvider that sends the token under
 // a custom header, verbatim (no scheme prefix). When header is empty it falls
 // back to the bearer default. This mirrors the http connection type: a custom
-// header carries the token as-is, so schemes other than Bearer (e.g. Basic) can
-// be expressed by baking the scheme into the token value.
+// header carries the token as-is.
 func NewTokenProviderWithHeader(token, header string) *TokenProvider {
 	tp := &TokenProvider{header: header}
+	tp.token.Store(token)
+	return tp
+}
+
+// NewTokenProviderBasic creates a TokenProvider that presents the token as HTTP
+// Basic auth: "Authorization: Basic base64(<token>:<basicSuffix>)". The token
+// is the Basic username and basicSuffix the fixed password component — the
+// idiom for API-token-as-Basic (Graylog uses "token", GitHub "x-oauth-basic",
+// Stripe an empty password). Lets a user supply just their raw token.
+func NewTokenProviderBasic(token, basicSuffix string) *TokenProvider {
+	tp := &TokenProvider{basic: true, basicSuffix: basicSuffix}
 	tp.token.Store(token)
 	return tp
 }
@@ -53,6 +66,10 @@ func (tp *TokenProvider) Set(token string) {
 // Signature matches transport.HTTPHeaderFunc.
 func (tp *TokenProvider) HeaderFunc(_ context.Context) map[string]string {
 	tok := tp.token.Load().(string)
+	if tp.basic {
+		cred := base64.StdEncoding.EncodeToString([]byte(tok + ":" + tp.basicSuffix))
+		return map[string]string{"Authorization": "Basic " + cred}
+	}
 	if tp.header != "" {
 		return map[string]string{tp.header: tok}
 	}

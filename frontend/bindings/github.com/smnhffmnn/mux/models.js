@@ -273,6 +273,13 @@ export class FieldInfo {
              */
             this["small"] = false;
         }
+        if (!("multiline" in $$source)) {
+            /**
+             * @member
+             * @type {boolean}
+             */
+            this["multiline"] = false;
+        }
         if (!("secretStored" in $$source)) {
             /**
              * @member
@@ -444,20 +451,21 @@ export class PageData {
 }
 
 /**
- * ProvisioningInfo describes provisioning status.
+ * ProvisioningEndpointInfo describes a single provisioning endpoint.
  */
-export class ProvisioningInfo {
+export class ProvisioningEndpointInfo {
     /**
-     * Creates a new ProvisioningInfo instance.
-     * @param {Partial<ProvisioningInfo>} [$$source = {}] - The source object to create the ProvisioningInfo.
+     * Creates a new ProvisioningEndpointInfo instance.
+     * @param {Partial<ProvisioningEndpointInfo>} [$$source = {}] - The source object to create the ProvisioningEndpointInfo.
      */
     constructor($$source = {}) {
-        if (!("configured" in $$source)) {
+        if (!("name" in $$source)) {
             /**
+             * empty for the legacy default endpoint
              * @member
-             * @type {boolean}
+             * @type {string}
              */
-            this["configured"] = false;
+            this["name"] = "";
         }
         if (!("endpoint" in $$source)) {
             /**
@@ -475,6 +483,7 @@ export class ProvisioningInfo {
         }
         if (!("tunnels" in $$source)) {
             /**
+             * count delivered by this endpoint
              * @member
              * @type {number}
              */
@@ -482,6 +491,63 @@ export class ProvisioningInfo {
         }
         if (!("connections" in $$source)) {
             /**
+             * count delivered by this endpoint
+             * @member
+             * @type {number}
+             */
+            this["connections"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ProvisioningEndpointInfo instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {ProvisioningEndpointInfo}
+     */
+    static createFrom($$source = {}) {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ProvisioningEndpointInfo(/** @type {Partial<ProvisioningEndpointInfo>} */($$parsedSource));
+    }
+}
+
+/**
+ * ProvisioningInfo describes the aggregate provisioning status across all endpoints
+ * and lists each configured endpoint individually.
+ */
+export class ProvisioningInfo {
+    /**
+     * Creates a new ProvisioningInfo instance.
+     * @param {Partial<ProvisioningInfo>} [$$source = {}] - The source object to create the ProvisioningInfo.
+     */
+    constructor($$source = {}) {
+        if (!("configured" in $$source)) {
+            /**
+             * true if at least one endpoint has endpoint+token
+             * @member
+             * @type {boolean}
+             */
+            this["configured"] = false;
+        }
+        if (!("endpoints" in $$source)) {
+            /**
+             * @member
+             * @type {ProvisioningEndpointInfo[]}
+             */
+            this["endpoints"] = [];
+        }
+        if (!("tunnels" in $$source)) {
+            /**
+             * aggregate count
+             * @member
+             * @type {number}
+             */
+            this["tunnels"] = 0;
+        }
+        if (!("connections" in $$source)) {
+            /**
+             * aggregate count
              * @member
              * @type {number}
              */
@@ -511,7 +577,11 @@ export class ProvisioningInfo {
      * @returns {ProvisioningInfo}
      */
     static createFrom($$source = {}) {
+        const $$createField1_0 = $$createType11;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("endpoints" in $$parsedSource) {
+            $$parsedSource["endpoints"] = $$createField1_0($$parsedSource["endpoints"]);
+        }
         return new ProvisioningInfo(/** @type {Partial<ProvisioningInfo>} */($$parsedSource));
     }
 }
@@ -579,6 +649,13 @@ export class SaveConnectionRequest {
              * @member
              * @type {string | undefined}
              */
+            this["clientId"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
             this["scopes"] = undefined;
         }
         if (/** @type {any} */(false)) {
@@ -601,6 +678,28 @@ export class SaveConnectionRequest {
              * @type {string | undefined}
              */
             this["tokenHeader"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["tokenScheme"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["basicSuffix"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * newline-separated "Name: Value" lines
+             * @member
+             * @type {string | undefined}
+             */
+            this["headers"] = undefined;
         }
 
         Object.assign(this, $$source);
@@ -1105,3 +1204,5 @@ const $$createType6 = ConnInfo.createFrom;
 const $$createType7 = $Create.Array($$createType6);
 const $$createType8 = TypeListEntry.createFrom;
 const $$createType9 = $Create.Array($$createType8);
+const $$createType10 = ProvisioningEndpointInfo.createFrom;
+const $$createType11 = $Create.Array($$createType10);

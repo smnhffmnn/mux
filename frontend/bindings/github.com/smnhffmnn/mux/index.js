@@ -15,6 +15,7 @@ export {
     OAuthStartResult,
     OAuthStatus,
     PageData,
+    ProvisioningEndpointInfo,
     ProvisioningInfo,
     SaveConnectionRequest,
     SaveTunnelRequest,
