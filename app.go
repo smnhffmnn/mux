@@ -203,11 +203,13 @@ func (a *App) registerProxyConnection(conn config.Connection) {
 		}
 		// Track the registered tool names
 		a.trackProxyTools(conn.Name)
-	} else if conn.Token != "" {
-		mount := proxy.Mount{
-			Name:  conn.Name,
-			URL:   conn.URL,
-			Token: proxy.NewTokenProvider(conn.Token),
+	} else {
+		// Token, custom-header, and/or no-auth mount — routed through the
+		// connection's tunnel when set (fail-closed if it's unavailable).
+		mount, ok := newProxyTokenMount(conn, conn.Token, a.tm)
+		if !ok {
+			log.Printf("[mux] Skipping proxy %q: tunnel %q not available", conn.Name, conn.Tunnel)
+			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -509,6 +511,9 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 		}
 		conn.Tunnel = fields.Tunnel
 		conn.Instructions = fields.Instructions
+		if fields.TokenHeader != "" && !config.ValidHeaderName(fields.TokenHeader) {
+			return nil, fmt.Errorf("invalid token_header %q: must be a valid HTTP header name", fields.TokenHeader)
+		}
 		conn.TokenHeader = fields.TokenHeader
 		headers, err := config.ParseHeaderLines(fields.Headers)
 		if err != nil {

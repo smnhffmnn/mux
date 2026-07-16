@@ -48,7 +48,9 @@ var AllTypes = []TypeDef{
 	}},
 	{Type: TypeProxy, Label: "MCP Proxy (generic)", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "https://example.com/mcp"},
-		{Key: "token", Label: "Token", Placeholder: "perm:...", Secret: true},
+		{Key: "token", Label: "Token", Placeholder: "perm:... (Basic: 'Basic <base64>' + set Token Header)", Secret: true},
+		{Key: "token_header", Label: "Token Header (optional)", Placeholder: "Authorization: Bearer (default)"},
+		{Key: "headers", Label: "Headers (optional)", Placeholder: "One \"Name: Value\" per line", Multiline: true},
 	}},
 	{Type: TypeYouTrack, Label: "YouTrack", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "https://instance.myjetbrains.com/mcp"},
