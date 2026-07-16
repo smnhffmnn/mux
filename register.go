@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -139,8 +142,54 @@ func registerConnections(s *server.MCPServer, cfg *config.Config, tm *tunnelMana
 	}
 }
 
+// proxyTunnelClient returns an HTTP client whose connections are dialed through
+// the given tunnel dialer. A proxy to an MCP server that is only routable inside
+// a tunnel (an internal host) needs this — without it the upstream connection
+// uses the default network namespace and never reaches the host. TLS
+// verification is skipped, matching the http connection type, because tunneled
+// endpoints are internal and often present certificates for private names.
+func proxyTunnelClient(dialer tools.Dialer) *http.Client {
+	tr := &http.Transport{
+		ResponseHeaderTimeout: 30 * time.Second,
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, addr)
+		},
+	}
+	// Deliberately no http.Client.Timeout (unlike the http connection type): MCP
+	// Streamable-HTTP/SSE connections are long-lived streams that a whole-request
+	// deadline would sever. ResponseHeaderTimeout bounds the initial response only.
+	return &http.Client{Transport: tr}
+}
+
+// newProxyTokenMount builds a non-OAuth proxy mount for a connection, honouring
+// a custom token header and extra static headers, and routing through the
+// connection's tunnel when one is set. It is fail-closed on tunnels: if the
+// connection references a tunnel that is not available, ok is false and no mount
+// should be attempted (a direct connection would bypass the tunnel). token is
+// passed explicitly because callers resolve it from different places (in-memory
+// config vs. the vault).
+func newProxyTokenMount(conn config.Connection, token string, tm *tunnelManager) (proxy.Mount, bool) {
+	m := proxy.Mount{
+		Name:    conn.Name,
+		URL:     conn.URL,
+		Headers: conn.Headers,
+	}
+	if conn.Tunnel != "" {
+		dialer := tm.Get(conn.Tunnel)
+		if dialer == nil {
+			return proxy.Mount{}, false
+		}
+		m.HTTPClient = proxyTunnelClient(dialer)
+	}
+	if token != "" {
+		m.Token = proxy.NewTokenProviderWithHeader(token, conn.TokenHeader)
+	}
+	return m, true
+}
+
 // registerProxies connects to upstream MCP servers and re-exports their tools.
-func registerProxies(ctx context.Context, s *server.MCPServer, cfg *config.Config) {
+func registerProxies(ctx context.Context, s *server.MCPServer, cfg *config.Config, tm *tunnelManager) {
 	var mounts []proxy.Mount
 
 	for _, conn := range cfg.AllConnections() {
@@ -166,19 +215,17 @@ func registerProxies(ctx context.Context, s *server.MCPServer, cfg *config.Confi
 					},
 				})
 			}
-		} else if conn.Token != "" {
-			mounts = append(mounts, proxy.Mount{
-				Name:  conn.Name,
-				URL:   conn.URL,
-				Token: proxy.NewTokenProvider(conn.Token),
-			})
-		} else {
-			// No-auth mount — upstream server handles its own auth (e.g. google-workspace)
-			mounts = append(mounts, proxy.Mount{
-				Name: conn.Name,
-				URL:  conn.URL,
-			})
+			continue
 		}
+
+		// Token, custom-header, and/or no-auth mounts — all routed through the
+		// connection's tunnel when set (fail-closed if it's unavailable).
+		m, ok := newProxyTokenMount(conn, conn.Token, tm)
+		if !ok {
+			log.Printf("[mux] Skipping proxy %q: tunnel %q not available", conn.Name, conn.Tunnel)
+			continue
+		}
+		mounts = append(mounts, m)
 	}
 
 	if len(mounts) > 0 {
@@ -286,17 +333,17 @@ func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config
 		} else {
 			// Resolve token from vault without mutating the shared config
 			token, _ := config.GetSecret(conn.Name + "-token")
-			if token != "" {
-				mount = proxy.Mount{
-					Name:  conn.Name,
-					URL:   conn.URL,
-					Token: proxy.NewTokenProvider(token),
-				}
-			} else {
-				// No-auth connections don't depend on vault secrets —
-				// they were already attempted at startup. Skip retry.
+			// A no-auth mount with no tunnel and no headers has nothing that
+			// depends on the vault — it was already attempted at startup.
+			if token == "" && conn.Tunnel == "" && len(conn.Headers) == 0 {
 				continue
 			}
+			m, ok := newProxyTokenMount(conn, token, tm)
+			if !ok {
+				// Tunnel still not up — a later unlock/retry may resolve it.
+				continue
+			}
+			mount = m
 		}
 
 		mountCtx, mountCancel := context.WithTimeout(ctx, 30*time.Second)
@@ -439,24 +486,13 @@ func (r *simpleReloader) registerProxy(conn config.Connection) {
 			return
 		}
 		r.trackProxyTools(conn.Name)
-	} else if conn.Token != "" {
-		mount := proxy.Mount{
-			Name:  conn.Name,
-			URL:   conn.URL,
-			Token: proxy.NewTokenProvider(conn.Token),
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := proxy.RegisterMount(ctx, r.mcpServer, mount); err != nil {
-			log.Printf("[mux] Warning: proxy %s not available: %v", conn.Name, err)
-			return
-		}
-		r.trackProxyTools(conn.Name)
 	} else {
-		// No-auth mount — upstream server handles its own auth
-		mount := proxy.Mount{
-			Name: conn.Name,
-			URL:  conn.URL,
+		// Token, custom-header, and/or no-auth mount — routed through the
+		// connection's tunnel when set (fail-closed if it's unavailable).
+		mount, ok := newProxyTokenMount(conn, conn.Token, r.tm)
+		if !ok {
+			log.Printf("[mux] Skipping proxy %q: tunnel %q not available", conn.Name, conn.Tunnel)
+			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

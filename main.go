@@ -253,7 +253,7 @@ More info: https://github.com/smnhffmnn/mux
 	// Register proxy mounts
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	registerProxies(ctx, s, cfg)
+	registerProxies(ctx, s, cfg, tm)
 
 	// Wire up vault unlock → retry skipped connections
 	if vlt != nil {

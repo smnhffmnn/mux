@@ -502,13 +502,17 @@ instructions = "Semantic search over documentation. Use when grep is insufficien
 
 ### MCP Proxy
 
-Connects to an upstream MCP server, discovers its tools, and re-exposes them with a `{name}_` prefix. Supports Bearer token and OAuth 2.0 + PKCE authentication.
+Connects to an upstream MCP server, discovers its tools, and re-exposes them with a `{name}_` prefix. Supports Bearer token, custom-header (e.g. Basic), and OAuth 2.0 + PKCE authentication.
 
 **Required fields**: `name`, `type`, `url`
 
-**Optional fields**: `oauth` (default: false), `tunnel`, `instructions`
+**Optional fields**: `oauth` (default: false), `token_header`, `headers`, `tunnel`, `instructions`
 
-**Secret**: `{name}-token` in secret store (Bearer token) or `{name}-oauth-token` (OAuth)
+**Secret**: `{name}-token` in secret store (token auth) or `{name}-oauth-token` (OAuth)
+
+By default the token is sent as `Authorization: Bearer {token}`. Set `token_header` to send it under a custom header name, verbatim — this is how non-bearer schemes are expressed: bake the scheme into the token value. For **Basic auth**, store `Basic {base64}` as the token and set `token_header = "Authorization"` (the credential stays in the secret store, not in plaintext config). `headers` adds extra static headers on every request; the token header wins over a static header of the same name.
+
+When `tunnel` is set, the upstream connection is dialed through that tunnel (WireGuard or SSH) — required for MCP servers that are only routable on an internal network. This is fail-closed: if the tunnel is unavailable the proxy is skipped rather than connected directly.
 
 ```toml
 # Bearer token proxy
@@ -516,6 +520,15 @@ Connects to an upstream MCP server, discovers its tools, and re-exposes them wit
 name = "youtrack"
 type = "proxy"
 url = "https://instance.myjetbrains.com/mcp"
+
+# Basic-auth proxy over an internal tunnel
+# Store the token as: secret_set {name}-token = "Basic <base64 of user:pass>"
+[[connections]]
+name = "internal-logs"
+type = "proxy"
+url = "https://logs.internal.example.com/api/mcp"
+token_header = "Authorization"
+tunnel = "office-vpn"
 
 # OAuth proxy
 [[connections]]
