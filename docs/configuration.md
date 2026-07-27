@@ -27,12 +27,37 @@ Secrets (passwords, tokens, keys) have their own resolution chain:
 ```toml
 [server]
 port = 7700                        # HTTP port (default: 7700)
+stdio_proxy = "auto"               # stdio behaviour next to a running instance (default: "auto")
 tls_cert = "/path/to/cert.pem"    # enables HTTPS server (required for vault WebAuthn)
 tls_key = "/path/to/key.pem"
 tls_port = 7701                    # HTTPS port (default: port + 1)
 ```
 
 The HTTP port serves the MCP endpoint (`/mcp`) on localhost. The HTTPS port (if configured) serves the vault UI, WebAuthn flows, and approval pages on all interfaces.
+
+`stdio_proxy` controls what a stdio invocation does when another instance is already serving MCP on `port`:
+
+| Value | Behaviour |
+|-------|-----------|
+| `auto` (default) | Bridge to the running instance; start standalone if there is none |
+| `never` | Always start a full standalone instance |
+| `always` | Refuse to start unless an instance is already serving |
+
+Only one instance per machine should own the tunnels, the config file and the vault — see [Running more than one instance](#running-more-than-one-instance) below.
+
+### Running more than one instance
+
+Clients that spawn mux themselves (Claude Desktop, Cursor) start one process each. Without bridging, every one of those processes would build its own tunnels, its own secret view and its own in-memory copy of `config.toml`, which breaks in ways that are hard to attribute:
+
+- **Tunnels fight over the peer.** Provisioned WireGuard credentials are issued per user, so every instance receives the *same* private key and tunnel address. Each opens its own UDP socket, and the server keeps one endpoint per peer — whichever instance sent traffic last owns the return path. With a persistent keepalive they trade it back and forth indefinitely, so calls fail intermittently and succeed on retry.
+- **Config writes overwrite each other.** Each process holds `config.toml` in memory and writes it back whole, so the last writer silently discards the other's changes.
+- **Secret views diverge.** A secret rotated in one process stays stale in the others until they restart.
+
+With `stdio_proxy = "auto"`, a stdio invocation that finds an instance serving on `port` becomes a thin relay instead: it fetches no provisioning, starts no tunnels, opens no vault, registers no connections and never writes config. (It still reads the config file and the plain keychain/`secrets.toml` entries while loading config — it just does not act on them.) Tool names and the owning instance's MCP instructions pass through unchanged, so clients see an identical surface either way.
+
+**What bridging does and does not cover.** Only an instance that serves HTTP can be bridged to, and a stdio instance does not open a listener. So bridging takes effect when a desktop or headless instance is running — which is the normal setup, since that is what serves `/mcp` for HTTP clients. If the *only* mux processes on the machine are stdio ones spawned by clients, they cannot find each other and each runs standalone, with the collisions above. Two instances on two different machines share the same provisioned credentials and collide the same way; that needs per-instance credentials on the provisioning side and is out of scope here.
+
+Use `never` when an instance on the same port should deliberately keep its own tunnels, config view and vault instead of relaying. Note that an instance on a *different* port never bridges anyway — only the instance's own configured port is probed.
 
 ### Connections
 

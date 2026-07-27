@@ -94,6 +94,8 @@ mux exposes two MCP transports:
 
 mux auto-detects the transport: if stdin is piped, it runs in stdio mode. Otherwise it starts the HTTP server (desktop or headless, depending on whether a display is available).
 
+Only one instance per machine should own the tunnels, the config file and the vault. When a stdio invocation finds an instance already serving on the configured port, it bridges to it rather than building its own — several instances with their own copies collide with each other (see [Running more than one instance](docs/configuration.md#running-more-than-one-instance)). Tool names and instructions pass through unchanged, so clients see the same surface either way. Configurable via `[server] stdio_proxy`.
+
 ### Claude Desktop
 
 Add to your `claude_desktop_config.json`:

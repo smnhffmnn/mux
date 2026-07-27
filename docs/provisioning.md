@@ -16,6 +16,8 @@ This is useful for teams: set up one provisioning server, give each developer a 
 
 Provisioned data is fetched fresh on every startup and is not cached between restarts.
 
+A stdio invocation that bridges to an already-running instance does not fetch provisioning itself — it relays to the owning instance's connections and tunnels. See [Running more than one instance](configuration.md#running-more-than-one-instance).
+
 ## Configuration
 
 ### Via TOML

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -18,12 +19,62 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/smnhffmnn/mux/internal/bridge"
 	"github.com/smnhffmnn/mux/internal/config"
 	"github.com/smnhffmnn/mux/internal/provisioning"
 	"github.com/smnhffmnn/mux/internal/tools"
 	"github.com/smnhffmnn/mux/internal/vault"
 	"github.com/smnhffmnn/mux/internal/wireguard"
 )
+
+// mcpServerName is the name this instance reports over MCP, and the name a
+// bridge requires its upstream to report. Shared so the two cannot drift.
+const mcpServerName = "mux"
+
+// Timeouts for probing an already-running instance. The first is short because
+// it sits in the startup path of the calling MCP client and a closed port
+// refuses immediately; the second gives a slow-but-live instance a real chance
+// before we give up and build a second set of tunnels next to it.
+const (
+	stdioBridgeDialTimeout      = 3 * time.Second
+	stdioBridgeRetryDialTimeout = 15 * time.Second
+)
+
+// dialUpstream probes for an instance already serving MCP at endpoint.
+//
+// A conclusive failure — nothing listening, or something that is not mux — is
+// returned as-is so the caller runs standalone. A timeout is not conclusive:
+// something holds the port but did not finish the handshake in time, and
+// treating that as "nobody home" is the expensive mistake, because an owner
+// that is merely slow (cold start, loaded machine, a keychain prompt) would end
+// up with a second instance and duplicate tunnels beside it. That case gets one
+// more attempt with a longer deadline.
+func dialUpstream(endpoint string) (*bridge.Upstream, error) {
+	opts := bridge.DialOptions{
+		URL:              endpoint,
+		ExpectServerName: mcpServerName,
+		ClientName:       "mux-bridge",
+		ClientVersion:    version,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), stdioBridgeDialTimeout)
+	upstream, err := bridge.Dial(ctx, opts)
+	cancel()
+	// Check both shapes: the deadline may surface as context.DeadlineExceeded or,
+	// once net/http has wrapped it, as an error that only reports Timeout().
+	// Misclassifying here is not fatal — it just means falling back to standalone,
+	// which is what happened before this retry existed.
+	if err == nil || !(errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err)) {
+		return upstream, err
+	}
+
+	fmt.Fprintf(os.Stderr, "[mux] %s did not answer within %s — retrying before falling back\n",
+		endpoint, stdioBridgeDialTimeout)
+
+	ctx, cancel = context.WithTimeout(context.Background(), stdioBridgeRetryDialTimeout)
+	defer cancel()
+	return bridge.Dial(ctx, opts)
+}
 
 func main() {
 	// Subcommand: git credential helper (must be checked before flag.Parse)
@@ -62,7 +113,14 @@ Options:
 Transport modes:
   Desktop    Interactive terminal with display — launches GUI + HTTP server
   Headless   Interactive terminal, no display — HTTP server only (servers)
-  Stdio      Piped input detected — MCP stdio transport (no logs, no UI)
+  Stdio      Piped input detected — MCP stdio transport (no UI; stdout carries
+             the protocol, diagnostics go to stderr)
+
+Stdio and a running instance:
+  When another mux already serves MCP on the configured port, a stdio
+  invocation relays to it instead of starting its own tunnels, vault and
+  connections — only one instance per machine should own those. Control this
+  with [server] stdio_proxy = "auto" (default) | "always" | "never".
 
 More info: https://github.com/smnhffmnn/mux
 `)
@@ -76,7 +134,9 @@ More info: https://github.com/smnhffmnn/mux
 	}
 
 	// Auto-detect transport mode: pipe = stdio, terminal = headless or desktop
-	// Check EARLY before any log output (stdio mode must not pollute stdout/stderr)
+	// Check EARLY before any log output: in stdio mode stdout belongs to the MCP
+	// protocol, so the standard logger has to be silenced before it writes there.
+	// Diagnostics still go to stderr, which the transport leaves free for them.
 	fi, err := os.Stdin.Stat()
 	useStdio := err == nil && fi != nil && (fi.Mode()&os.ModeCharDevice) == 0
 
@@ -97,6 +157,50 @@ More info: https://github.com/smnhffmnn/mux
 
 	if flagPort > 0 {
 		cfg.Server.Port = flagPort
+	}
+
+	// Warn about an unrecognized stdio_proxy value: it silently resolves to the
+	// default, which is the opposite of what someone typing "nevr" or "of"
+	// wanted. Goes to stderr because stdio mode discards the standard logger.
+	if raw := strings.TrimSpace(cfg.Server.StdioProxy); raw != "" {
+		if effective := cfg.Server.EffectiveStdioProxy(); !strings.EqualFold(raw, effective) {
+			fmt.Fprintf(os.Stderr, "[mux] unknown stdio_proxy %q — using %q\n", raw, effective)
+		}
+	}
+
+	// --- Stdio bridge to an already-running instance ---
+	// This has to sit ahead of provisioning, vault and tunnel startup, because
+	// not doing any of that is the entire point: a second instance that builds
+	// its own tunnels, vault and config view collides with the running one (see
+	// internal/bridge for what breaks). Falls through to a full standalone
+	// instance when nothing is serving locally.
+	if useStdio && cfg.Server.EffectiveStdioProxy() != config.StdioProxyNever {
+		endpoint := cfg.Server.MCPEndpoint()
+		upstream, dialErr := dialUpstream(endpoint)
+
+		switch {
+		case dialErr == nil:
+			info := upstream.ServerInfo()
+			fmt.Fprintf(os.Stderr, "[mux] bridging stdio to %s (%s %s)\n", endpoint, info.Name, info.Version)
+			if err := upstream.Serve(context.Background(), mcpServerName, version); err != nil {
+				upstream.Close()
+				fmt.Fprintf(os.Stderr, "stdio bridge error: %v\n", err)
+				os.Exit(1)
+			}
+			upstream.Close()
+			return
+		case cfg.Server.EffectiveStdioProxy() == config.StdioProxyAlways:
+			fmt.Fprintf(os.Stderr, "stdio_proxy is %q but no usable instance is serving at %s: %v\n",
+				config.StdioProxyAlways, endpoint, dialErr)
+			os.Exit(1)
+		default:
+			// Standalone means building our own tunnels, which is exactly the
+			// collision the bridge exists to avoid — so say so plainly rather
+			// than reporting it as routine.
+			fmt.Fprintf(os.Stderr,
+				"[mux] no usable instance at %s (%v) — starting standalone with its own tunnels\n",
+				endpoint, dialErr)
+		}
 	}
 
 	// Remote Provisioning: fetch tunnels + connections from each configured endpoint.
@@ -241,7 +345,7 @@ More info: https://github.com/smnhffmnn/mux
 	}
 
 	// Create MCP server
-	s := server.NewMCPServer("mux", version,
+	s := server.NewMCPServer(mcpServerName, version,
 		server.WithToolCapabilities(true),
 		server.WithRecovery(),
 		server.WithInstructions(instruction),
@@ -432,15 +536,21 @@ func startHTTPServer(s *server.MCPServer, cfg *config.Config, localRoutes, tlsRo
 		return 10 * time.Second, 30 * time.Second, 60 * time.Second
 	}
 
-	// Plain HTTP: always localhost-only (MCP + local routes)
+	// Plain HTTP: always localhost-only (MCP + local routes).
+	//
+	// Read and write deadlines are deliberately off here, unlike on the TLS
+	// server. Both are absolute from the start of the request, and MCP does not
+	// fit that shape: a tool call can legitimately run for minutes (a crawl, a
+	// browser agent), and the notification stream is a GET that stays open for
+	// the life of the session. A 60s write deadline silently killed both. This
+	// listener is bound to loopback, and ReadHeaderTimeout still bounds a client
+	// that connects and then dawdles over its headers.
 	httpAddr := fmt.Sprintf("127.0.0.1:%d", cfg.Server.Port)
-	rht, rt, wt := timeouts()
+	rht, _, _ := timeouts()
 	httpSrv := &http.Server{
 		Addr:              httpAddr,
 		Handler:           httpMux,
 		ReadHeaderTimeout: rht,
-		ReadTimeout:       rt,
-		WriteTimeout:      wt,
 		MaxHeaderBytes:    1 << 20,
 	}
 	go func() {
