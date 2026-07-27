@@ -249,12 +249,23 @@ func (p ProvisioningConfig) SecretKey() string {
 	return "provisioning-" + p.Name + "-token"
 }
 
+// StdioProxy modes — see ServerConfig.StdioProxy.
+const (
+	StdioProxyAuto   = "auto"   // bridge when an instance is already serving, else run standalone
+	StdioProxyAlways = "always" // require an already-serving instance; fail if there is none
+	StdioProxyNever  = "never"  // always run standalone, even alongside a serving instance
+)
+
 type ServerConfig struct {
-	Port    int    `toml:"port"`
-	Mode    string `toml:"mode,omitempty" json:"mode,omitempty"`        // "desktop", "headless", or "" (auto-detect)
-	TLSCert string `toml:"tls_cert,omitempty" json:"tlsCert,omitempty"` // path to TLS certificate
-	TLSKey  string `toml:"tls_key,omitempty" json:"tlsKey,omitempty"`   // path to TLS private key
-	TLSPort int    `toml:"tls_port,omitzero" json:"tlsPort,omitempty"`  // HTTPS port for WebAuthn/Vault (default: port + 1)
+	Port int    `toml:"port"`
+	Mode string `toml:"mode,omitempty" json:"mode,omitempty"` // "desktop", "headless", or "" (auto-detect)
+	// StdioProxy controls what a stdio invocation does when another instance is
+	// already serving MCP on Port: "auto" (default) bridges to it, "never" runs
+	// a full standalone instance anyway, "always" refuses to start without one.
+	StdioProxy string `toml:"stdio_proxy,omitempty" json:"stdioProxy,omitempty"`
+	TLSCert    string `toml:"tls_cert,omitempty" json:"tlsCert,omitempty"` // path to TLS certificate
+	TLSKey     string `toml:"tls_key,omitempty" json:"tlsKey,omitempty"`   // path to TLS private key
+	TLSPort    int    `toml:"tls_port,omitzero" json:"tlsPort,omitempty"`  // HTTPS port for WebAuthn/Vault (default: port + 1)
 }
 
 // EffectiveTLSPort returns the configured TLS port, defaulting to Port + 1.
@@ -263,6 +274,25 @@ func (s ServerConfig) EffectiveTLSPort() int {
 		return s.TLSPort
 	}
 	return s.Port + 1
+}
+
+// EffectiveStdioProxy returns the configured stdio proxy mode, defaulting to
+// StdioProxyAuto. An unrecognized value falls back to the default rather than
+// failing startup — a typo in this field should not cost the user their tools.
+func (s ServerConfig) EffectiveStdioProxy() string {
+	switch strings.ToLower(strings.TrimSpace(s.StdioProxy)) {
+	case StdioProxyNever:
+		return StdioProxyNever
+	case StdioProxyAlways:
+		return StdioProxyAlways
+	default:
+		return StdioProxyAuto
+	}
+}
+
+// MCPEndpoint returns the local MCP URL this instance serves on.
+func (s ServerConfig) MCPEndpoint() string {
+	return fmt.Sprintf("http://127.0.0.1:%d/mcp", s.Port)
 }
 
 // VaultConfig holds settings for the encrypted secret vault.

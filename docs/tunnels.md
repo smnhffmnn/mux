@@ -133,7 +133,7 @@ All drivers receive the tunnel's `DialContext` method, which routes TCP connecti
 ## Lifecycle
 
 1. mux starts and loads config (local + provisioned tunnels)
-2. `Manager.Start()` iterates over all enabled tunnels:
+2. `Manager.Start()` iterates over all enabled tunnels (skipped entirely when a stdio invocation bridges to an already-running instance — it uses that instance's tunnels):
    - Parses tunnel address and DNS
    - Creates a netstack virtual TUN device
    - Creates a WireGuard device and configures it via IPC
@@ -147,6 +147,7 @@ All drivers receive the tunnel's `DialContext` method, which routes TCP connecti
 - **No runtime changes**: Tunnel configuration changes require a mux restart. The provisioning sync re-fetches connections but does not restart tunnels.
 - **No active health checks**: `IsUp()` reports whether the tunnel started successfully, not whether the peer is currently reachable.
 - **Single peer per tunnel**: Each tunnel connects to exactly one WireGuard peer (standard client pattern).
+- **One owner per machine**: Provisioned credentials are issued per user, so two mux instances present the *same* WireGuard key. The server keeps one endpoint per peer, so whichever instance sent traffic last owns the return path — and with a persistent keepalive they take it from each other continuously. The symptom is calls that fail intermittently and succeed on retry. Only one instance should own the tunnels; stdio invocations bridge to it by default, see [Running more than one instance](configuration.md#running-more-than-one-instance). Two instances on two different machines hit this too and bridging cannot help there — that needs per-instance credentials from the provisioning side.
 
 ## SSH Tunnels
 

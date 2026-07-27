@@ -5,6 +5,9 @@
 
 [server]
 port = 7700                                  # HTTP port (always localhost, for MCP clients)
+# stdio_proxy = "auto"                     # stdio alongside a running instance: "auto" bridges to it
+#                                          # (default), "never" starts a full standalone instance,
+#                                          # "always" refuses to start without one
 # tls_cert = "/path/to/cert.pem"           # TLS certificate — enables HTTPS server for WebAuthn/Vault
 # tls_key = "/path/to/key.pem"             # TLS private key
 # tls_port = 7701                          # HTTPS port (default: port + 1), binds to all interfaces

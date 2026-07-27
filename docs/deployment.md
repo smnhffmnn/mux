@@ -80,6 +80,7 @@ mux --version
 mux automatically selects the right mode — no flags needed:
 
 1. **stdin is a pipe** → stdio mode (for Claude Desktop, piped agents)
+   - If another instance is already serving MCP on the configured port, the stdio invocation bridges to it instead of starting its own tunnels and vault (`[server] stdio_proxy`, see [Running more than one instance](configuration.md#running-more-than-one-instance))
 2. **No DISPLAY/WAYLAND_DISPLAY** (Linux only) → headless HTTP mode (servers, containers)
 3. **Otherwise** → desktop GUI mode (macOS, Windows, Linux with display)
 

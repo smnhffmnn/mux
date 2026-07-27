@@ -27,6 +27,7 @@ go test ./internal/...
 
 ```
 internal/
+├── bridge/     # stdio↔HTTP relay to an already-running instance
 ├── config/     # Configuration loading, secret management, keychain
 ├── provisioning/ # Remote provisioning client
 ├── proxy/      # MCP proxy mounts (OAuth, bearer token)

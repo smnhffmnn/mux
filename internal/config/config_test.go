@@ -327,3 +327,41 @@ func TestMigrateLegacyDir_BothExistKeepsBoth(t *testing.T) {
 		}
 	}
 }
+
+func TestEffectiveStdioProxy(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  ServerConfig
+		want string
+	}{
+		{name: "unset defaults to auto", cfg: ServerConfig{}, want: StdioProxyAuto},
+		{name: "explicit auto", cfg: ServerConfig{StdioProxy: "auto"}, want: StdioProxyAuto},
+		{name: "never", cfg: ServerConfig{StdioProxy: "never"}, want: StdioProxyNever},
+		{name: "always", cfg: ServerConfig{StdioProxy: "always"}, want: StdioProxyAlways},
+		{name: "case-insensitive", cfg: ServerConfig{StdioProxy: "NEVER"}, want: StdioProxyNever},
+		{name: "surrounding whitespace tolerated", cfg: ServerConfig{StdioProxy: "  always  "}, want: StdioProxyAlways},
+		// A typo must not cost the user their tools, so it falls back to the
+		// default rather than failing startup.
+		{name: "unknown value falls back to auto", cfg: ServerConfig{StdioProxy: "prox"}, want: StdioProxyAuto},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.EffectiveStdioProxy(); got != tt.want {
+				t.Errorf("EffectiveStdioProxy() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMCPEndpoint(t *testing.T) {
+	// The bridge dials this exact URL, and it must match where startHTTPServer
+	// binds: loopback by IP (not "localhost", which can resolve to ::1 first)
+	// and the /mcp path.
+	if got, want := (ServerConfig{Port: 7700}).MCPEndpoint(), "http://127.0.0.1:7700/mcp"; got != want {
+		t.Errorf("MCPEndpoint() = %q, want %q", got, want)
+	}
+	if got, want := (ServerConfig{Port: 9001}).MCPEndpoint(), "http://127.0.0.1:9001/mcp"; got != want {
+		t.Errorf("MCPEndpoint() = %q, want %q", got, want)
+	}
+}
