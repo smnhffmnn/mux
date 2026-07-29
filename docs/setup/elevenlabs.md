@@ -26,3 +26,5 @@ Click **Test** to verify the connection.
 
 - Available features (text-to-speech, voice cloning, etc.) depend on your plan.
 - The API URL typically does not need to be changed.
+- Two tools are exposed: `get` for JSON endpoints (voices, models, subscription) and audio downloads, `post` for text-to-speech and sound generation.
+- Generated audio is written to a file instead of being returned inline — pass `output_file` (absolute path) to choose where, otherwise it goes to `~/.mux/output/`.

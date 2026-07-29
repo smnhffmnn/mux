@@ -55,6 +55,18 @@ func NewHTTP(conn config.Connection, dialer Dialer) (*HTTP, error) {
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   30 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return fmt.Errorf("stopped after 10 redirects")
+				}
+				// Go strips Authorization on a host change but replays custom
+				// headers, which would hand a token_header credential to the
+				// redirect target.
+				if conn.TokenHeader != "" && req.URL.Host != via[0].URL.Host {
+					req.Header.Del(conn.TokenHeader)
+				}
+				return nil
+			},
 		},
 		baseURL:      baseURL,
 		token:        conn.Token,
@@ -74,7 +86,7 @@ func (h *HTTP) Tools() []ToolDef {
 		getDesc += "\n\n" + h.instructions
 	}
 
-	outputFileDesc := "Save response body to this file path instead of returning it inline (supports ~ for home directory). Useful for large responses (images, binary data). Returns only metadata (status, content-type, path, size). Only writes on 2xx responses; errors are returned inline."
+	outputFileDesc := "Save response body to this absolute file path instead of returning it inline (supports ~ for home directory). Useful for large responses (images, binary data). Returns only metadata (status, content-type, path, size). An existing file is never overwritten. Only writes on 2xx responses; errors are returned inline."
 
 	tools := []ToolDef{
 		{
@@ -191,7 +203,7 @@ func (h *HTTP) doRequest(ctx context.Context, method string, req mcp.CallToolReq
 
 	// If output_file is set and response is successful, stream to disk
 	if outputFile := req.GetString("output_file", ""); outputFile != "" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return saveResponseToFile(resp, outputFile)
+		return saveResponseToFile(resp, resp.Header.Get("Content-Type"), outputFile)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))

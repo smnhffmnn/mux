@@ -193,9 +193,16 @@ type = "elevenlabs"
 
 | Tool | Description |
 |------|-------------|
-| `{name}_get` | HTTP GET request to the ElevenLabs API. Parameter: `path` (required, e.g. `/v1/voices`). |
+| `{name}_get` | HTTP GET request to the ElevenLabs API. Params: `path` (required, e.g. `/v1/voices`), `output_file` (optional, absolute path). |
+| `{name}_post` | HTTP POST with a JSON body. Params: `path` (required, e.g. `/v1/text-to-speech/{voice_id}`), `body` (required, JSON string), `output_file` (optional, absolute path). Use for text-to-speech, streaming TTS and sound generation. |
 
-Default instructions describe available endpoints (TTS, streaming TTS, sound generation, voices, models, subscription).
+**Binary responses are never inlined.** The text-to-speech endpoints answer with raw audio bytes; the connector streams them to a file and returns the path plus metadata (status, content-type, size). With `output_file` the destination is yours — an unusable path (relative, or a file that already exists) is rejected *before* the request is sent, so a paid generation is not thrown away. Without `output_file` the audio lands in `~/.mux/output/` (same directory as the Gemini connector uses); mux does not delete those files.
+
+Whether a response counts as binary is decided by its `Content-Type`: textual types (`application/json`, `application/xml`, `text/*`, `+json`/`+xml`, and the common `application/` text formats) are returned inline as text, truncated at 512 KB with an explicit marker; everything else is written to disk — audio types under their real extension, other binary payload as `.bin`. If the server declares no type at all, mux sniffs the first bytes, so header-less audio still becomes a file. Non-2xx responses are always inlined, so an API error stays readable and writes no file.
+
+Endpoints that wrap audio in JSON (e.g. `…/with-timestamps`) count as textual — fetch those with `output_file` to avoid the 512 KB cut.
+
+Default instructions describe available endpoints (TTS, streaming TTS, sound generation, voices, models, subscription) and the file handling.
 
 ### Recraft
 
