@@ -4,14 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -83,7 +79,7 @@ func NewOpenAI(conn config.Connection, dialer Dialer) (*OpenAI, error) {
 
 // Tools returns the MCP tools for the OpenAI connection.
 func (o *OpenAI) Tools() []ToolDef {
-	outputFileDesc := "Save response body to this file path instead of returning it inline (supports ~ for home directory). Useful for large or binary responses (audio transcriptions, image bytes). Returns only metadata (status, content-type, path, size). Only writes on 2xx responses; errors are returned inline."
+	outputFileDesc := "Save response body to this absolute file path instead of returning it inline (supports ~ for home directory). Useful for large or binary responses (audio transcriptions, image bytes). Returns only metadata (status, content-type, path, size). An existing file is never overwritten. Only writes on 2xx responses; errors are returned inline."
 
 	return []ToolDef{
 		{
@@ -187,7 +183,7 @@ func (o *OpenAI) doRequest(ctx context.Context, method string, req mcp.CallToolR
 	defer resp.Body.Close()
 
 	if outputFile := req.GetString("output_file", ""); outputFile != "" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return saveResponseToFile(resp, outputFile)
+		return saveResponseToFile(resp, resp.Header.Get("Content-Type"), outputFile)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, openaiMaxBody))
@@ -196,48 +192,5 @@ func (o *OpenAI) doRequest(ctx context.Context, method string, req mcp.CallToolR
 	}
 
 	result := fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, resp.Status, string(body))
-	return mcp.NewToolResultText(result), nil
-}
-
-// saveResponseToFile streams an HTTP response body to a file and returns metadata.
-// Used by openai and http connectors when output_file is set on a successful
-// (2xx) response.
-//
-// Safety: absolute path required, O_EXCL refuses to overwrite. This blocks
-// open-then-clobber on a known path but is not a sandbox — a confused caller
-// can still write into anywhere they have permission for, and a hostile
-// directory symlink on the parent path could redirect the write.
-func saveResponseToFile(resp *http.Response, outputFile string) (*mcp.CallToolResult, error) {
-	outputFile = config.ExpandHome(outputFile)
-	clean := filepath.Clean(outputFile)
-	if !filepath.IsAbs(clean) {
-		return mcp.NewToolResultError(fmt.Sprintf("output_file must be an absolute path: %s", outputFile)), nil
-	}
-
-	if err := os.MkdirAll(filepath.Dir(clean), 0o755); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("create directory: %v", err)), nil
-	}
-
-	f, err := os.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return mcp.NewToolResultError(fmt.Sprintf("output_file already exists (refusing to overwrite): %s", clean)), nil
-		}
-		return mcp.NewToolResultError(fmt.Sprintf("create file: %v", err)), nil
-	}
-
-	n, err := io.Copy(f, resp.Body)
-	if err != nil {
-		f.Close()
-		os.Remove(clean)
-		return mcp.NewToolResultError(fmt.Sprintf("write file: %v", err)), nil
-	}
-	if err := f.Close(); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("close file: %v", err)), nil
-	}
-
-	result := fmt.Sprintf("HTTP %d %s\n\nSaved to: %s\nContent-Type: %s\nSize: %d bytes",
-		resp.StatusCode, resp.Status, clean,
-		resp.Header.Get("Content-Type"), n)
 	return mcp.NewToolResultText(result), nil
 }
