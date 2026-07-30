@@ -20,6 +20,7 @@ import {
   StartDeviceAuth as _StartDeviceAuth,
   GetDeviceAuthStatus as _GetDeviceAuthStatus,
   GetSetupDoc as _GetSetupDoc,
+  OpenLogFolder as _OpenLogFolder,
 } from '../../bindings/github.com/smnhffmnn/mux/app.js'
 
 // Re-export types for convenience
@@ -29,6 +30,7 @@ export interface ServerInfo {
   port: number
   buildTime: string
   canSelfUpdate: boolean
+  logPath: string // empty when file logging is unavailable
 }
 
 export interface ProvisioningEndpointInfo {
@@ -195,3 +197,4 @@ export const GetOAuthStatus = _GetOAuthStatus as (name: string) => Promise<OAuth
 export const StartDeviceAuth = _StartDeviceAuth as (name: string) => Promise<DeviceAuthStart>
 export const GetDeviceAuthStatus = _GetDeviceAuthStatus as (name: string) => Promise<DeviceAuthStatus>
 export const GetSetupDoc = _GetSetupDoc as (typ: string) => Promise<string>
+export const OpenLogFolder = _OpenLogFolder as () => Promise<void>

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte'
   import { pageData, serverInfo, activeView, loading } from './lib/stores'
-  import { GetPageData, GetServerInfo } from './lib/api'
+  import { GetPageData, GetServerInfo, OpenLogFolder } from './lib/api'
   import type { PageData } from './lib/api'
   import Header from './lib/components/Header.svelte'
   import ProvisioningSection from './lib/components/ProvisioningSection.svelte'
@@ -78,6 +78,14 @@
   function onTunnelAdded() {
     showAddTunnelModal = false
     refreshData()
+  }
+
+  async function openLogFolder() {
+    try {
+      await OpenLogFolder()
+    } catch (e) {
+      console.error('Failed to open log folder:', e)
+    }
   }
 
   const navItems = [
@@ -186,6 +194,15 @@
             <div class="about-row"><span class="about-label">Build Time</span><span class="about-value">{$serverInfo?.buildTime || '—'}</span></div>
             <div class="about-row"><span class="about-label">Uptime</span><span class="about-value">{$serverInfo?.uptime ?? '—'}</span></div>
             <div class="about-row"><span class="about-label">MCP Port</span><span class="about-value">{$serverInfo?.port ?? '—'}</span></div>
+            <div class="about-row">
+              <span class="about-label">Log File</span>
+              <span class="about-value log-value">
+                {$serverInfo?.logPath || 'file logging unavailable'}
+                {#if $serverInfo?.logPath}
+                  <button class="log-open" onclick={openLogFolder}>Open Folder</button>
+                {/if}
+              </span>
+            </div>
           </div>
         </div>
       {/if}
@@ -353,5 +370,19 @@
   .about-value {
     font-family: var(--font-mono);
     font-size: 12px;
+  }
+
+  .log-value {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    word-break: break-all;
+  }
+
+  .log-open {
+    flex-shrink: 0;
+    font-size: 11px;
+    padding: 2px 8px;
   }
 </style>

@@ -885,6 +885,14 @@ export class ServerInfo {
              */
             this["canSelfUpdate"] = false;
         }
+        if (!("logPath" in $$source)) {
+            /**
+             * empty when file logging is unavailable
+             * @member
+             * @type {string}
+             */
+            this["logPath"] = "";
+        }
 
         Object.assign(this, $$source);
     }

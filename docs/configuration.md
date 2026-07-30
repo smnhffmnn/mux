@@ -2,7 +2,7 @@
 
 ## Config File Location
 
-Default: `~/.mux/config.toml`
+Default: `~/.config/mux/config.toml` (respects `$XDG_CONFIG_HOME`); on Windows `%USERPROFILE%\.mux\config.toml`. Pre-XDG installations at `~/.mux` are migrated automatically on first start after an upgrade.
 
 Override with `--config /path/to/config.toml`.
 
@@ -18,7 +18,7 @@ Secrets (passwords, tokens, keys) have their own resolution chain:
 
 1. **Encrypted Vault** -- if enabled and unlocked
 2. **OS Keychain** -- macOS Keychain, GNOME Keyring, KWallet, or Windows Credential Manager
-3. **File fallback** -- `~/.mux/secrets.toml` (chmod 600, used when no keyring is available)
+3. **File fallback** -- `secrets.toml` next to the config file (chmod 600, used when no keyring is available)
 
 ## Sections
 
@@ -97,6 +97,14 @@ When `exclusive = true`, secrets written via `secret_set` are stored only in the
 
 The vault requires TLS for WebAuthn. See the [Vault section in the README](../README.md#vault-encrypted-secret-store) for setup, unlock methods, MCP tools, and HTTP API reference.
 
+## Logs
+
+mux writes its diagnostics to `logs/mux.log` inside the default config directory (e.g. `~/.config/mux/logs/mux.log` — a `--config` override does not move the log), in every mode — including stdio, where stdout belongs to the MCP protocol and log output used to be discarded entirely. Desktop and headless instances additionally keep logging to stderr. Every line carries the writing instance's pid, because a desktop app and stdio bridges may share the file.
+
+The file is rotated at startup once it exceeds 5 MB; one previous generation is kept as `mux.log.1`.
+
+The desktop app shows the active log path under **About**, with an *Open Folder* button. Connection tests (the **Test** button) log every step — tunnel resolution, target endpoint, HTTP status — at a level of detail normal operation doesn't produce, which makes the log the first place to look when a connection misbehaves.
+
 ## Secrets
 
 Secrets (passwords, tokens, keys) are resolved in order: **Vault → OS Keychain → File fallback**. The first match wins.
@@ -111,9 +119,9 @@ Secrets are stored in the platform's native credential store (service name: `"mu
 
 On headless Linux without a desktop environment, the keychain is unavailable and mux automatically falls back to the file store. The encrypted vault is the recommended alternative for headless deployments.
 
-### File Fallback (`~/.mux/secrets.toml`)
+### File Fallback (`secrets.toml`)
 
-When the OS keychain is unavailable (headless Linux, SSH, containers), mux reads and writes secrets from `~/.mux/secrets.toml` (created with chmod 600):
+When the OS keychain is unavailable (headless Linux, SSH, containers), mux reads and writes secrets from `secrets.toml` next to the config file (e.g. `~/.config/mux/secrets.toml`; created with chmod 600):
 
 ```toml
 [secrets]
