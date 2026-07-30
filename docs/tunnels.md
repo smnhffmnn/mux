@@ -83,18 +83,29 @@ When `tunnel` is set, the database connection routes through that WireGuard tunn
 |-------|------|----------|-------------|
 | `name` | string | yes | Unique identifier, referenced by connections |
 | `peer_public_key` | string | yes | WireGuard peer public key (base64) |
-| `peer_endpoint` | string | yes | Peer endpoint (`host:port`). Hostnames are resolved to IP at startup. |
+| `peer_endpoint` | string | yes | Peer endpoint (`host:port`). Hostnames are resolved to all their addresses, with runtime failover — see [Endpoint Resolution and Failover](#endpoint-resolution-and-failover). |
 | `allowed_ips` | string | yes | Allowed IP ranges (CIDR). Comma-separated for multiple ranges. |
 | `tunnel_address` | string | yes | Local tunnel IP (CIDR, e.g. `10.100.0.42/32`) |
 | `dns` | string | no | DNS servers for resolution through the tunnel (comma-separated IPs) |
 | `mtu` | integer | no | MTU (default: 1420) |
-| `keepalive` | integer | no | Persistent keepalive interval in seconds (default: 25) |
+| `keepalive` | integer | no | Persistent keepalive interval in seconds (default: 25). Keep it above the ~15s failover window — shorter intervals can make a healthy idle tunnel look like failing traffic (mux logs a warning). |
 
 **Secrets** (stored in vault, OS keychain, or secrets.toml — never in config.toml):
 - `tunnel-{name}-private-key` -- WireGuard private key (base64, required)
 - `tunnel-{name}-preshared-key` -- WireGuard preshared key (base64, optional)
 
 A tunnel is considered enabled when it has a private key, peer public key, and peer endpoint.
+
+## Endpoint Resolution and Failover
+
+A hostname `peer_endpoint` is resolved to **all** of its addresses at startup, and the tunnel starts on the preferred one: IPv6 leads only when the local stack actually has a route to it — an AAAA record alone proves nothing about the current network (a v4-only home network still receives AAAA answers, and blindly preferring them would send every handshake to an unreachable address). The resolved candidates are logged at startup (`endpoint ... resolved to ...`).
+
+The remaining addresses stay available as failover targets, via two complementary signals:
+
+- **Failing traffic:** packets go out, nothing comes back, no handshake completes for ~15 seconds — the peer switches to the next routable candidate, re-resolving DNS after the list wraps around. Each switch is logged (`traffic failing via ... — switching endpoint to ...`), and a failing endpoint without an alternative is logged too.
+- **Lost route:** failed sends produce no traffic signal at all (the OS rejects them locally), so when the current address has no local route anymore — roaming from a dual-stack into a v4-only network — the tunnel switches to a routable candidate directly (`no route to ... — switching endpoint to ...`).
+
+An idle tunnel on a reachable address is never rotated (WireGuard handshakes lazily, so silence is not failure — with the default 25s keepalive this holds; see the `keepalive` field note).
 
 ## Fail-Closed Logic
 
@@ -147,7 +158,7 @@ All drivers receive the tunnel's `DialContext` method, which routes TCP connecti
 
 - **TCP only**: The netstack approach only supports TCP connections. DNS resolution through the tunnel works via the `dns` field, but arbitrary UDP is not supported.
 - **No runtime changes**: Tunnel configuration changes require a mux restart. The provisioning sync re-fetches connections but does not restart tunnels.
-- **No active health checks**: `IsUp()` reports whether the tunnel started successfully, not whether the peer is currently reachable.
+- **No active health checks**: `IsUp()` reports whether the tunnel started successfully, not whether the peer is currently reachable. Failing traffic triggers endpoint failover (see above) but is not reflected in `IsUp()`.
 - **Single peer per tunnel**: Each tunnel connects to exactly one WireGuard peer (standard client pattern).
 - **One owner per machine**: Provisioned credentials are issued per user, so two mux instances present the *same* WireGuard key. The server keeps one endpoint per peer, so whichever instance sent traffic last owns the return path — and with a persistent keepalive they take it from each other continuously. The symptom is calls that fail intermittently and succeed on retry. Only one instance should own the tunnels; stdio invocations bridge to it by default, see [Running more than one instance](configuration.md#running-more-than-one-instance). Two instances on two different machines hit this too and bridging cannot help there — that needs per-instance credentials from the provisioning side.
 
