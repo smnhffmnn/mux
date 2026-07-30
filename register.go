@@ -162,6 +162,27 @@ func proxyTunnelClient(dialer tools.Dialer) *http.Client {
 	return &http.Client{Transport: tr}
 }
 
+// oauthProxyMount builds the OAuth proxy mount for a connection. Every path
+// that mounts or probes an OAuth proxy — startup registration, vault-unlock
+// retry, hot-reload, post-authorization mounting, the test button — must go
+// through this builder so the transport construction cannot drift apart.
+func oauthProxyMount(name, url string, port int, tokenStore *config.KeychainTokenStore) proxy.Mount {
+	adapter := proxy.NewKeychainTokenAdapter(tokenStore)
+	clientID, clientSecret := config.LoadOAuthClientID(name)
+	return proxy.Mount{
+		Name:       name,
+		URL:        url,
+		TokenStore: tokenStore,
+		OAuth: &transport.OAuthConfig{
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+			RedirectURI:  fmt.Sprintf("http://localhost:%d/oauth/callback", port),
+			TokenStore:   adapter,
+			PKCEEnabled:  true,
+		},
+	}
+}
+
 // newProxyTokenMount builds a non-OAuth proxy mount for a connection, honouring
 // a custom token header and extra static headers, and routing through the
 // connection's tunnel when one is set. It is fail-closed on tunnels: if the
@@ -204,20 +225,7 @@ func registerProxies(ctx context.Context, s *server.MCPServer, cfg *config.Confi
 		if conn.OAuth {
 			tokenStore := config.NewKeychainTokenStore(conn.Name)
 			if tokenStore.HasToken() {
-				adapter := proxy.NewKeychainTokenAdapter(tokenStore)
-				clientID, clientSecret := config.LoadOAuthClientID(conn.Name)
-				mounts = append(mounts, proxy.Mount{
-					Name:       conn.Name,
-					URL:        conn.URL,
-					TokenStore: tokenStore,
-					OAuth: &transport.OAuthConfig{
-						ClientID:     clientID,
-						ClientSecret: clientSecret,
-						RedirectURI:  fmt.Sprintf("http://localhost:%d/oauth/callback", cfg.Server.Port),
-						TokenStore:   adapter,
-						PKCEEnabled:  true,
-					},
-				})
+				mounts = append(mounts, oauthProxyMount(conn.Name, conn.URL, cfg.Server.Port, tokenStore))
 			}
 			continue
 		}
@@ -320,20 +328,7 @@ func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config
 			if !tokenStore.HasToken() {
 				continue
 			}
-			adapter := proxy.NewKeychainTokenAdapter(tokenStore)
-			clientID, clientSecret := config.LoadOAuthClientID(conn.Name)
-			mount = proxy.Mount{
-				Name:       conn.Name,
-				URL:        conn.URL,
-				TokenStore: tokenStore,
-				OAuth: &transport.OAuthConfig{
-					ClientID:     clientID,
-					ClientSecret: clientSecret,
-					RedirectURI:  fmt.Sprintf("http://localhost:%d/oauth/callback", cfg.Server.Port),
-					TokenStore:   adapter,
-					PKCEEnabled:  true,
-				},
-			}
+			mount = oauthProxyMount(conn.Name, conn.URL, cfg.Server.Port, tokenStore)
 		} else {
 			// Resolve token from vault without mutating the shared config
 			token, _ := config.GetSecret(conn.Name + "-token")
