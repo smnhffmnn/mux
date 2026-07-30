@@ -113,7 +113,7 @@ mux detects the absence of `DISPLAY`/`WAYLAND_DISPLAY` and starts in headless HT
 **Secrets**: On Linux with a desktop environment, secrets use the Secret Service API (GNOME Keyring or KWallet). For headless servers, the recommended options are:
 
 1. **Encrypted Vault** (recommended) -- hardware-grade encryption with WebAuthn unlock. See [Configuration: Vault](configuration.md#vault-encrypted-secret-store).
-2. **File fallback** -- `~/.mux/secrets.toml` (chmod 600), used automatically when no keyring is available.
+2. **File fallback** -- `secrets.toml` next to the config file (e.g. `~/.config/mux/secrets.toml`, chmod 600), used automatically when no keyring is available.
 3. **Environment variables** -- override connection settings for containerized deployments:
    ```bash
    export POSTGRESQL_DB_PASSWORD=secret

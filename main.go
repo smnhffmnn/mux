@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/smnhffmnn/mux/internal/bridge"
 	"github.com/smnhffmnn/mux/internal/config"
+	"github.com/smnhffmnn/mux/internal/logging"
 	"github.com/smnhffmnn/mux/internal/provisioning"
 	"github.com/smnhffmnn/mux/internal/tools"
 	"github.com/smnhffmnn/mux/internal/vault"
@@ -68,7 +70,7 @@ func dialUpstream(endpoint string) (*bridge.Upstream, error) {
 		return upstream, err
 	}
 
-	fmt.Fprintf(os.Stderr, "[mux] %s did not answer within %s — retrying before falling back\n",
+	log.Printf("[mux] %s did not answer within %s — retrying before falling back",
 		endpoint, stdioBridgeDialTimeout)
 
 	ctx, cancel = context.WithTimeout(context.Background(), stdioBridgeRetryDialTimeout)
@@ -140,7 +142,8 @@ More info: https://github.com/smnhffmnn/mux
 	fi, err := os.Stdin.Stat()
 	useStdio := err == nil && fi != nil && (fi.Mode()&os.ModeCharDevice) == 0
 
-	// In stdio mode, suppress all log output to avoid polluting the MCP stream
+	// In stdio mode, suppress log output until the log file is open — stdout
+	// belongs to the MCP protocol, and stderr stays as quiet as it always was.
 	if useStdio {
 		log.SetOutput(io.Discard)
 	}
@@ -149,11 +152,36 @@ More info: https://github.com/smnhffmnn/mux
 	// No-op on fresh installs and on Windows; logs and continues on failure.
 	config.MigrateLegacyDir()
 
+	// Route the standard logger to <config-dir>/logs/mux.log (after the
+	// migration, so the file lands in the final directory). Every mode gets
+	// the file; desktop/headless keep stderr alongside it. Without a file the
+	// previous behaviour remains: stderr when visible, silence in stdio.
+	logPath, logErr := logging.Setup(config.Dir(), useStdio)
+	if logErr != nil {
+		// Also to stderr: in stdio mode the standard logger is still discarded
+		// at this point, and this is the one line explaining why no log exists.
+		log.Printf("[mux] file logging unavailable: %v", logErr)
+		fmt.Fprintf(os.Stderr, "[mux] file logging unavailable: %v\n", logErr)
+	}
+	bridge.UseStandardLogger()
+
+	mode := "desktop/headless"
+	if useStdio {
+		mode = "stdio"
+	}
+	cfgPath := flagConfig
+	if cfgPath == "" {
+		cfgPath = filepath.Join(config.Dir(), config.ConfigFileName)
+	}
+	log.Printf("[mux] mux %s starting (mode %s, config %s, log %s)", version, mode, cfgPath, logPath)
+
 	// Load configuration
 	cfg, err := config.Load(flagConfig)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
+	log.Printf("[mux] config loaded: %d tunnels, %d connections, %d provisioning endpoints",
+		len(cfg.AllTunnels()), len(cfg.AllConnections()), len(cfg.Provisioning))
 
 	if flagPort > 0 {
 		cfg.Server.Port = flagPort
@@ -161,10 +189,10 @@ More info: https://github.com/smnhffmnn/mux
 
 	// Warn about an unrecognized stdio_proxy value: it silently resolves to the
 	// default, which is the opposite of what someone typing "nevr" or "of"
-	// wanted. Goes to stderr because stdio mode discards the standard logger.
+	// wanted.
 	if raw := strings.TrimSpace(cfg.Server.StdioProxy); raw != "" {
 		if effective := cfg.Server.EffectiveStdioProxy(); !strings.EqualFold(raw, effective) {
-			fmt.Fprintf(os.Stderr, "[mux] unknown stdio_proxy %q — using %q\n", raw, effective)
+			log.Printf("[mux] unknown stdio_proxy %q — using %q", raw, effective)
 		}
 	}
 
@@ -181,15 +209,21 @@ More info: https://github.com/smnhffmnn/mux
 		switch {
 		case dialErr == nil:
 			info := upstream.ServerInfo()
-			fmt.Fprintf(os.Stderr, "[mux] bridging stdio to %s (%s %s)\n", endpoint, info.Name, info.Version)
+			log.Printf("[mux] bridging stdio to %s (%s %s)", endpoint, info.Name, info.Version)
 			if err := upstream.Serve(context.Background(), mcpServerName, version); err != nil {
 				upstream.Close()
+				// Fatal exits also go to stderr so the invoking MCP client
+				// surfaces them — the log file alone doesn't help someone
+				// staring at a dead client.
+				log.Printf("[mux] stdio bridge error: %v", err)
 				fmt.Fprintf(os.Stderr, "stdio bridge error: %v\n", err)
 				os.Exit(1)
 			}
 			upstream.Close()
 			return
 		case cfg.Server.EffectiveStdioProxy() == config.StdioProxyAlways:
+			log.Printf("[mux] stdio_proxy is %q but no usable instance is serving at %s: %v",
+				config.StdioProxyAlways, endpoint, dialErr)
 			fmt.Fprintf(os.Stderr, "stdio_proxy is %q but no usable instance is serving at %s: %v\n",
 				config.StdioProxyAlways, endpoint, dialErr)
 			os.Exit(1)
@@ -197,8 +231,7 @@ More info: https://github.com/smnhffmnn/mux
 			// Standalone means building our own tunnels, which is exactly the
 			// collision the bridge exists to avoid — so say so plainly rather
 			// than reporting it as routine.
-			fmt.Fprintf(os.Stderr,
-				"[mux] no usable instance at %s (%v) — starting standalone with its own tunnels\n",
+			log.Printf("[mux] no usable instance at %s (%v) — starting standalone with its own tunnels",
 				endpoint, dialErr)
 		}
 	}
@@ -384,6 +417,7 @@ More info: https://github.com/smnhffmnn/mux
 		log.Println("[mux] Starting in stdio mode")
 		registerConfigTools(s, cfg, tm)
 		if err := server.ServeStdio(s); err != nil {
+			log.Printf("[mux] stdio server error: %v", err)
 			fmt.Fprintf(os.Stderr, "stdio server error: %v\n", err)
 			os.Exit(1)
 		}

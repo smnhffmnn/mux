@@ -122,36 +122,43 @@ func RegisterMounts(ctx context.Context, s *server.MCPServer, mounts []Mount) {
 	}
 }
 
-// RegisterMount connects to a single upstream MCP server and registers its tools.
-func RegisterMount(ctx context.Context, s *server.MCPServer, m Mount) error {
+// connect builds the client for a mount (OAuth or token/header transport),
+// starts it and completes the MCP initialize handshake. Shared by
+// RegisterMount and Probe so both always construct the identical transport —
+// tunnel client, auth scheme, SSE-vs-streamable and all.
+func connect(ctx context.Context, m Mount) (*client.Client, *mcp.InitializeResult, error) {
 	var c *client.Client
 	var err error
 
 	if m.OAuth != nil {
-		// OAuth transport — mcp-go handles token refresh automatically
-		c, err = client.NewOAuthStreamableHttpClient(m.URL, *m.OAuth)
+		// OAuth transport — mcp-go handles token refresh automatically. A custom
+		// HTTP client (tunnel dialer) is honoured for the MCP requests; note the
+		// OAuth token endpoints are contacted by mcp-go's own handler and are not
+		// routed through it.
+		var opts []transport.StreamableHTTPCOption
+		if m.HTTPClient != nil {
+			opts = append(opts, transport.WithHTTPBasicClient(m.HTTPClient))
+		}
+		c, err = client.NewOAuthStreamableHttpClient(m.URL, *m.OAuth, opts...)
 		if err != nil {
-			return fmt.Errorf("create OAuth transport for %s: %w", m.Name, err)
+			return nil, nil, fmt.Errorf("create OAuth transport for %s: %w", m.Name, err)
 		}
 	} else {
 		// Token and/or static-header transport. A dynamic token is read on each
 		// request (so secret_set can rotate it live); extra static headers are
-		// merged in. Register the provider so secret_set can find it.
-		if m.Token != nil {
-			registerProvider(m.Name, m.Token)
-		}
+		// merged in.
 		t, terr := buildTransport(m)
 		if terr != nil {
-			return fmt.Errorf("create transport for %s: %w", m.Name, terr)
+			return nil, nil, fmt.Errorf("create transport for %s: %w", m.Name, terr)
 		}
 		c = client.NewClient(t)
 	}
 
 	if err := c.Start(ctx); err != nil {
-		return fmt.Errorf("start client for %s: %w", m.Name, err)
+		return nil, nil, fmt.Errorf("start client for %s: %w", m.Name, err)
 	}
 
-	_, err = c.Initialize(ctx, mcp.InitializeRequest{
+	initResult, err := c.Initialize(ctx, mcp.InitializeRequest{
 		Params: mcp.InitializeParams{
 			ClientInfo: mcp.Implementation{
 				Name:    "mux",
@@ -162,7 +169,53 @@ func RegisterMount(ctx context.Context, s *server.MCPServer, m Mount) error {
 	})
 	if err != nil {
 		_ = c.Close()
-		return fmt.Errorf("initialize %s: %w", m.Name, err)
+		return nil, nil, fmt.Errorf("initialize %s: %w", m.Name, err)
+	}
+
+	return c, initResult, nil
+}
+
+// ProbeResult reports what Probe found on the upstream MCP server.
+type ProbeResult struct {
+	ServerName string // upstream-reported server name
+	ToolCount  int
+	ToolsErr   error // non-nil when connected but listing tools failed
+}
+
+// Probe connects to a mount's upstream MCP server exactly like RegisterMount
+// does — same transport construction, same tunnel client, same auth — but
+// registers nothing and closes the connection before returning. UI "Test"
+// buttons must go through this: a hand-rolled transport drifts from the real
+// mount path and produces false negatives (wrong auth scheme, no tunnel).
+func Probe(ctx context.Context, m Mount) (ProbeResult, error) {
+	c, initResult, err := connect(ctx, m)
+	if err != nil {
+		return ProbeResult{}, err
+	}
+	defer c.Close()
+
+	res := ProbeResult{ServerName: initResult.ServerInfo.Name}
+	toolsResult, err := c.ListTools(ctx, mcp.ListToolsRequest{})
+	if err != nil {
+		res.ToolsErr = err
+		return res, nil
+	}
+	res.ToolCount = len(toolsResult.Tools)
+	return res, nil
+}
+
+// RegisterMount connects to a single upstream MCP server and registers its tools.
+func RegisterMount(ctx context.Context, s *server.MCPServer, m Mount) error {
+	// Register the provider so secret_set can rotate the token of the live
+	// mount. Only real mounts belong in the registry — a Probe must not
+	// displace the provider of a running mount.
+	if m.OAuth == nil && m.Token != nil {
+		registerProvider(m.Name, m.Token)
+	}
+
+	c, _, err := connect(ctx, m)
+	if err != nil {
+		return err
 	}
 
 	toolsResult, err := c.ListTools(ctx, mcp.ListToolsRequest{})

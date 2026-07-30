@@ -98,7 +98,7 @@ The google_workspace_mcp server must be running whenever mux needs to access Goo
 
 ## 3. Configure mux
 
-Add the connection to `~/.mux/config.toml`:
+Add the connection to `~/.config/mux/config.toml`:
 
 ```toml
 [[connections]]

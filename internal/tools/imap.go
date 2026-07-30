@@ -174,6 +174,22 @@ func (im *IMAP) connect(ctx context.Context) (*imapclient.Client, error) {
 	return c, nil
 }
 
+// Verify connects and logs in, then logs out — the connection test's way to
+// exercise exactly the dial/TLS/login path the live tools use (including the
+// tunnel dialer when one was passed to NewIMAP).
+func (im *IMAP) Verify(ctx context.Context) error {
+	c, err := im.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer c.Logout()
+
+	if err := c.Login(im.user, im.password); err != nil {
+		return fmt.Errorf("login as %s: %w", im.user, err)
+	}
+	return nil
+}
+
 // withClient connects, logs in, runs fn, then logs out.
 func (im *IMAP) withClient(ctx context.Context, fn func(*imapclient.Client) (*mcp.CallToolResult, error)) (*mcp.CallToolResult, error) {
 	c, err := im.connect(ctx)

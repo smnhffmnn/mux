@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -15,7 +16,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -23,13 +26,13 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/lib/pq"
-	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/smnhffmnn/mux/docs/setup"
 	"github.com/smnhffmnn/mux/internal/config"
+	"github.com/smnhffmnn/mux/internal/logging"
 	"github.com/smnhffmnn/mux/internal/provisioning"
 	"github.com/smnhffmnn/mux/internal/proxy"
 	"github.com/smnhffmnn/mux/internal/tools"
@@ -174,6 +177,15 @@ func (a *App) registerConnectionTools(conn config.Connection) {
 	a.toolsMu.Unlock()
 }
 
+// oauthMount builds the OAuth proxy mount for a connection. Thin wrapper
+// around the shared oauthProxyMount builder (register.go) that supplies the
+// app's port — shared by hot-reload, post-authorization mounting and the test
+// button so their transport construction cannot drift apart (the test button
+// once omitted the client credentials).
+func (a *App) oauthMount(name, url string, tokenStore *config.KeychainTokenStore) proxy.Mount {
+	return oauthProxyMount(name, url, a.port, tokenStore)
+}
+
 // registerProxyConnection handles hot-reload for proxy-type connections.
 func (a *App) registerProxyConnection(conn config.Connection) {
 	if conn.OAuth {
@@ -181,23 +193,9 @@ func (a *App) registerProxyConnection(conn config.Connection) {
 		if !tokenStore.HasToken() {
 			return
 		}
-		adapter := proxy.NewKeychainTokenAdapter(tokenStore)
-		clientID, clientSecret := config.LoadOAuthClientID(conn.Name)
-		mount := proxy.Mount{
-			Name:       conn.Name,
-			URL:        conn.URL,
-			TokenStore: tokenStore,
-			OAuth: &transport.OAuthConfig{
-				ClientID:     clientID,
-				ClientSecret: clientSecret,
-				RedirectURI:  fmt.Sprintf("http://localhost:%d/oauth/callback", a.port),
-				TokenStore:   adapter,
-				PKCEEnabled:  true,
-			},
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := proxy.RegisterMount(ctx, a.mcpServer, mount); err != nil {
+		if err := proxy.RegisterMount(ctx, a.mcpServer, a.oauthMount(conn.Name, conn.URL, tokenStore)); err != nil {
 			log.Printf("[mux] Warning: proxy %s not available: %v", conn.Name, err)
 			return
 		}
@@ -364,14 +362,8 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 // GetPageData returns the full page state (connections, tunnels, provisioning, server info).
 func (a *App) GetPageData() PageData {
 	data := PageData{
-		Server: ServerInfo{
-			Version:       a.version,
-			Uptime:        time.Since(a.startTime).Round(time.Second).String(),
-			Port:          a.port,
-			BuildTime:     a.buildTime,
-			CanSelfUpdate: selfUpdateURL() != "",
-		},
-		Types: allTypes(),
+		Server: a.serverInfo(),
+		Types:  allTypes(),
 		// Initialize as empty (non-nil) slices: a nil Go slice marshals to JSON
 		// `null`, which crashes the frontend's `.length`/`.map` access on a fresh
 		// install with no tunnels/connections configured.
@@ -401,13 +393,44 @@ func (a *App) GetPageData() PageData {
 
 // GetServerInfo returns server metadata for the header.
 func (a *App) GetServerInfo() ServerInfo {
+	return a.serverInfo()
+}
+
+func (a *App) serverInfo() ServerInfo {
 	return ServerInfo{
 		Version:       a.version,
 		Uptime:        time.Since(a.startTime).Round(time.Second).String(),
 		Port:          a.port,
 		BuildTime:     a.buildTime,
 		CanSelfUpdate: selfUpdateURL() != "",
+		LogPath:       logging.Path(),
 	}
+}
+
+// OpenLogFolder reveals the log directory in the OS file manager.
+func (a *App) OpenLogFolder() error {
+	p := logging.Path()
+	if p == "" {
+		return fmt.Errorf("file logging is not active")
+	}
+	dir := filepath.Dir(p)
+	var cmd *exec.Cmd
+	switch goruntime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", dir)
+	case "windows":
+		cmd = exec.Command("explorer", dir)
+	default:
+		cmd = exec.Command("xdg-open", dir)
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Reap the opener; without a Wait every click leaves a zombie process
+	// behind for the lifetime of the app. Its exit code is meaningless
+	// (explorer.exe reports 1 even on success), so it is ignored.
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 // GetConnectionTypes returns available connection types for the add dialog.
@@ -799,6 +822,26 @@ func (a *App) TestConnection(name string) *TestResult {
 		return &TestResult{Connection: name, Message: "Connection not found"}
 	}
 
+	if conn.Tunnel != "" {
+		testLog(name, "testing %s connection (tunnel %q)", conn.Type, conn.Tunnel)
+	} else {
+		testLog(name, "testing %s connection", conn.Type)
+	}
+
+	// Vault-exclusive setups: config.Load ran before the vault was unlocked,
+	// so conn.Token can still be empty here while the live mounts resolved
+	// their token from the secret store after the unlock (register.go,
+	// retryAfterVaultUnlock). The test must see the same token the live path
+	// uses, or it reports a false 401.
+	if conn.Token == "" {
+		if tok, err := config.GetSecret(conn.Name + "-token"); err == nil && tok != "" {
+			testLog(name, "token resolved from secret store")
+			c := *conn
+			c.Token = tok
+			conn = &c
+		}
+	}
+
 	start := time.Now()
 	var result testResponse
 
@@ -846,18 +889,21 @@ func (a *App) TestConnection(name string) *TestResult {
 			if conn.OAuth {
 				result = a.testOAuthProxy(*conn)
 			} else {
-				result = a.testBearerProxy(*conn)
+				result = a.testTokenProxy(*conn)
 			}
 		} else {
 			result = testResponse{Connection: conn.Name, Connected: false, Message: "Unknown type: " + conn.Type}
 		}
 	}
 
+	latency := time.Since(start).Round(time.Millisecond).String()
+	testLog(name, "result: connected=%v (%s) — %s", result.Connected, latency, result.Message)
+
 	return &TestResult{
 		Connection: result.Connection,
 		Connected:  result.Connected,
 		Message:    result.Message,
-		Latency:    time.Since(start).Round(time.Millisecond).String(),
+		Latency:    latency,
 	}
 }
 
@@ -1395,26 +1441,10 @@ func (a *App) mountOAuthProxy(connName string, tokenStore *config.KeychainTokenS
 		return
 	}
 
-	adapter := proxy.NewKeychainTokenAdapter(tokenStore)
-	clientID, clientSecret := config.LoadOAuthClientID(connName)
-
-	mount := proxy.Mount{
-		Name:       connName,
-		URL:        conn.URL,
-		TokenStore: tokenStore,
-		OAuth: &transport.OAuthConfig{
-			ClientID:     clientID,
-			ClientSecret: clientSecret,
-			RedirectURI:  fmt.Sprintf("http://localhost:%d/oauth/callback", a.port),
-			TokenStore:   adapter,
-			PKCEEnabled:  true,
-		},
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := proxy.RegisterMount(ctx, a.mcpServer, mount); err != nil {
+	if err := proxy.RegisterMount(ctx, a.mcpServer, a.oauthMount(connName, conn.URL, tokenStore)); err != nil {
 		log.Printf("[oauth] Failed to mount %s after authorization: %v", connName, err)
 	}
 }
@@ -1427,6 +1457,91 @@ type testResponse struct {
 	Message    string
 }
 
+// testLog writes verbose test-button diagnostics to the log: tunnel
+// resolution, target endpoints, HTTP statuses. Only test runs log at this
+// detail — normal operation does not pass through these helpers — so the
+// detail is free where it matters (remote debugging) and absent elsewhere.
+func testLog(conn string, format string, args ...any) {
+	line := fmt.Sprintf("[test:%s] "+format, append([]any{conn}, args...)...)
+	// Connection names, hosts and URLs are free-form (and may come from a
+	// remote provisioning endpoint); strip control characters so no value can
+	// forge additional log lines in a file people read as ground truth.
+	line = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, line)
+	log.Print(line)
+}
+
+// redactURL strips userinfo credentials from a URL before logging it —
+// mux.log is meant to be handed around for debugging.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	return u.Redacted()
+}
+
+// tunnelUnavailable is the uniform fail-closed result for a test whose
+// connection references a tunnel that is not up. Matches the live
+// registration paths, which skip such connections instead of connecting
+// directly past the tunnel.
+func tunnelUnavailable(conn config.Connection) testResponse {
+	testLog(conn.Name, "tunnel %q not available — failing closed", conn.Tunnel)
+	return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("tunnel %q not available", conn.Tunnel)}
+}
+
+// testHTTPClient returns the HTTP client a connection test must use: routed
+// through the connection's tunnel when one is set — like every live
+// registration path, fail-closed (ok=false) when that tunnel is unavailable —
+// and a direct client otherwise. TLS verification follows insecureTLS in both
+// branches, mirroring the live tools: the http connection type always skips
+// (internal/tools/http.go), every API type verifies even through a tunnel.
+// Proxy-type tests don't come through here — they share proxyTunnelClient
+// with the live mounts via newProxyTokenMount.
+func (a *App) testHTTPClient(conn config.Connection, timeout time.Duration, insecureTLS bool) (*http.Client, bool) {
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureTLS},
+	}
+	if conn.Tunnel != "" {
+		t := a.tm.Get(conn.Tunnel)
+		if t == nil {
+			return nil, false
+		}
+		testLog(conn.Name, "routing through tunnel %q", conn.Tunnel)
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return t.DialContext(ctx, network, addr)
+		}
+	}
+	return &http.Client{Timeout: timeout, Transport: tr}, true
+}
+
+// testGet runs an authenticated GET against url with the given headers and
+// returns the response status, logging target and outcome. The response body
+// is discarded — connection tests only interpret status codes.
+func testGet(client *http.Client, connName, url string, headers map[string]string) (int, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return 0, fmt.Errorf("invalid URL: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	testLog(connName, "GET %s", redactURL(url))
+	resp, err := client.Do(req)
+	if err != nil {
+		testLog(connName, "request failed: %v", err)
+		return 0, err
+	}
+	resp.Body.Close()
+	testLog(connName, "HTTP %d", resp.StatusCode)
+	return resp.StatusCode, nil
+}
+
 func (a *App) testMariaDB(conn config.Connection) testResponse {
 	if !conn.Enabled() {
 		return testResponse{Connection: conn.Name, Connected: false, Message: "Not configured"}
@@ -1436,8 +1551,9 @@ func (a *App) testMariaDB(conn config.Connection) testResponse {
 	if conn.Tunnel != "" {
 		t := a.tm.Get(conn.Tunnel)
 		if t == nil {
-			return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("tunnel %q not available", conn.Tunnel)}
+			return tunnelUnavailable(conn)
 		}
+		testLog(conn.Name, "routing through tunnel %q", conn.Tunnel)
 		networkName = fmt.Sprintf("wg-test-%d", time.Now().UnixNano())
 		mysql.RegisterDialContext(networkName, func(ctx context.Context, addr string) (net.Conn, error) {
 			return t.DialContext(ctx, "tcp", addr)
@@ -1446,6 +1562,7 @@ func (a *App) testMariaDB(conn config.Connection) testResponse {
 
 	dsn := fmt.Sprintf("%s:%s@%s(%s:%d)/%s?timeout=5s",
 		conn.User, conn.Password, networkName, conn.Host, conn.Port, conn.Database)
+	testLog(conn.Name, "connecting to %s:%d/%s as %s", conn.Host, conn.Port, conn.Database, conn.User)
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
@@ -1471,11 +1588,13 @@ func (a *App) testClickHouse(conn config.Connection) testResponse {
 	if conn.Tunnel != "" {
 		t := a.tm.Get(conn.Tunnel)
 		if t == nil {
-			return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("tunnel %q not available", conn.Tunnel)}
+			return tunnelUnavailable(conn)
 		}
+		testLog(conn.Name, "routing through tunnel %q", conn.Tunnel)
 		dialer = t
 	}
 
+	testLog(conn.Name, "connecting to %s:%d/%s as %s", conn.Host, conn.Port, conn.Database, conn.User)
 	db := tools.OpenClickHouseDB(conn, dialer)
 	defer db.Close()
 
@@ -1497,11 +1616,13 @@ func (a *App) testPostgreSQL(conn config.Connection) testResponse {
 	if conn.Tunnel != "" {
 		t := a.tm.Get(conn.Tunnel)
 		if t == nil {
-			return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("tunnel %q not available", conn.Tunnel)}
+			return tunnelUnavailable(conn)
 		}
+		testLog(conn.Name, "routing through tunnel %q", conn.Tunnel)
 		dialer = t
 	}
 
+	testLog(conn.Name, "connecting to %s:%d/%s as %s", conn.Host, conn.Port, conn.Database, conn.User)
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable&connect_timeout=5",
 		url.QueryEscape(conn.User), url.QueryEscape(conn.Password),
 		conn.Host, conn.Port, conn.Database)
@@ -1542,28 +1663,34 @@ func (a *App) testHTTP(conn config.Connection) testResponse {
 		}
 	}
 
-	httpClient := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
+	httpClient, ok := a.testHTTPClient(conn, 10*time.Second, true)
+	if !ok {
+		return tunnelUnavailable(conn)
 	}
-	req, err := http.NewRequest(http.MethodGet, testURL, nil)
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	// Mirror the live http tool's auth handling (internal/tools/http.go):
+	// static extra headers plus the token under its configured scheme.
+	headers := map[string]string{}
+	for k, v := range conn.Headers {
+		headers[k] = v
 	}
-	req.Header.Set("Accept", "application/json")
 	if conn.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+conn.Token)
+		switch {
+		case conn.TokenScheme == "basic":
+			cred := base64.StdEncoding.EncodeToString([]byte(conn.Token + ":" + conn.BasicSuffix))
+			headers["Authorization"] = "Basic " + cred
+		case conn.TokenHeader != "":
+			headers[conn.TokenHeader] = conn.Token
+		default:
+			headers["Authorization"] = "Bearer " + conn.Token
+		}
 	}
 
-	resp, err := httpClient.Do(req)
+	status, err := testGet(httpClient, conn.Name, testURL, headers)
 	if err != nil {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
 	}
-	resp.Body.Close()
 
-	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: HTTP %d", resp.StatusCode)}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: HTTP %d", status)}
 }
 
 func (a *App) testFirecrawl(conn config.Connection) testResponse {
@@ -1577,7 +1704,10 @@ func (a *App) testFirecrawl(conn config.Connection) testResponse {
 	}
 	apiURL = strings.TrimRight(apiURL, "/")
 
-	httpClient := &http.Client{Timeout: 10 * time.Second}
+	httpClient, ok := a.testHTTPClient(conn, 10*time.Second, false)
+	if !ok {
+		return tunnelUnavailable(conn)
+	}
 	reqBody := strings.NewReader(`{"url":"https://example.com","formats":["markdown"],"onlyMainContent":true}`)
 	req, err := http.NewRequest(http.MethodPost, apiURL+"/v1/scrape", reqBody)
 	if err != nil {
@@ -1586,11 +1716,14 @@ func (a *App) testFirecrawl(conn config.Connection) testResponse {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+conn.Token)
 
+	testLog(conn.Name, "POST %s", apiURL+"/v1/scrape")
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		testLog(conn.Name, "request failed: %v", err)
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
 	}
 	resp.Body.Close()
+	testLog(conn.Name, "HTTP %d", resp.StatusCode)
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusPaymentRequired {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
@@ -1609,24 +1742,19 @@ func (a *App) testBrave(conn config.Connection) testResponse {
 	}
 	apiURL = strings.TrimRight(apiURL, "/")
 
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, apiURL+"/res/v1/web/search?q=test&count=1", nil)
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	httpClient, ok := a.testHTTPClient(conn, 10*time.Second, false)
+	if !ok {
+		return tunnelUnavailable(conn)
 	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Subscription-Token", conn.Token)
-
-	resp, err := httpClient.Do(req)
+	status, err := testGet(httpClient, conn.Name, apiURL+"/res/v1/web/search?q=test&count=1", map[string]string{"X-Subscription-Token": conn.Token})
 	if err != nil {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
 	}
-	resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", status)}
 	}
-	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Brave Search API (HTTP %d)", resp.StatusCode)}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Brave Search API (HTTP %d)", status)}
 }
 
 func (a *App) testOpenAI(conn config.Connection) testResponse {
@@ -1640,23 +1768,19 @@ func (a *App) testOpenAI(conn config.Connection) testResponse {
 	}
 	apiURL = strings.TrimRight(apiURL, "/")
 
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, apiURL+"/v1/models", nil)
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	httpClient, ok := a.testHTTPClient(conn, 10*time.Second, false)
+	if !ok {
+		return tunnelUnavailable(conn)
 	}
-	req.Header.Set("Authorization", "Bearer "+conn.Token)
-
-	resp, err := httpClient.Do(req)
+	status, err := testGet(httpClient, conn.Name, apiURL+"/v1/models", map[string]string{"Authorization": "Bearer " + conn.Token})
 	if err != nil {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
 	}
-	resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", status)}
 	}
-	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: OpenAI API (HTTP %d)", resp.StatusCode)}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: OpenAI API (HTTP %d)", status)}
 }
 
 func (a *App) testElevenLabs(conn config.Connection) testResponse {
@@ -1670,23 +1794,19 @@ func (a *App) testElevenLabs(conn config.Connection) testResponse {
 	}
 	apiURL = strings.TrimRight(apiURL, "/")
 
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, apiURL+"/v1/user/subscription", nil)
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	httpClient, ok := a.testHTTPClient(conn, 10*time.Second, false)
+	if !ok {
+		return tunnelUnavailable(conn)
 	}
-	req.Header.Set("xi-api-key", conn.Token)
-
-	resp, err := httpClient.Do(req)
+	status, err := testGet(httpClient, conn.Name, apiURL+"/v1/user/subscription", map[string]string{"xi-api-key": conn.Token})
 	if err != nil {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
 	}
-	resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", status)}
 	}
-	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: ElevenLabs API (HTTP %d)", resp.StatusCode)}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: ElevenLabs API (HTTP %d)", status)}
 }
 
 func (a *App) testRecraft(conn config.Connection) testResponse {
@@ -1700,23 +1820,19 @@ func (a *App) testRecraft(conn config.Connection) testResponse {
 	}
 	apiURL = strings.TrimRight(apiURL, "/")
 
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, apiURL+"/users/me", nil)
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	httpClient, ok := a.testHTTPClient(conn, 10*time.Second, false)
+	if !ok {
+		return tunnelUnavailable(conn)
 	}
-	req.Header.Set("Authorization", "Bearer "+conn.Token)
-
-	resp, err := httpClient.Do(req)
+	status, err := testGet(httpClient, conn.Name, apiURL+"/users/me", map[string]string{"Authorization": "Bearer " + conn.Token})
 	if err != nil {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
 	}
-	resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", status)}
 	}
-	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Recraft API (HTTP %d)", resp.StatusCode)}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Recraft API (HTTP %d)", status)}
 }
 
 func (a *App) testIdeogram(conn config.Connection) testResponse {
@@ -1730,7 +1846,10 @@ func (a *App) testIdeogram(conn config.Connection) testResponse {
 	}
 	apiURL = strings.TrimRight(apiURL, "/")
 
-	httpClient := &http.Client{Timeout: 10 * time.Second}
+	httpClient, ok := a.testHTTPClient(conn, 10*time.Second, false)
+	if !ok {
+		return tunnelUnavailable(conn)
+	}
 	// Ideogram has no simple GET health endpoint. POST an empty body to the
 	// generate endpoint: 400 = authenticated (bad request), 401/403 = bad key.
 	req, err := http.NewRequest(http.MethodPost, apiURL+"/v1/ideogram-v3/generate", strings.NewReader("{}"))
@@ -1740,11 +1859,14 @@ func (a *App) testIdeogram(conn config.Connection) testResponse {
 	req.Header.Set("Api-Key", conn.Token)
 	req.Header.Set("Content-Type", "application/json")
 
+	testLog(conn.Name, "POST %s", apiURL+"/v1/ideogram-v3/generate")
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		testLog(conn.Name, "request failed: %v", err)
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
 	}
 	resp.Body.Close()
+	testLog(conn.Name, "HTTP %d", resp.StatusCode)
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
@@ -1761,7 +1883,10 @@ func (a *App) testMicrosoftGraph(conn config.Connection) testResponse {
 	if conn.ClientID == "" {
 		return testResponse{Connection: conn.Name, Connected: false, Message: "client_id (Azure App Registration ID) not configured"}
 	}
-	httpClient := &http.Client{Timeout: 10 * time.Second}
+	httpClient, ok := a.testHTTPClient(conn, 10*time.Second, false)
+	if !ok {
+		return tunnelUnavailable(conn)
+	}
 	scopes := conn.Scopes
 	if scopes == "" {
 		scopes = tools.GraphDefaultScopes
@@ -1773,8 +1898,10 @@ func (a *App) testMicrosoftGraph(conn config.Connection) testResponse {
 		"refresh_token": {rt},
 		"scope":         {scopes},
 	}
+	testLog(conn.Name, "POST https://login.microsoftonline.com/common/oauth2/v2.0/token (refresh)")
 	tokenResp, err := httpClient.PostForm("https://login.microsoftonline.com/common/oauth2/v2.0/token", form)
 	if err != nil {
+		testLog(conn.Name, "token refresh failed: %v", err)
 		return testResponse{Connection: conn.Name, Connected: false, Message: "Token refresh failed: " + err.Error()}
 	}
 	defer tokenResp.Body.Close()
@@ -1789,10 +1916,12 @@ func (a *App) testMicrosoftGraph(conn config.Connection) testResponse {
 		return testResponse{Connection: conn.Name, Connected: false, Message: "Token refresh failed — re-authenticate"}
 	}
 
+	testLog(conn.Name, "GET https://graph.microsoft.com/v1.0/me")
 	req, _ := http.NewRequest(http.MethodGet, "https://graph.microsoft.com/v1.0/me?$select=displayName,mail", nil)
 	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
 	meResp, err := httpClient.Do(req)
 	if err != nil {
+		testLog(conn.Name, "request failed: %v", err)
 		return testResponse{Connection: conn.Name, Connected: false, Message: "Graph API unreachable: " + err.Error()}
 	}
 	defer meResp.Body.Close()
@@ -1823,7 +1952,17 @@ func (a *App) testGoogleTagManager(conn config.Connection) testResponse {
 		return testResponse{Connection: conn.Name, Connected: false, Message: "JSON must contain client_email and private_key"}
 	}
 
-	gtm, err := tools.NewGoogleTagManager(conn, nil)
+	var dialer tools.Dialer
+	if conn.Tunnel != "" {
+		t := a.tm.Get(conn.Tunnel)
+		if t == nil {
+			return tunnelUnavailable(conn)
+		}
+		testLog(conn.Name, "routing through tunnel %q", conn.Tunnel)
+		dialer = t
+	}
+
+	gtm, err := tools.NewGoogleTagManager(conn, dialer)
 	if err != nil {
 		return testResponse{Connection: conn.Name, Connected: false, Message: err.Error()}
 	}
@@ -1831,6 +1970,7 @@ func (a *App) testGoogleTagManager(conn config.Connection) testResponse {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
+	testLog(conn.Name, "calling GTM API as %s", sa.ClientEmail)
 	result, err := gtm.Tools()[0].Handler(ctx, mcp.CallToolRequest{})
 	if err != nil {
 		return testResponse{Connection: conn.Name, Connected: false, Message: "API call failed: " + err.Error()}
@@ -1853,23 +1993,19 @@ func (a *App) testAsana(conn config.Connection) testResponse {
 		return testResponse{Connection: conn.Name, Connected: false, Message: "Personal access token not configured"}
 	}
 
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, "https://app.asana.com/api/1.0/users/me", nil)
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	httpClient, ok := a.testHTTPClient(conn, 10*time.Second, false)
+	if !ok {
+		return tunnelUnavailable(conn)
 	}
-	req.Header.Set("Authorization", "Bearer "+conn.Token)
-
-	resp, err := httpClient.Do(req)
+	status, err := testGet(httpClient, conn.Name, "https://app.asana.com/api/1.0/users/me", map[string]string{"Authorization": "Bearer " + conn.Token})
 	if err != nil {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
 	}
-	resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your personal access token", resp.StatusCode)}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your personal access token", status)}
 	}
-	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Asana API (HTTP %d)", resp.StatusCode)}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Asana API (HTTP %d)", status)}
 }
 
 func (a *App) testGemini(conn config.Connection) testResponse {
@@ -1883,23 +2019,19 @@ func (a *App) testGemini(conn config.Connection) testResponse {
 	}
 	apiURL = strings.TrimRight(apiURL, "/")
 
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, apiURL+"/models", nil)
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	httpClient, ok := a.testHTTPClient(conn, 10*time.Second, false)
+	if !ok {
+		return tunnelUnavailable(conn)
 	}
-	req.Header.Set("x-goog-api-key", conn.Token)
-
-	resp, err := httpClient.Do(req)
+	status, err := testGet(httpClient, conn.Name, apiURL+"/models", map[string]string{"x-goog-api-key": conn.Token})
 	if err != nil {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
 	}
-	resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusBadRequest {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusBadRequest {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", status)}
 	}
-	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Gemini API (HTTP %d)", resp.StatusCode)}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Gemini API (HTTP %d)", status)}
 }
 
 func (a *App) testHyperbrowser(conn config.Connection) testResponse {
@@ -1913,25 +2045,20 @@ func (a *App) testHyperbrowser(conn config.Connection) testResponse {
 	}
 	apiURL = strings.TrimRight(apiURL, "/")
 
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	// /api/sessions lists active sessions — auth check without spending scrape credits.
-	req, err := http.NewRequest(http.MethodGet, apiURL+"/api/sessions", nil)
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	httpClient, ok := a.testHTTPClient(conn, 10*time.Second, false)
+	if !ok {
+		return tunnelUnavailable(conn)
 	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("x-api-key", conn.Token)
-
-	resp, err := httpClient.Do(req)
+	// /api/sessions lists active sessions — auth check without spending scrape credits.
+	status, err := testGet(httpClient, conn.Name, apiURL+"/api/sessions", map[string]string{"x-api-key": conn.Token})
 	if err != nil {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
 	}
-	resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", status)}
 	}
-	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Hyperbrowser API (HTTP %d)", resp.StatusCode)}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Hyperbrowser API (HTTP %d)", status)}
 }
 
 func (a *App) testIMAP(conn config.Connection) testResponse {
@@ -1942,27 +2069,34 @@ func (a *App) testIMAP(conn config.Connection) testResponse {
 		return testResponse{Connection: conn.Name, Connected: false, Message: "Password not configured"}
 	}
 
+	var dialer tools.Dialer
+	if conn.Tunnel != "" {
+		t := a.tm.Get(conn.Tunnel)
+		if t == nil {
+			return tunnelUnavailable(conn)
+		}
+		testLog(conn.Name, "routing through tunnel %q", conn.Tunnel)
+		dialer = t
+	}
+
+	im, err := tools.NewIMAP(conn, dialer)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: err.Error()}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	port := conn.Port
 	if port == 0 {
-		port = 993
+		port = 993 // NewIMAP's default — log the port actually dialed
 	}
-	addr := net.JoinHostPort(conn.Host, fmt.Sprintf("%d", port))
-
-	d := &net.Dialer{Timeout: 10 * time.Second}
-	rawConn, err := d.Dial("tcp", addr)
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
+	testLog(conn.Name, "connecting to %s:%d and logging in as %s", conn.Host, port, conn.User)
+	if err := im.Verify(ctx); err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("IMAP check failed: %v", err)}
 	}
 
-	tlsConn := tls.Client(rawConn, &tls.Config{ServerName: conn.Host})
-	tlsConn.SetDeadline(time.Now().Add(10 * time.Second))
-	if err := tlsConn.Handshake(); err != nil {
-		rawConn.Close()
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("TLS handshake failed: %v", err)}
-	}
-	tlsConn.Close()
-
-	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: IMAP TLS (%s) — credentials not verified", addr)}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: IMAP login verified (%s)", conn.User)}
 }
 
 func (a *App) testGit(conn config.Connection) testResponse {
@@ -1984,25 +2118,40 @@ func (a *App) testMeilisearch(conn config.Connection) testResponse {
 	}
 	baseURL := fmt.Sprintf("%s://%s:%d", scheme, conn.Host, conn.Port)
 
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, baseURL+"/health", nil)
+	httpClient, ok := a.testHTTPClient(conn, 10*time.Second, false)
+	if !ok {
+		return tunnelUnavailable(conn)
+	}
+
+	// Search the configured index with an empty query — the same endpoint the
+	// live tools use, so reachability, API key AND index are all verified
+	// (the previous /health check answered without authentication).
+	searchURL := fmt.Sprintf("%s/indexes/%s/search", baseURL, conn.Database)
+	req, err := http.NewRequest(http.MethodPost, searchURL, strings.NewReader(`{"q":"","limit":1}`))
 	if err != nil {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
 	}
+	req.Header.Set("Content-Type", "application/json")
 	if conn.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+conn.Token)
 	}
 
+	testLog(conn.Name, "POST %s", searchURL)
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		testLog(conn.Name, "request failed: %v", err)
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
 	}
 	resp.Body.Close()
+	testLog(conn.Name, "HTTP %d", resp.StatusCode)
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your API key", resp.StatusCode)}
 	}
-	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Meilisearch (HTTP %d)", resp.StatusCode)}
+	if resp.StatusCode == http.StatusNotFound {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Index %q not found (HTTP 404)", conn.Database)}
+	}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: Meilisearch index %q (HTTP %d)", conn.Database, resp.StatusCode)}
 }
 
 func (a *App) testYouTrackAgile(conn config.Connection) testResponse {
@@ -2011,66 +2160,63 @@ func (a *App) testYouTrackAgile(conn config.Connection) testResponse {
 	}
 
 	baseURL := strings.TrimRight(conn.URL, "/")
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, baseURL+"/api/agiles/"+conn.Database+"?fields=id,name", nil)
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Invalid URL: %v", err)}
+	httpClient, ok := a.testHTTPClient(conn, 10*time.Second, false)
+	if !ok {
+		return tunnelUnavailable(conn)
 	}
-	req.Header.Set("Authorization", "Bearer "+conn.Token)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := httpClient.Do(req)
+	status, err := testGet(httpClient, conn.Name, baseURL+"/api/agiles/"+conn.Database+"?fields=id,name", map[string]string{"Authorization": "Bearer " + conn.Token})
 	if err != nil {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
 	}
-	resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your permanent token", resp.StatusCode)}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your permanent token", status)}
 	}
-	if resp.StatusCode == http.StatusNotFound {
+	if status == http.StatusNotFound {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Board %q not found (HTTP 404) — check the board ID", conn.Database)}
 	}
-	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: YouTrack Agile board %s (HTTP %d)", conn.Database, resp.StatusCode)}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: YouTrack Agile board %s (HTTP %d)", conn.Database, status)}
 }
 
-func (a *App) testBearerProxy(conn config.Connection) testResponse {
-	if conn.URL == "" || conn.Token == "" {
-		return testResponse{Connection: conn.Name, Connected: false, Message: "Not configured (URL or token missing)"}
+// testTokenProxy tests a non-OAuth proxy connection by connecting exactly like
+// the live mount does: newProxyTokenMount + proxy.Probe give it the same tunnel
+// routing, auth scheme (bearer/custom-header/basic) and transport construction.
+// Anything hand-rolled here drifts from the mount path and produces false
+// negatives — a tunneled Basic connection used to be tested against its
+// internal IP with a hardcoded Bearer header.
+func (a *App) testTokenProxy(conn config.Connection) testResponse {
+	if conn.URL == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "Not configured (URL missing)"}
 	}
 
-	headers := map[string]string{"Authorization": "Bearer " + conn.Token}
-	t, err := transport.NewStreamableHTTP(conn.URL, transport.WithHTTPHeaders(headers))
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Transport error: %v", err)}
+	mount, ok := newProxyTokenMount(conn, conn.Token, a.tm)
+	if !ok {
+		return tunnelUnavailable(conn)
+	}
+	if conn.Tunnel != "" {
+		testLog(conn.Name, "routing through tunnel %q", conn.Tunnel)
 	}
 
-	c := client.NewClient(t)
+	switch {
+	case conn.Token == "":
+		testLog(conn.Name, "probing MCP server %s (no token)", redactURL(conn.URL))
+	case conn.TokenScheme == "basic":
+		testLog(conn.Name, "probing MCP server %s (auth: basic, suffix %q)", redactURL(conn.URL), conn.BasicSuffix)
+	case conn.TokenHeader != "":
+		testLog(conn.Name, "probing MCP server %s (auth: header %s)", redactURL(conn.URL), conn.TokenHeader)
+	default:
+		testLog(conn.Name, "probing MCP server %s (auth: bearer)", redactURL(conn.URL))
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := c.Start(ctx); err != nil {
+	res, err := proxy.Probe(ctx, mount)
+	if err != nil {
+		testLog(conn.Name, "probe failed: %v", err)
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
 	}
-	defer c.Close()
-
-	initResult, err := c.Initialize(ctx, mcp.InitializeRequest{
-		Params: mcp.InitializeParams{
-			ClientInfo:      mcp.Implementation{Name: "mux", Version: "1.0.0"},
-			ProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
-		},
-	})
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("MCP initialize failed: %v", err)}
-	}
-
-	toolsResult, err := c.ListTools(ctx, mcp.ListToolsRequest{})
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected (%s) — could not list tools: %v", initResult.ServerInfo.Name, err)}
-	}
-
-	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: %s (%d tools)", initResult.ServerInfo.Name, len(toolsResult.Tools))}
+	return probeResponse(conn.Name, res)
 }
 
 func (a *App) testOAuthProxy(conn config.Connection) testResponse {
@@ -2083,41 +2229,24 @@ func (a *App) testOAuthProxy(conn config.Connection) testResponse {
 		return testResponse{Connection: conn.Name, Connected: false, Message: "Not authorized — click Authorize to connect"}
 	}
 
-	adapter := proxy.NewKeychainTokenAdapter(tokenStore)
-	oauthCfg := transport.OAuthConfig{
-		TokenStore:  adapter,
-		PKCEEnabled: true,
-	}
-
-	c, err := client.NewOAuthStreamableHttpClient(conn.URL, oauthCfg)
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Transport error: %v", err)}
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	if err := c.Start(ctx); err != nil {
+	testLog(conn.Name, "probing MCP server %s (auth: OAuth)", redactURL(conn.URL))
+	res, err := proxy.Probe(ctx, a.oauthMount(conn.Name, conn.URL, tokenStore))
+	if err != nil {
+		testLog(conn.Name, "probe failed: %v", err)
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
 	}
-	defer c.Close()
+	return probeResponse(conn.Name, res)
+}
 
-	initResult, err := c.Initialize(ctx, mcp.InitializeRequest{
-		Params: mcp.InitializeParams{
-			ClientInfo:      mcp.Implementation{Name: "mux", Version: "1.0.0"},
-			ProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
-		},
-	})
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("MCP initialize failed: %v", err)}
+// probeResponse maps a successful probe onto the test-button result.
+func probeResponse(name string, res proxy.ProbeResult) testResponse {
+	if res.ToolsErr != nil {
+		return testResponse{Connection: name, Connected: true, Message: fmt.Sprintf("Connected (%s) — could not list tools: %v", res.ServerName, res.ToolsErr)}
 	}
-
-	toolsResult, err := c.ListTools(ctx, mcp.ListToolsRequest{})
-	if err != nil {
-		return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected (%s) — could not list tools: %v", initResult.ServerInfo.Name, err)}
-	}
-
-	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: %s (%d tools)", initResult.ServerInfo.Name, len(toolsResult.Tools))}
+	return testResponse{Connection: name, Connected: true, Message: fmt.Sprintf("Connected: %s (%d tools)", res.ServerName, res.ToolCount)}
 }
 
 // ========== OAuth Discovery ==========

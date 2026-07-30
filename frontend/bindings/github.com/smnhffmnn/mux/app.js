@@ -135,6 +135,14 @@ export function GetSetupDoc(typ) {
 }
 
 /**
+ * OpenLogFolder reveals the log directory in the OS file manager.
+ * @returns {$CancellablePromise<void>}
+ */
+export function OpenLogFolder() {
+    return $Call.ByID(4243760357);
+}
+
+/**
  * ReloadConnection re-registers MCP tools for a connection (implements tools.ToolReloader).
  * @param {config$0.Connection} conn
  * @returns {$CancellablePromise<void>}

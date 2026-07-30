@@ -21,6 +21,7 @@ type ServerInfo struct {
 	Port          int    `json:"port"`
 	BuildTime     string `json:"buildTime"`
 	CanSelfUpdate bool   `json:"canSelfUpdate"`
+	LogPath       string `json:"logPath"` // empty when file logging is unavailable
 }
 
 // ProvisioningInfo describes the aggregate provisioning status across all endpoints

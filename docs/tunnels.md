@@ -109,6 +109,8 @@ If a tunnel fails to start (bad keys, unreachable peer, etc.), all connections t
 
 This is intentional. A broken tunnel should not result in tools that always fail -- it is better to not expose them at all. Connections without a tunnel reference are unaffected.
 
+Connection tests (the **Test** button in the desktop app) fail closed the same way: testing a connection whose tunnel is down reports `tunnel "office-vpn" not available` instead of connecting directly past the tunnel. A test only reports success when it reached the target the way the live tools would.
+
 ## Key Format
 
 WireGuard keys in config and provisioning responses are **base64-encoded** (standard WireGuard format, 44 characters with `=` padding). Each key decodes to exactly 32 bytes.

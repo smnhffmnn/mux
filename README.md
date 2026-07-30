@@ -55,7 +55,7 @@ make build
 
 ## Quick Start
 
-Create `~/.mux/config.toml`:
+Create `~/.config/mux/config.toml` (Windows: `%USERPROFILE%\.mux\config.toml`):
 
 ```toml
 [[connections]]
@@ -148,11 +148,11 @@ mux --port 8080 --config ./my-config.toml  # custom port and config
 
 ## Configuration
 
-Config file: `~/.mux/config.toml`
+Config file: `~/.config/mux/config.toml` (respects `$XDG_CONFIG_HOME`; Windows: `%USERPROFILE%\.mux\config.toml`. Pre-XDG installations at `~/.mux` are migrated automatically.)
 
 Connection settings are loaded with this priority (highest wins): **Environment variables > TOML file > Defaults**
 
-Secrets (passwords, tokens, keys) have their own resolution chain: **Encrypted Vault > OS Keychain > File fallback** (`~/.mux/secrets.toml`)
+Secrets (passwords, tokens, keys) have their own resolution chain: **Encrypted Vault > OS Keychain > File fallback** (`secrets.toml` next to the config file)
 
 ```toml
 [server]
@@ -222,7 +222,7 @@ The dual-port architecture keeps MCP clients (`.mcp.json`) on plain HTTP localho
 | Tool | Description |
 |------|-------------|
 | `vault_status` | Show vault state, secret count, credential info, remaining lock time |
-| `vault_init` | Initialize vault with a passphrase (creates `~/.mux/vault.json` + `vault.key`) |
+| `vault_init` | Initialize vault with a passphrase (creates `vault.json` + `vault.key` in the config directory) |
 | `vault_unlock` | Unlock with passphrase |
 | `vault_lock` | Lock immediately (wipes DEK from memory) |
 | `vault_migrate` | Migrate existing secrets from keychain/file into the encrypted vault |
