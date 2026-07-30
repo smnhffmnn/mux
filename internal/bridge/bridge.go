@@ -33,13 +33,19 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-// logger writes to stderr rather than through the standard logger, which stdio
-// mode deliberately discards to keep stdout clean for the MCP stream. The MCP
-// stdio transport reserves stdout for protocol traffic and leaves stderr for
-// logging, so the bridge can report what it decided without corrupting it —
-// and a silent bridge is precisely what makes duplicate-instance problems hard
-// to diagnose.
+// logger defaults to stderr so bridge diagnostics survive even when the
+// standard logger is still discarded (the window before file logging is set
+// up in stdio mode — stdout belongs to the MCP stream). A silent bridge is
+// precisely what makes duplicate-instance problems hard to diagnose.
 var logger = log.New(os.Stderr, "[bridge] ", log.LstdFlags)
+
+// UseStandardLogger reroutes bridge diagnostics through the process-wide
+// standard logger. main calls this once file logging is set up, so bridge
+// runtime messages (re-syncs, session re-inits, call failures) land in
+// mux.log instead of vanishing into the invisible stderr of a stdio session.
+func UseStandardLogger() {
+	logger = log.New(log.Default().Writer(), "[bridge] ", log.Default().Flags())
+}
 
 // resyncTimeout bounds a tool-list refresh. Without it a hung upstream would
 // stall refreshes forever, since the transport's HTTP client has no timeout.
