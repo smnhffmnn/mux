@@ -841,15 +841,7 @@ func loadKeychain(cfg *Config) {
 
 	// Connection secrets (password or token, keyed by connection name)
 	for i := range cfg.Connections {
-		name := cfg.Connections[i].Name
-		if v, err := getSecret(name + "-password"); err == nil {
-			cfg.Connections[i].Password = v
-			secretsLoaded++
-		}
-		if v, err := getSecret(name + "-token"); err == nil && cfg.Connections[i].Token == "" {
-			cfg.Connections[i].Token = v
-			secretsLoaded++
-		}
+		secretsLoaded += ResolveConnectionSecrets(&cfg.Connections[i])
 	}
 
 	// Tunnel secrets (private key, preshared key)
@@ -866,6 +858,33 @@ func loadKeychain(cfg *Config) {
 	}
 
 	log.Printf("[secrets] Loaded %d secrets", secretsLoaded)
+}
+
+// ResolveConnectionSecrets fills a connection's empty secret fields from the
+// secret store (vault → keyring → file) and reports how many it filled.
+// Password and Token are toml:"-", so at startup both are always empty and
+// this matches the previous loadKeychain behaviour exactly. Values already
+// set in memory (a password just typed into the GUI, a provisioned token)
+// are never overwritten — the store could hold a stale copy. Reload paths
+// (connection_add, GUI add/save, secret_set) hand connections over as they
+// sit in config.toml — without secrets — so they must resolve them the same
+// way startup does, or the connection runs unauthenticated until the next
+// process restart.
+func ResolveConnectionSecrets(conn *Connection) int {
+	filled := 0
+	if conn.Password == "" {
+		if v, err := getSecret(conn.Name + "-password"); err == nil {
+			conn.Password = v
+			filled++
+		}
+	}
+	if conn.Token == "" {
+		if v, err := getSecret(conn.Name + "-token"); err == nil {
+			conn.Token = v
+			filled++
+		}
+	}
+	return filled
 }
 
 func loadEnv(cfg *Config) {

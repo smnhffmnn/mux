@@ -410,6 +410,13 @@ func (r *simpleReloader) ReloadConnection(conn config.Connection) {
 		return
 	}
 
+	// Reload paths (connection_add, secret_set on other fields) hand the
+	// connection over as it sits in config.toml — without its secrets. The
+	// startup path resolves them via loadKeychain; without the same
+	// resolution here the connection runs unauthenticated until the next
+	// restart (an http proxy then silently sends no Authorization header).
+	config.ResolveConnectionSecrets(&conn)
+
 	if config.IsProxyType(conn.Type) {
 		r.registerProxy(conn)
 		return

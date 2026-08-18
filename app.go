@@ -148,6 +148,14 @@ func (a *App) registerConnectionTools(conn config.Connection) {
 		return
 	}
 
+	// Hot-reload and GUI add/save paths can hand the connection over without
+	// its secrets (they live in the secret store, not in config.toml). Resolve
+	// them like the startup path does, or the connection runs unauthenticated
+	// until the next restart. Only missing values are filled — a token or
+	// password just typed into the form was already saved to the store and
+	// resolves to the same fresh value.
+	config.ResolveConnectionSecrets(&conn)
+
 	if config.IsProxyType(conn.Type) {
 		a.registerProxyConnection(conn)
 		return
