@@ -32,6 +32,13 @@ var (
 	fileStoreMu sync.Mutex
 	skipKeyring atomic.Bool // set in headless mode or after first keyring failure
 
+	// Indirection over the OS keyring so tests can substitute failure modes.
+	// The divergence bug this guards against — a broken write next to a
+	// working read — cannot be reproduced against a real keyring in CI.
+	keyringSet    = keyring.Set
+	keyringGet    = keyring.Get
+	keyringDelete = keyring.Delete
+
 	// activeVault is set when the vault feature is enabled.
 	// When set, getSecret/setSecret/deleteSecret try the vault first.
 	activeVaultMu   sync.RWMutex
@@ -93,7 +100,7 @@ func getSecret(key string) (string, error) {
 	}
 
 	if !skipKeyring.Load() {
-		v, err := keyring.Get(ServiceName, key)
+		v, err := keyringGet(ServiceName, key)
 		if err == nil {
 			log.Printf("[secrets] Resolved %q from keyring", key)
 			return v, nil
@@ -144,16 +151,48 @@ func setSecret(key, value string) error {
 		return fmt.Errorf("vault is sealed; call vault_unlock before storing secrets (exclusive mode)")
 	}
 
+	var fossilErr error
 	if !skipKeyring.Load() {
-		err := keyring.Set(ServiceName, key, value)
-		if err != nil && !isKeyNotFound(err) {
-			log.Printf("[secrets] Keyring unavailable (%v), using file fallback", err)
-			skipKeyring.Store(true)
+		if err := keyringSet(ServiceName, key, value); err != nil {
+			if !isKeyNotFound(err) {
+				log.Printf("[secrets] Keyring unavailable (%v), using file fallback", err)
+				skipKeyring.Store(true)
+			}
+			fossilErr = removeKeyringFossil(key, err)
 		}
 	}
 
 	// Always write to file — ensures secrets survive keyring loss
-	return fileSet(key, value)
+	if err := fileSet(key, value); err != nil {
+		return err
+	}
+	return fossilErr
+}
+
+// removeKeyringFossil forces keyring/file consistency after a failed keyring
+// write. The keyring may still hold an older value for the key, and readers
+// prefer the keyring over the file (getSecret) — so any process with a
+// working keyring read would keep resolving that stale value forever, while
+// the fresh value only lands in the file. Deleting the entry makes every
+// reader fall through to the file. Returns an error only when a stale entry
+// is still readable and could not be removed: that is the one case where
+// other processes keep using an outdated secret and the caller must know.
+func removeKeyringFossil(key string, setErr error) error {
+	delErr := keyringDelete(ServiceName, key)
+	if delErr == nil {
+		log.Printf("[secrets] Removed keyring entry for %q after failed write — readers now resolve the file value", key)
+		return nil
+	}
+	if isKeyNotFound(delErr) {
+		return nil // nothing stale in the keyring
+	}
+	if _, getErr := keyringGet(ServiceName, key); getErr == nil {
+		return fmt.Errorf("keyring write failed (%v) and the stale keyring entry could not be removed (%v): other processes may keep reading an outdated value for %q — remove the keyring entry manually", setErr, delErr, key)
+	}
+	// Keyring not usable from this process (headless, no D-Bus, …): the file
+	// fallback is the designed path here, and no stale entry is readable.
+	log.Printf("[secrets] Keyring cleanup for %q failed (%v); if a stale entry exists, keyring-capable processes may prefer it over the file value", key, delErr)
+	return nil
 }
 
 // deleteSecret removes a secret from vault, keyring, and file store.
@@ -169,7 +208,7 @@ func deleteSecret(key string) error {
 	var keyringErr, fileErr error
 
 	if !skipKeyring.Load() {
-		keyringErr = keyring.Delete(ServiceName, key)
+		keyringErr = keyringDelete(ServiceName, key)
 		if keyringErr != nil && !isKeyNotFound(keyringErr) {
 			skipKeyring.Store(true)
 		}

@@ -560,13 +560,13 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 	if fields.Password != "" {
 		conn.Password = fields.Password
 		if err := config.SaveSecret(conn.Name+"-password", fields.Password); err != nil {
-			log.Printf("[app] Warning: could not save to keychain: %v", err)
+			return nil, fmt.Errorf("save password: %w", err)
 		}
 	}
 	if fields.Token != "" {
 		conn.Token = fields.Token
 		if err := config.SaveSecret(conn.Name+"-token", fields.Token); err != nil {
-			log.Printf("[app] Warning: could not save to keychain: %v", err)
+			return nil, fmt.Errorf("save token: %w", err)
 		}
 		if tp := proxy.GetTokenProvider(conn.Name); tp != nil {
 			tp.Set(fields.Token)
@@ -702,13 +702,13 @@ func (a *App) SaveTunnel(name string, fields SaveTunnelRequest) (*TunnelInfo, er
 	if fields.PrivateKey != "" {
 		t.PrivateKey = fields.PrivateKey
 		if err := config.SaveSecret("tunnel-"+name+"-private-key", fields.PrivateKey); err != nil {
-			log.Printf("[app] Warning: could not save tunnel private key: %v", err)
+			return nil, fmt.Errorf("save tunnel private key: %w", err)
 		}
 	}
 	if fields.PresharedKey != "" {
 		t.PresharedKey = fields.PresharedKey
 		if err := config.SaveSecret("tunnel-"+name+"-preshared-key", fields.PresharedKey); err != nil {
-			log.Printf("[app] Warning: could not save tunnel preshared key: %v", err)
+			return nil, fmt.Errorf("save tunnel preshared key: %w", err)
 		}
 	}
 

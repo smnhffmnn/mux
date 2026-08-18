@@ -109,6 +109,8 @@ The desktop app shows the active log path under **About**, with an *Open Folder*
 
 Secrets (passwords, tokens, keys) are resolved in order: **Vault → OS Keychain → File fallback**. The first match wins.
 
+Writes go to the keychain **and** the file. If the keychain write fails, mux removes the existing keychain entry for that key, so that readers — including other mux processes whose keychain access still works — fall through to the fresh file value instead of resolving the stale keychain copy. If that stale entry can be read but not removed, the write returns an error naming the key; remove the entry manually (macOS: `security delete-generic-password -s mux -a <key>`).
+
 ### OS Keychain
 
 Secrets are stored in the platform's native credential store (service name: `"mux"`):
