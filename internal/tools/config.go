@@ -417,7 +417,7 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 	config.ApplyConnectionDefaults(&conn)
 	ct.cfg.Connections = append(ct.cfg.Connections, conn)
 
-	if err := ct.cfg.Save(); err != nil {
+	if err := ct.cfg.SaveConnectionEntry(conn); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to save config: %v", err)), nil
 	}
 
@@ -453,7 +453,7 @@ func (ct *ConfigTools) handleConnectionDelete(_ context.Context, req mcp.CallToo
 
 	ct.cfg.Connections = newConns
 
-	if err := ct.cfg.Save(); err != nil {
+	if err := ct.cfg.DeleteConnectionEntry(name); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to save config: %v", err)), nil
 	}
 
@@ -512,7 +512,7 @@ func (ct *ConfigTools) handleTunnelAdd(_ context.Context, req mcp.CallToolReques
 
 	ct.cfg.Tunnels = append(ct.cfg.Tunnels, t)
 
-	if err := ct.cfg.Save(); err != nil {
+	if err := ct.cfg.SaveTunnelEntry(t); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to save config: %v", err)), nil
 	}
 
@@ -550,7 +550,7 @@ func (ct *ConfigTools) handleTunnelDelete(_ context.Context, req mcp.CallToolReq
 
 	ct.cfg.Tunnels = newTunnels
 
-	if err := ct.cfg.Save(); err != nil {
+	if err := ct.cfg.DeleteTunnelEntry(name); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to save config: %v", err)), nil
 	}
 
@@ -708,16 +708,19 @@ func (ct *ConfigTools) handleProvisioningSet(_ context.Context, req mcp.CallTool
 	name := strings.TrimSpace(req.GetString("name", ""))
 
 	// Update existing entry with this name, or append new one.
+	var entry config.ProvisioningConfig
 	if p := ct.cfg.FindProvisioning(name); p != nil {
 		p.Endpoint = endpoint
+		entry = *p
 	} else {
-		ct.cfg.Provisioning = append(ct.cfg.Provisioning, config.ProvisioningConfig{
+		entry = config.ProvisioningConfig{
 			Name:     name,
 			Endpoint: endpoint,
-		})
+		}
+		ct.cfg.Provisioning = append(ct.cfg.Provisioning, entry)
 	}
 
-	if err := ct.cfg.Save(); err != nil {
+	if err := ct.cfg.SaveProvisioningEntry(entry); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to save config: %v", err)), nil
 	}
 

@@ -798,31 +798,11 @@ func hostFromURL(rawURL string) string {
 	return strings.ToLower(u.Hostname())
 }
 
-// Save writes the non-sensitive config back to the TOML file.
-func (cfg *Config) Save() error {
-	path := cfg.path
-	if path == "" {
-		path = DefaultConfigPath()
-	}
-
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("create config dir %s: %w", dir, err)
-	}
-
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create config file %s: %w", path, err)
-	}
-	defer f.Close()
-
-	enc := toml.NewEncoder(f)
-	if err := enc.Encode(cfg); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
-
-	return nil
-}
+// Persisting changes: there is deliberately no whole-Config Save. Writers
+// persist through the scoped entry operations in scoped_save.go
+// (SaveConnectionEntry, DeleteTunnelEntry, …), which merge the change into a
+// freshly read disk state — encoding a process's full in-memory view would
+// silently discard whatever other instances changed since it loaded.
 
 // --- Keychain ---
 

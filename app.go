@@ -479,7 +479,7 @@ func (a *App) AddConnection(name, typ string) (*ConnInfo, error) {
 	config.ApplyConnectionDefaults(&conn)
 	a.cfg.Connections = append(a.cfg.Connections, conn)
 
-	if err := a.cfg.Save(); err != nil {
+	if err := a.cfg.SaveConnectionEntry(conn); err != nil {
 		log.Printf("[app] Warning: could not save config file: %v", err)
 	}
 
@@ -574,7 +574,7 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 	}
 
 	if !isProvisioned {
-		if err := a.cfg.Save(); err != nil {
+		if err := a.cfg.SaveConnectionEntry(*conn); err != nil {
 			log.Printf("[app] Warning: could not save config file: %v", err)
 		}
 	}
@@ -606,7 +606,7 @@ func (a *App) DeleteConnection(name string) error {
 
 	a.unregisterConnectionTools(name)
 	a.cfg.Connections = newConns
-	if err := a.cfg.Save(); err != nil {
+	if err := a.cfg.DeleteConnectionEntry(name); err != nil {
 		log.Printf("[app] Warning: could not save config file: %v", err)
 	}
 	return nil
@@ -640,7 +640,7 @@ func (a *App) AddTunnel(name, typ string) (*TunnelInfo, error) {
 	}
 	a.cfg.Tunnels = append(a.cfg.Tunnels, t)
 
-	if err := a.cfg.Save(); err != nil {
+	if err := a.cfg.SaveTunnelEntry(t); err != nil {
 		log.Printf("[app] Warning: could not save config file: %v", err)
 	}
 
@@ -713,7 +713,7 @@ func (a *App) SaveTunnel(name string, fields SaveTunnelRequest) (*TunnelInfo, er
 	}
 
 	if !isProvisioned {
-		if err := a.cfg.Save(); err != nil {
+		if err := a.cfg.SaveTunnelEntry(*t); err != nil {
 			log.Printf("[app] Warning: could not save config file: %v", err)
 		}
 	}
@@ -746,7 +746,7 @@ func (a *App) DeleteTunnel(name string) error {
 	}
 
 	a.cfg.Tunnels = newTunnels
-	if err := a.cfg.Save(); err != nil {
+	if err := a.cfg.DeleteTunnelEntry(name); err != nil {
 		log.Printf("[app] Warning: could not save config file: %v", err)
 	}
 
@@ -935,7 +935,7 @@ func (a *App) SetupProvisioning(endpoint, token string) (*ProvisioningInfo, erro
 			log.Printf("[app] Warning: could not save provisioning token to keychain: %v", err)
 		}
 	}
-	if err := a.cfg.Save(); err != nil {
+	if err := a.cfg.SaveProvisioningEntry(*defaultEp); err != nil {
 		log.Printf("[app] Warning: could not save config file: %v", err)
 	}
 
