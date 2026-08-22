@@ -23,6 +23,7 @@ import (
 	"github.com/smnhffmnn/mux/internal/bridge"
 	"github.com/smnhffmnn/mux/internal/config"
 	"github.com/smnhffmnn/mux/internal/logging"
+	"github.com/smnhffmnn/mux/internal/oauth"
 	"github.com/smnhffmnn/mux/internal/provisioning"
 	"github.com/smnhffmnn/mux/internal/tools"
 	"github.com/smnhffmnn/mux/internal/vault"
@@ -445,8 +446,12 @@ More info: https://github.com/smnhffmnn/mux
 
 		registerConfigTools(s, cfg, tm)
 
-		// OAuth routes for headless mode (browser-based /oauth/start + /oauth/callback)
-		oauthRoutes := headlessOAuthRoutes(cfg, cfg.Server.Port, s, tm)
+		// OAuth routes for headless mode (browser-based /oauth/start +
+		// /oauth/callback). The flow lives in internal/oauth and is available
+		// in every build — notray builds included, which previously had no
+		// OAuth at all because the code sat in the tag-guarded app.go.
+		oauthMgr := oauth.NewManager(cfg, cfg.Server.Port, oauthAuthorizedMount(cfg, s))
+		oauthRoutes := oauthMgr.Routes
 
 		var localRoutes, tlsRoutes func(*http.ServeMux)
 		if vlt != nil {
@@ -455,9 +460,7 @@ More info: https://github.com/smnhffmnn/mux
 			localRoutes = func(mux *http.ServeMux) {
 				vh.Mount(mux)
 				vh.MountSSH(mux)
-				if oauthRoutes != nil {
-					oauthRoutes(mux)
-				}
+				oauthRoutes(mux)
 			}
 			tlsRoutes = func(mux *http.ServeMux) { vh.Mount(mux) }
 			log.Println("[mux] Vault HTTP endpoints registered on /vault/*")
@@ -470,7 +473,7 @@ More info: https://github.com/smnhffmnn/mux
 				}
 			}()
 			defer credSock.Close()
-		} else if oauthRoutes != nil {
+		} else {
 			// OAuth routes on local HTTP only — redirect_uri is always localhost.
 			localRoutes = oauthRoutes
 		}
