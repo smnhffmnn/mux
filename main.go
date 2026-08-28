@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,12 +24,18 @@ import (
 
 	"github.com/smnhffmnn/mux/internal/bridge"
 	"github.com/smnhffmnn/mux/internal/config"
+	"github.com/smnhffmnn/mux/internal/health"
 	"github.com/smnhffmnn/mux/internal/logging"
 	"github.com/smnhffmnn/mux/internal/provisioning"
 	"github.com/smnhffmnn/mux/internal/tools"
 	"github.com/smnhffmnn/mux/internal/vault"
 	"github.com/smnhffmnn/mux/internal/wireguard"
 )
+
+// processStart is when this process came up. The health report exposes uptime
+// from it, which is what distinguishes "degraded because it is still starting"
+// from "degraded and stuck".
+var processStart = time.Now()
 
 // mcpServerName is the name this instance reports over MCP, and the name a
 // bridge requires its upstream to report. Shared so the two cannot drift.
@@ -86,14 +94,16 @@ func main() {
 	}
 
 	var (
-		flagPort    int
-		flagConfig  string
-		flagVersion bool
+		flagPort        int
+		flagConfig      string
+		flagVersion     bool
+		flagHealthCheck bool
 	)
 
 	flag.IntVar(&flagPort, "port", 0, "HTTP port")
 	flag.StringVar(&flagConfig, "config", "", "config file path")
 	flag.BoolVar(&flagVersion, "version", false, "print version and exit")
+	flag.BoolVar(&flagHealthCheck, "health-check", false, "probe a running instance's /health and exit 0 (ok) or 1 (degraded/unreachable)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `mux — MCP Unified Exchange
@@ -111,6 +121,7 @@ Options:
   --config <path>    Config file (default: $XDG_CONFIG_HOME/mux/config.toml or ~/.config/mux/config.toml)
   --port <port>      MCP HTTP port (default: 7700)
   --version          Print version and exit
+  --health-check     Probe a running instance's /health; exit 0 if ok, 1 if not
 
 Transport modes:
   Desktop    Interactive terminal with display — launches GUI + HTTP server
@@ -133,6 +144,15 @@ More info: https://github.com/smnhffmnn/mux
 	if flagVersion {
 		fmt.Printf("mux %s\n", version)
 		os.Exit(0)
+	}
+
+	// --health-check probes a running instance and exits. It deliberately runs
+	// before config load, logging setup and the legacy-dir migration: a
+	// container health check fires every few seconds, and none of those
+	// side effects belong in that loop. The port is resolved from the same
+	// three sources the server itself uses, minus the config file.
+	if flagHealthCheck {
+		os.Exit(runHealthProbe(flagPort))
 	}
 
 	// Auto-detect transport mode: pipe = stdio, terminal = headless or desktop
@@ -443,7 +463,8 @@ More info: https://github.com/smnhffmnn/mux
 	if !hasDisplay {
 		log.Println("[mux] Starting in headless HTTP mode")
 
-		registerConfigTools(s, cfg, tm)
+		reloader := registerConfigTools(s, cfg, tm)
+		hc := health.NewChecker(cfg, reloader, tm, version, processStart)
 
 		// OAuth routes for headless mode (browser-based /oauth/start + /oauth/callback)
 		oauthRoutes := headlessOAuthRoutes(cfg, cfg.Server.Port, s, tm)
@@ -474,7 +495,7 @@ More info: https://github.com/smnhffmnn/mux
 			// OAuth routes on local HTTP only — redirect_uri is always localhost.
 			localRoutes = oauthRoutes
 		}
-		servers := startHTTPServer(s, cfg, localRoutes, tlsRoutes)
+		servers := startHTTPServer(s, cfg, hc, localRoutes, tlsRoutes)
 
 		// Block until SIGINT/SIGTERM
 		sigCh := make(chan os.Signal, 1)
@@ -508,13 +529,61 @@ func gitHostsFromConfig(cfg *config.Config) []vault.GitHost {
 }
 
 // registerConfigTools creates a simpleReloader and registers config management tools on the MCP server.
-func registerConfigTools(s *server.MCPServer, cfg *config.Config, tm *tunnelManager) {
+// The reloader is returned so callers can report registration state (health.Registry).
+func registerConfigTools(s *server.MCPServer, cfg *config.Config, tm *tunnelManager) *simpleReloader {
 	reloader := &simpleReloader{mcpServer: s, cfg: cfg, tm: tm, registeredTools: make(map[string][]string), closers: make(map[string][]io.Closer)}
 	configTools := tools.NewConfigTools(cfg, reloader)
 	for _, t := range configTools.Tools() {
 		s.AddTool(t.Tool, t.Handler)
 		log.Printf("[mux] Registered: %s", t.Tool.Name)
 	}
+	return reloader
+}
+
+// runHealthProbe queries a running instance's /health and returns the process
+// exit code: 0 when the instance reports ok, 1 for anything else — degraded,
+// not listening, or an answer that is not a health report.
+//
+// It exists so a container image without a shell or curl (distroless) can still
+// declare HEALTHCHECK ["/mux", "--health-check"].
+func runHealthProbe(flagPort int) int {
+	port := flagPort
+	if port == 0 {
+		if v := os.Getenv("MUX_PORT"); v != "" {
+			if p, err := strconv.Atoi(v); err == nil {
+				port = p
+			}
+		}
+	}
+	if port == 0 {
+		port = config.DefaultPort
+	}
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/health", port)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "health: %v\n", err)
+		return 1
+	}
+	defer resp.Body.Close()
+
+	var rep health.Report
+	if err := json.NewDecoder(resp.Body).Decode(&rep); err != nil {
+		fmt.Fprintf(os.Stderr, "health: unreadable response from %s: %v\n", url, err)
+		return 1
+	}
+
+	if rep.Status == health.StatusOK {
+		fmt.Printf("ok — %d connections registered\n", len(rep.Connections))
+		return 0
+	}
+	// The problems are the whole point of the probe: without them the operator
+	// sees an exit code and has to go read logs to learn what is missing.
+	for _, p := range rep.Problems {
+		fmt.Fprintf(os.Stderr, "health: %s\n", p)
+	}
+	return 1
 }
 
 // httpServers holds one or two HTTP servers for coordinated shutdown.
@@ -556,11 +625,20 @@ func (s *httpServers) Shutdown(ctx context.Context) {
 //
 // localRoutes are mounted on the HTTP server (localhost only).
 // tlsRoutes are mounted on the HTTPS server (all interfaces). May be nil.
-func startHTTPServer(s *server.MCPServer, cfg *config.Config, localRoutes, tlsRoutes func(*http.ServeMux)) *httpServers {
+//
+// hc, when non-nil, mounts GET /health on the plain HTTP server only. It stays
+// off the TLS listener deliberately: the report names every configured
+// connection, and that listener faces the network while this one does not.
+// A container health check runs inside the container and reaches loopback.
+func startHTTPServer(s *server.MCPServer, cfg *config.Config, hc *health.Checker, localRoutes, tlsRoutes func(*http.ServeMux)) *httpServers {
 	httpMux := http.NewServeMux()
 
 	mcpHandler := server.NewStreamableHTTPServer(s)
 	httpMux.Handle("/mcp", mcpHandler)
+
+	if hc != nil {
+		hc.Mount(httpMux)
+	}
 
 	if localRoutes != nil {
 		localRoutes(httpMux)

@@ -1,0 +1,22 @@
+# Everything the build does not need. Keeping the context small matters here
+# because `COPY . .` would otherwise pull in node_modules and build artefacts.
+.git
+.github
+.gitignore
+*.md
+docs/
+
+# Frontend: the notray build embeds no assets, so the sources are dead weight.
+frontend/node_modules
+frontend/dist
+
+# Local build output and editor noise
+mux
+mux.exe
+mux.app
+build/bin
+.DS_Store
+
+# Never let a developer's own configuration reach the image.
+config.toml
+secrets.toml
