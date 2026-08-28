@@ -32,12 +32,20 @@ MUX_PROVISIONING_TOKEN=...
 ```
 
 **Mount** — for anything not delivered by provisioning, mount a config
-directory at `/config` (mux reads `$XDG_CONFIG_HOME`, which the image sets to
-`/config`):
+directory at **`/config/mux`**. mux resolves its config directory as
+`$XDG_CONFIG_HOME/mux`, and the image sets `XDG_CONFIG_HOME=/config`, so the
+mount point maps one-to-one onto `~/.config/mux` on a host:
 
 ```bash
-docker run -v ./mux-config:/config mux:dev
+docker run -v ~/.config/mux:/config/mux mux:dev
 ```
+
+Mounting `/config` instead fails silently: mux finds no `config.toml` there and
+starts with defaults, logging nothing that points at the mount.
+
+Secrets in a mounted `secrets.toml` work as they do on a host. There is no
+keychain in the container — the keyring probe fails immediately
+(`dbus-launch: executable file not found`) and mux uses the file store.
 
 Mount it read-write. mux writes its log file there, and the config-management
 MCP tools (`connection_add`, `secret_set`, …) write `config.toml` and

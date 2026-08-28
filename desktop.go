@@ -57,7 +57,7 @@ func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx 
 	if vh != nil {
 		tlsRoutes = func(mux *http.ServeMux) { vh.Mount(mux) }
 	}
-	hc := health.NewChecker(cfg, app, tm, version, processStart)
+	hc := health.NewChecker(cfg, mcpToolRegistry{s}, tm, version, processStart)
 	servers := startHTTPServer(s, cfg, hc, localRoutes, tlsRoutes)
 
 	// Create Wails v3 application

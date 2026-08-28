@@ -12,7 +12,7 @@ import (
 
 type fakeRegistry struct{ names []string }
 
-func (f fakeRegistry) RegisteredConnections() []string { return f.names }
+func (f fakeRegistry) RegisteredToolNames() []string { return f.names }
 
 type fakeTunnels struct{ up map[string]bool }
 
@@ -47,7 +47,7 @@ func TestCheckAllHealthy(t *testing.T) {
 	})
 
 	c := newChecker(cfg,
-		fakeRegistry{names: []string{"local1", "prov1"}},
+		fakeRegistry{names: []string{"local1_get", "local1_request", "prov1_get"}},
 		fakeTunnels{up: map[string]bool{"wg0": true}})
 
 	rep := c.Check()
@@ -221,6 +221,54 @@ func TestCheckDisabledConnectionIgnored(t *testing.T) {
 	}
 	if len(rep.Connections) != 0 {
 		t.Errorf("connections = %+v; want empty", rep.Connections)
+	}
+}
+
+// Connection names where one is a prefix of the other: the tool must be
+// credited to the longer match only, or "a" looks registered because "a_b" is.
+func TestCheckLongestPrefixWins(t *testing.T) {
+	isolateSecrets(t)
+
+	cfg := &config.Config{
+		Connections: []config.Connection{
+			{Name: "a", Type: config.TypeHTTP, URL: "https://a.example.com"},
+			{Name: "a_b", Type: config.TypeHTTP, URL: "https://b.example.com"},
+		},
+	}
+
+	rep := newChecker(cfg, fakeRegistry{names: []string{"a_b_get"}}, fakeTunnels{}).Check()
+
+	got := map[string]bool{}
+	for _, c := range rep.Connections {
+		got[c.Name] = c.Registered
+	}
+	if got["a_b"] != true {
+		t.Errorf("a_b registered = %v; want true", got["a_b"])
+	}
+	if got["a"] != false {
+		t.Errorf("a registered = %v; want false — a_b_get belongs to a_b", got["a"])
+	}
+}
+
+// Connection names are sanitized into tool names, so the health check has to
+// look for the sanitized prefix, not the raw name.
+func TestCheckSanitizedConnectionName(t *testing.T) {
+	isolateSecrets(t)
+
+	cfg := &config.Config{
+		Connections: []config.Connection{
+			{Name: "MariaDB local dev", Type: config.TypeHTTP, URL: "https://a.example.com"},
+		},
+	}
+
+	rep := newChecker(cfg,
+		fakeRegistry{names: []string{"MariaDB_local_dev_query"}}, fakeTunnels{}).Check()
+
+	if rep.Status != StatusOK {
+		t.Fatalf("status = %q, problems = %v; want ok", rep.Status, rep.Problems)
+	}
+	if !rep.Connections[0].Registered {
+		t.Error("registered = false; want true for the sanitized prefix")
 	}
 }
 

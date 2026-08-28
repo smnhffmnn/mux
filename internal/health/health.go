@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/smnhffmnn/mux/internal/config"
@@ -34,11 +35,15 @@ const (
 	StatusDegraded Status = "degraded"
 )
 
-// Registry reports which connections currently have MCP tools registered.
-// Both the headless reloader and the desktop App track this, and both satisfy
-// this interface.
+// Registry reports the names of every tool currently registered on the gateway.
+//
+// Deliberately the live MCP server rather than a bookkeeping map: connections
+// are registered from several places (startup, hot-reload, proxy mounts, the
+// vault-unlock retry), and a second ledger next to the server would be one more
+// thing that can drift from what is actually served — which is the class of bug
+// this endpoint exists to catch in the first place.
 type Registry interface {
-	RegisteredConnections() []string
+	RegisteredToolNames() []string
 }
 
 // Tunnels reports whether a named tunnel is up.
@@ -158,12 +163,7 @@ func (c *Checker) Check() Report {
 		}
 	}
 
-	registered := make(map[string]bool)
-	if c.registry != nil {
-		for _, name := range c.registry.RegisteredConnections() {
-			registered[name] = true
-		}
-	}
+	registered := c.registeredConnections()
 
 	for _, conn := range c.cfg.AllConnections() {
 		if !conn.Enabled() {
@@ -197,6 +197,41 @@ func (c *Checker) Check() Report {
 		rep.Status = StatusDegraded
 	}
 	return rep
+}
+
+// registeredConnections maps connection names to whether the gateway currently
+// serves at least one of their tools.
+//
+// Tools are named SanitizeToolName(connection + "_" + tool), so the connection
+// is recoverable from the prefix. A tool is attributed to the LONGEST matching
+// prefix: with connections "a" and "a_b" present, the tool "a_b_get" belongs to
+// "a_b", and "a" must not be credited for it.
+func (c *Checker) registeredConnections() map[string]bool {
+	registered := make(map[string]bool)
+	if c.registry == nil {
+		return registered
+	}
+
+	prefixes := make(map[string]string) // connection name -> tool prefix
+	for _, conn := range c.cfg.AllConnections() {
+		// SanitizeToolName truncates at the MCP name limit. Building the prefix
+		// through the same function means an over-long connection name yields
+		// the same truncated stem its tools carry, so the match still holds.
+		prefixes[conn.Name] = config.SanitizeToolName(conn.Name + "_")
+	}
+
+	for _, tool := range c.registry.RegisteredToolNames() {
+		best, bestLen := "", -1
+		for name, prefix := range prefixes {
+			if len(prefix) > bestLen && strings.HasPrefix(tool, prefix) {
+				best, bestLen = name, len(prefix)
+			}
+		}
+		if best != "" {
+			registered[best] = true
+		}
+	}
+	return registered
 }
 
 // Handler serves the report at GET /health.

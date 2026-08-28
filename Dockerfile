@@ -30,7 +30,7 @@ RUN CGO_ENABLED=0 go build -tags notray \
 # there is no RUN mkdir in the runtime stage — the ownership has to be set by
 # the COPY that puts it there, or mux starts as nonroot against a root-owned
 # directory and cannot even open its log file.
-RUN mkdir -p /out/config
+RUN mkdir -p /out/config/mux
 
 # --- Runtime -------------------------------------------------------------
 # base-debian12 rather than static: mux resolves hostnames through the
@@ -41,11 +41,12 @@ FROM gcr.io/distroless/base-debian12:nonroot
 COPY --from=build /out/mux /mux
 COPY --from=build --chown=nonroot:nonroot /out/config /config
 
-# The config directory is the one writable path mux needs — logs, and a
-# config.toml if one is mounted or written. Declaring it as a volume keeps an
-# unconfigured container from writing into the image layer.
+# mux resolves its config directory as $XDG_CONFIG_HOME/mux, so the mount point
+# is /config/mux — which maps one-to-one onto ~/.config/mux on a host. Mounting
+# /config instead is silently ignored: mux finds no config there and starts with
+# defaults.
 ENV XDG_CONFIG_HOME=/config
-VOLUME ["/config"]
+VOLUME ["/config/mux"]
 
 EXPOSE 7700
 

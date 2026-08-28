@@ -109,20 +109,6 @@ func (a *App) ReloadConnection(conn config.Connection) {
 	a.registerConnectionTools(conn)
 }
 
-// RegisteredConnections lists connections that currently have MCP tools
-// registered (implements health.Registry).
-func (a *App) RegisteredConnections() []string {
-	a.toolsMu.Lock()
-	defer a.toolsMu.Unlock()
-	names := make([]string, 0, len(a.registeredTools))
-	for name, tools := range a.registeredTools {
-		if len(tools) > 0 {
-			names = append(names, name)
-		}
-	}
-	return names
-}
-
 // UnloadConnection removes MCP tools for a connection (implements tools.ToolReloader).
 func (a *App) UnloadConnection(name string) {
 	a.unregisterConnectionTools(name)

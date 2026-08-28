@@ -438,20 +438,6 @@ func (r *simpleReloader) ReloadConnection(conn config.Connection) {
 	r.toolsMu.Unlock()
 }
 
-// RegisteredConnections lists connections that currently have MCP tools
-// registered (implements health.Registry).
-func (r *simpleReloader) RegisteredConnections() []string {
-	r.toolsMu.Lock()
-	defer r.toolsMu.Unlock()
-	names := make([]string, 0, len(r.registeredTools))
-	for name, tools := range r.registeredTools {
-		if len(tools) > 0 {
-			names = append(names, name)
-		}
-	}
-	return names
-}
-
 func (r *simpleReloader) UnloadConnection(name string) {
 	r.unregisterConnection(name)
 }

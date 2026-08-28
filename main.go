@@ -32,6 +32,18 @@ import (
 	"github.com/smnhffmnn/mux/internal/wireguard"
 )
 
+// mcpToolRegistry answers health's Registry from the live MCP server.
+type mcpToolRegistry struct{ s *server.MCPServer }
+
+func (r mcpToolRegistry) RegisteredToolNames() []string {
+	tools := r.s.ListTools()
+	names := make([]string, 0, len(tools))
+	for name := range tools {
+		names = append(names, name)
+	}
+	return names
+}
+
 // processStart is when this process came up. The health report exposes uptime
 // from it, which is what distinguishes "degraded because it is still starting"
 // from "degraded and stuck".
@@ -463,8 +475,8 @@ More info: https://github.com/smnhffmnn/mux
 	if !hasDisplay {
 		log.Println("[mux] Starting in headless HTTP mode")
 
-		reloader := registerConfigTools(s, cfg, tm)
-		hc := health.NewChecker(cfg, reloader, tm, version, processStart)
+		registerConfigTools(s, cfg, tm)
+		hc := health.NewChecker(cfg, mcpToolRegistry{s}, tm, version, processStart)
 
 		// OAuth routes for headless mode (browser-based /oauth/start + /oauth/callback)
 		oauthRoutes := headlessOAuthRoutes(cfg, cfg.Server.Port, s, tm)
@@ -529,15 +541,13 @@ func gitHostsFromConfig(cfg *config.Config) []vault.GitHost {
 }
 
 // registerConfigTools creates a simpleReloader and registers config management tools on the MCP server.
-// The reloader is returned so callers can report registration state (health.Registry).
-func registerConfigTools(s *server.MCPServer, cfg *config.Config, tm *tunnelManager) *simpleReloader {
+func registerConfigTools(s *server.MCPServer, cfg *config.Config, tm *tunnelManager) {
 	reloader := &simpleReloader{mcpServer: s, cfg: cfg, tm: tm, registeredTools: make(map[string][]string), closers: make(map[string][]io.Closer)}
 	configTools := tools.NewConfigTools(cfg, reloader)
 	for _, t := range configTools.Tools() {
 		s.AddTool(t.Tool, t.Handler)
 		log.Printf("[mux] Registered: %s", t.Tool.Name)
 	}
-	return reloader
 }
 
 // runHealthProbe queries a running instance's /health and returns the process
