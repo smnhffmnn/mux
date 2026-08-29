@@ -1112,6 +1112,15 @@ func (cfg *Config) TunnelEndpointName(tunnelName string) (string, bool) {
 // ProvisionedCountFor returns (tunnels, connections) delivered by the named
 // endpoint. Returns (0, 0) if the endpoint is not configured or has not
 // delivered anything yet.
+// ProvisionedFrom reports whether this endpoint has delivered a config since
+// startup. It differs from a zero ProvisionedCountFor in the case that matters:
+// an endpoint that answered with an empty profile is provisioned, an endpoint
+// that never answered is not — and only the second is a fault.
+func (cfg *Config) ProvisionedFrom(endpointName string) bool {
+	_, ok := cfg.provisionedByEndpoint[endpointName]
+	return ok
+}
+
 func (cfg *Config) ProvisionedCountFor(endpointName string) (int, int) {
 	entries, ok := cfg.provisionedByEndpoint[endpointName]
 	if !ok {

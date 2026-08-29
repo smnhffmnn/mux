@@ -16,6 +16,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/events"
 
 	"github.com/smnhffmnn/mux/internal/config"
+	"github.com/smnhffmnn/mux/internal/health"
 	"github.com/smnhffmnn/mux/internal/tools"
 	"github.com/smnhffmnn/mux/internal/vault"
 )
@@ -56,7 +57,8 @@ func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx 
 	if vh != nil {
 		tlsRoutes = func(mux *http.ServeMux) { vh.Mount(mux) }
 	}
-	servers := startHTTPServer(s, cfg, localRoutes, tlsRoutes)
+	hc := health.NewChecker(cfg, mcpToolRegistry{s}, tm, version, processStart)
+	servers := startHTTPServer(s, cfg, hc, localRoutes, tlsRoutes)
 
 	// Create Wails v3 application
 	wailsApp := application.New(application.Options{
