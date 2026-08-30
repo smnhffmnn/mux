@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"html"
 	"io"
 	"log"
 	"net"
@@ -26,13 +25,13 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/lib/pq"
-	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/smnhffmnn/mux/docs/setup"
 	"github.com/smnhffmnn/mux/internal/config"
 	"github.com/smnhffmnn/mux/internal/logging"
+	"github.com/smnhffmnn/mux/internal/oauth"
 	"github.com/smnhffmnn/mux/internal/provisioning"
 	"github.com/smnhffmnn/mux/internal/proxy"
 	"github.com/smnhffmnn/mux/internal/tools"
@@ -49,8 +48,9 @@ type App struct {
 	mcpServer *server.MCPServer
 	tm        *tunnelManager
 
-	oauthMu      sync.Mutex
-	pendingOAuth map[string]*pendingOAuthFlow
+	// oauth runs the browser-based OAuth flows (internal/oauth); the App
+	// contributes mounting and frontend notification via onOAuthAuthorized.
+	oauth *oauth.Manager
 
 	deviceMu      sync.Mutex
 	pendingDevice map[string]*pendingDeviceFlow
@@ -70,13 +70,6 @@ type App struct {
 	closers map[string][]io.Closer
 }
 
-type pendingOAuthFlow struct {
-	service      string
-	handler      *transport.OAuthHandler
-	codeVerifier string
-	tokenStore   *config.KeychainTokenStore
-}
-
 type pendingDeviceFlow struct {
 	connName   string
 	deviceCode string
@@ -87,7 +80,7 @@ type pendingDeviceFlow struct {
 
 // NewApp creates the App instance. Called before wails.Run().
 func NewApp(cfg *config.Config, version, buildTime string, port int, mcpServer *server.MCPServer, tm *tunnelManager) *App {
-	return &App{
+	a := &App{
 		cfg:             cfg,
 		version:         version,
 		buildTime:       buildTime,
@@ -95,10 +88,24 @@ func NewApp(cfg *config.Config, version, buildTime string, port int, mcpServer *
 		port:            port,
 		mcpServer:       mcpServer,
 		tm:              tm,
-		pendingOAuth:    make(map[string]*pendingOAuthFlow),
 		pendingDevice:   make(map[string]*pendingDeviceFlow),
 		registeredTools: make(map[string][]string),
 		closers:         make(map[string][]io.Closer),
+	}
+	a.oauth = oauth.NewManager(cfg, port, a.onOAuthAuthorized)
+	return a
+}
+
+// onOAuthAuthorized runs after a successful token exchange: mount the proxy
+// in the background so its tools appear without a restart, and notify the
+// frontend. Called synchronously from the OAuth callback handler — keep it
+// fast, the provider's browser redirect is waiting on the response.
+func (a *App) onOAuthAuthorized(service string) {
+	if a.mcpServer != nil {
+		go a.mountOAuthProxy(service, config.NewKeychainTokenStore(service))
+	}
+	if a.emitEvent != nil {
+		a.emitEvent("oauth:complete", service)
 	}
 }
 
@@ -1119,89 +1126,10 @@ func (a *App) SelfUpdate() *UpdateResult {
 
 // StartOAuth begins an OAuth flow and returns the auth URL.
 func (a *App) StartOAuth(name string) (*OAuthStartResult, error) {
-	conn := a.cfg.FindAnyConnection(name)
-	if conn == nil || !conn.OAuth {
-		return nil, fmt.Errorf("OAuth not supported for: %s", name)
-	}
-
-	mcpURL := conn.URL
-	if mcpURL == "" {
-		return nil, fmt.Errorf("URL not configured")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	metadataURL, err := discoverOAuthMetadata(ctx, mcpURL)
+	authURL, err := a.oauth.Start(name)
 	if err != nil {
-		return nil, fmt.Errorf("OAuth discovery failed: %w", err)
+		return nil, err
 	}
-	log.Printf("[oauth] Discovered metadata URL for %s: %s", conn.Name, metadataURL)
-
-	redirectURI := fmt.Sprintf("http://localhost:%d/oauth/callback", a.port)
-	tokenStore := config.NewKeychainTokenStore(conn.Name)
-	adapter := proxy.NewKeychainTokenAdapter(tokenStore)
-	clientID, clientSecret := config.LoadOAuthClientID(conn.Name)
-
-	var scopes []string
-	if conn.Scopes != "" {
-		for _, s := range strings.Split(conn.Scopes, " ") {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				scopes = append(scopes, s)
-			}
-		}
-	}
-
-	oauthCfg := transport.OAuthConfig{
-		ClientID:              clientID,
-		ClientSecret:          clientSecret,
-		RedirectURI:           redirectURI,
-		Scopes:                scopes,
-		TokenStore:            adapter,
-		PKCEEnabled:           true,
-		AuthServerMetadataURL: metadataURL,
-	}
-
-	oauthHandler := transport.NewOAuthHandler(oauthCfg)
-	oauthHandler.SetBaseURL(mcpURL)
-
-	if clientID == "" {
-		if err := oauthHandler.RegisterClient(ctx, "mux"); err != nil {
-			return nil, fmt.Errorf("client registration failed: %w", err)
-		}
-		if err := config.SaveOAuthClient(conn.Name, oauthHandler.GetClientID(), oauthHandler.GetClientSecret()); err != nil {
-			log.Printf("[app] Warning: could not save OAuth client to keychain: %v", err)
-		}
-		log.Printf("[oauth] Registered client for %s: %s", conn.Name, oauthHandler.GetClientID())
-	}
-
-	codeVerifier, err := transport.GenerateCodeVerifier()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate code verifier")
-	}
-	codeChallenge := transport.GenerateCodeChallenge(codeVerifier)
-
-	state, err := transport.GenerateState()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate state")
-	}
-
-	authURL, err := oauthHandler.GetAuthorizationURL(ctx, state, codeChallenge)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get auth URL: %w", err)
-	}
-
-	a.oauthMu.Lock()
-	a.pendingOAuth[state] = &pendingOAuthFlow{
-		service:      conn.Name,
-		handler:      oauthHandler,
-		codeVerifier: codeVerifier,
-		tokenStore:   tokenStore,
-	}
-	a.oauthMu.Unlock()
-
-	log.Printf("[oauth] Started OAuth flow for %s", conn.Name)
 	return &OAuthStartResult{AuthURL: authURL}, nil
 }
 
@@ -1363,76 +1291,6 @@ func (a *App) GetDeviceAuthStatus(name string) *DeviceAuthStatus {
 		a.deviceMu.Unlock()
 		return &DeviceAuthStatus{Message: fmt.Sprintf("Auth error: %s", tokenResp.Error)}
 	}
-}
-
-// ========== OAuth Callback HTTP Handler ==========
-
-// oauthCallbackHandler returns an http.HandlerFunc for the /oauth/callback route.
-// Unexported so Wails does not expose it as a frontend binding.
-func (a *App) oauthCallbackHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		code := r.URL.Query().Get("code")
-		state := r.URL.Query().Get("state")
-
-		if code == "" || state == "" {
-			errorMsg := r.URL.Query().Get("error_description")
-			if errorMsg == "" {
-				errorMsg = r.URL.Query().Get("error")
-			}
-			if errorMsg == "" {
-				errorMsg = "Missing code or state parameter"
-			}
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprint(w, callbackHTML("Error", "#f87171", errorMsg))
-			return
-		}
-
-		a.oauthMu.Lock()
-		pending, ok := a.pendingOAuth[state]
-		if ok {
-			delete(a.pendingOAuth, state)
-		}
-		a.oauthMu.Unlock()
-
-		if !ok {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprint(w, callbackHTML("Error", "#f87171", "Unknown or expired OAuth state"))
-			return
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-
-		if err := pending.handler.ProcessAuthorizationResponse(ctx, code, state, pending.codeVerifier); err != nil {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprint(w, callbackHTML("Error", "#f87171", fmt.Sprintf("Token exchange failed: %v", err)))
-			return
-		}
-
-		log.Printf("[oauth] Successfully authorized %s", pending.service)
-
-		if a.mcpServer != nil {
-			go a.mountOAuthProxy(pending.service, pending.tokenStore)
-		}
-
-		// Emit event to Wails frontend
-		if a.emitEvent != nil {
-			a.emitEvent("oauth:complete", pending.service)
-		}
-
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, callbackHTML("Success", "#34d399", fmt.Sprintf("Successfully authorized %s! You can close this tab.", pending.service)))
-	}
-}
-
-func callbackHTML(status, color, message string) string {
-	return fmt.Sprintf(`<!DOCTYPE html>
-<html><head><title>mux - OAuth %s</title>
-<style>body{background:#0f1117;color:#e2e4e9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-.card{text-align:center;padding:2rem;border-radius:12px;border:1px solid #2a2d35}
-h2{color:%s}</style></head>
-<body><div class="card"><h2>%s</h2><p>%s</p></div></body></html>`,
-		html.EscapeString(status), color, html.EscapeString(status), html.EscapeString(message))
 }
 
 func (a *App) mountOAuthProxy(connName string, tokenStore *config.KeychainTokenStore) {
@@ -2249,86 +2107,3 @@ func probeResponse(name string, res proxy.ProbeResult) testResponse {
 	return testResponse{Connection: name, Connected: true, Message: fmt.Sprintf("Connected: %s (%d tools)", res.ServerName, res.ToolCount)}
 }
 
-// ========== OAuth Discovery ==========
-
-func discoverOAuthMetadata(ctx context.Context, mcpURL string) (string, error) {
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, mcpURL, nil)
-	if err != nil {
-		return "", fmt.Errorf("create probe request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("probe MCP endpoint: %w", err)
-	}
-	defer resp.Body.Close()
-
-	wwwAuth := resp.Header.Get("WWW-Authenticate")
-	resourceMetaURL := extractParam(wwwAuth, "resource_metadata")
-
-	if resourceMetaURL != "" {
-		req2, _ := http.NewRequestWithContext(ctx, http.MethodGet, resourceMetaURL, nil)
-		req2.Header.Set("Accept", "application/json")
-		resp2, err := httpClient.Do(req2)
-		if err == nil {
-			defer resp2.Body.Close()
-			if resp2.StatusCode == http.StatusOK {
-				var resource struct {
-					AuthorizationServers []string `json:"authorization_servers"`
-				}
-				if json.NewDecoder(resp2.Body).Decode(&resource) == nil && len(resource.AuthorizationServers) > 0 {
-					authServer := resource.AuthorizationServers[0]
-					return authServer + "/.well-known/oauth-authorization-server", nil
-				}
-			}
-		}
-	}
-
-	parsed, err := url.Parse(mcpURL)
-	if err != nil {
-		return "", fmt.Errorf("parse MCP URL: %w", err)
-	}
-	origin := parsed.Scheme + "://" + parsed.Host
-	return origin + "/.well-known/oauth-authorization-server", nil
-}
-
-// headlessOAuthRoutes returns a function that mounts OAuth routes (/oauth/start, /oauth/callback)
-// for headless mode. In headless mode there is no Wails UI, so /oauth/start provides a browser-based
-// entry point: GET /oauth/start?connection=<name> redirects to the provider's authorization page.
-func headlessOAuthRoutes(cfg *config.Config, port int, mcpServer *server.MCPServer, tm *tunnelManager) func(*http.ServeMux) {
-	app := NewApp(cfg, version, buildTime, port, mcpServer, tm)
-	return func(mux *http.ServeMux) {
-		mux.HandleFunc("/oauth/callback", app.oauthCallbackHandler())
-		mux.HandleFunc("/oauth/start", func(w http.ResponseWriter, r *http.Request) {
-			name := r.URL.Query().Get("connection")
-			if name == "" {
-				http.Error(w, "missing ?connection= parameter", http.StatusBadRequest)
-				return
-			}
-			result, err := app.StartOAuth(name)
-			if err != nil {
-				log.Printf("[oauth] StartOAuth error for %q: %v", name, err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			http.Redirect(w, r, result.AuthURL, http.StatusFound)
-		})
-		log.Printf("[oauth] Headless OAuth routes mounted (/oauth/start, /oauth/callback)")
-	}
-}
-
-func extractParam(header, param string) string {
-	key := param + `="`
-	idx := strings.Index(header, key)
-	if idx < 0 {
-		return ""
-	}
-	start := idx + len(key)
-	end := strings.Index(header[start:], `"`)
-	if end < 0 {
-		return ""
-	}
-	return header[start : start+end]
-}
