@@ -285,11 +285,7 @@ func (u *multipartUpload) render() error {
 	}
 
 	h := make(textproto.MIMEHeader)
-	// FileContentDisposition percent-escapes CR and LF as well as quoting, so a
-	// field name or file name carrying a newline cannot break out of the part
-	// header. Both are caller-controlled, and a file name may legally contain
-	// CR/LF on Unix.
-	h.Set("Content-Disposition", multipart.FileContentDisposition(u.fileField, filepath.Base(u.filePath)))
+	h.Set("Content-Disposition", partContentDisposition(u.fileField, filepath.Base(u.filePath)))
 	h.Set("Content-Type", u.contentType)
 	if _, err := w.CreatePart(h); err != nil {
 		return fmt.Errorf("multipart: %w", err)
@@ -308,6 +304,23 @@ func (u *multipartUpload) render() error {
 	u.tail = tail.Bytes()
 	u.contentTypeHeader = w.FormDataContentType()
 	return nil
+}
+
+// partEscaper is the replacer Go 1.26's mime/multipart uses for
+// Content-Disposition parameters. It is spelled out here because go.mod
+// targets Go 1.25, whose multipart.FileContentDisposition escapes only the
+// quote and the backslash: a CR or LF in a file name (legal on Unix) or in
+// file_field would end the header line, the receiving parser would lose the
+// file part, and mux would still report "Uploaded". Percent-escaping keeps the
+// header intact on every toolchain mux is built with; v0.39.0 shipped without
+// it because the fix relied on the stdlib and CI built with 1.25.
+var partEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"", "\r", "%0D", "\n", "%0A")
+
+// partContentDisposition renders the file part's Content-Disposition with both
+// caller-controlled halves escaped.
+func partContentDisposition(fieldname, filename string) string {
+	return fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
+		partEscaper.Replace(fieldname), partEscaper.Replace(filename))
 }
 
 // newRequest builds the outgoing request. The body streams head → file → tail
