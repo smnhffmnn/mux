@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -256,6 +257,14 @@ func TestHTTP_UploadRejectsBadArguments(t *testing.T) {
 		{"form_fields null", map[string]any{"file_path": file, "form_fields": `null`}, "must be a JSON object"},
 		{"form_fields invalid JSON", map[string]any{"file_path": file, "form_fields": `{"x":`}, "must be a JSON object"},
 		{"form_fields trailing garbage", map[string]any{"file_path": file, "form_fields": `{"x":"1"} {"y":"2"}`}, "single JSON object"},
+		// mcp-go does not validate arguments against the input schema, so a
+		// value of the wrong type reaches the handler. It must be refused, not
+		// silently dropped: the caller would otherwise get a request that
+		// quietly lacks what it passed.
+		{"file_path not a string", map[string]any{"file_path": 42}, "file_path must be a string"},
+		{"file_field not a string", map[string]any{"file_path": file, "file_field": map[string]any{}}, "file_field must be a string"},
+		{"body as object with file", map[string]any{"file_path": file, "body": map[string]any{"x": 1}}, "body must be a string"},
+		{"form_fields as array", map[string]any{"file_path": file, "form_fields": []any{1}}, "form_fields must be a JSON object or a JSON string"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -293,6 +302,19 @@ func TestHTTP_UploadNotOnGet(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(calls); n != 0 {
 		t.Errorf("%d request(s) reached the server", n)
+	}
+
+	// The refusal has to come before the file system is touched, otherwise a
+	// read_only connection (where get is the only tool) answers with the state
+	// of the local disk instead of the actual reason.
+	res, err = h.handleGet(context.Background(), mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Arguments: map[string]any{"path": "/x", "file_path": filepath.Join(t.TempDir(), "does-not-exist")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := resultText(t, res); !strings.Contains(text, "not supported on GET") {
+		t.Errorf("GET must be refused before the path is resolved, got %s", text)
 	}
 }
 
@@ -421,14 +443,14 @@ func TestHTTP_JSONBodyUnchangedWithoutFile(t *testing.T) {
 	}
 }
 
-func TestClientFor_UploadDropsOverallTimeout(t *testing.T) {
+func TestClientFor_UploadUsesUploadBudget(t *testing.T) {
 	base := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{}}
 	if c := clientFor(base, nil); c != base {
 		t.Errorf("JSON mode should use the base client as is")
 	}
 	up := clientFor(base, &multipartUpload{})
-	if up.Timeout != 0 {
-		t.Errorf("upload client Timeout = %v, want 0", up.Timeout)
+	if up.Timeout != uploadTimeout {
+		t.Errorf("upload client Timeout = %v, want uploadTimeout (%v)", up.Timeout, uploadTimeout)
 	}
 	if up.Transport != base.Transport {
 		t.Errorf("upload client must share the transport (dialer, tunnel)")
@@ -548,8 +570,280 @@ func TestConnectors_PostNeedsBodyOrFile(t *testing.T) {
 		if !res.IsError || !strings.Contains(resultText(t, res), "body or file_path is required") {
 			t.Errorf("%s: post without body and file_path should be rejected, got %s", name, resultText(t, res))
 		}
+
+		// A body of the wrong type must not be reported as a missing body.
+		res, err = handler(context.Background(), mcp.CallToolRequest{Params: mcp.CallToolParams{
+			Arguments: map[string]any{"path": "/x", "body": map[string]any{"prompt": "hi"}},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.IsError || !strings.Contains(resultText(t, res), "body must be a string") {
+			t.Errorf("%s: a non-string body should be named as such, got %s", name, resultText(t, res))
+		}
 	}
 	if n := atomic.LoadInt32(calls); n != 0 {
 		t.Errorf("%d request(s) reached the server", n)
+	}
+}
+
+// form_fields is declared as a string, but its description shows an object
+// literal and mcp-go passes arguments through unvalidated — an object must be
+// accepted rather than dropped.
+func TestHTTP_UploadFormFieldsAsObject(t *testing.T) {
+	srv, got, _ := uploadServer(t, http.StatusOK, `{}`)
+	h := newTestHTTP(t, config.Connection{URL: srv.URL})
+	file := writeTestFile(t, "a.txt", []byte("payload"))
+
+	res := callRequest(t, h, map[string]any{
+		"method":      "POST",
+		"path":        "/upload",
+		"file_path":   file,
+		"form_fields": map[string]any{"model": "whisper-1", "temperature": 0.5, "verbose": true},
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got %s", resultText(t, res))
+	}
+	if got.parseErr != nil {
+		t.Fatalf("server could not parse multipart body: %v", got.parseErr)
+	}
+	for k, want := range map[string]string{"model": "whisper-1", "temperature": "0.5", "verbose": "true"} {
+		if got.fields[k] != want {
+			t.Errorf("field %q = %q, want %q", k, got.fields[k], want)
+		}
+	}
+	if string(got.fileBytes) != "payload" {
+		t.Errorf("file bytes = %q", got.fileBytes)
+	}
+}
+
+// Both halves of the file part's Content-Disposition are caller-controlled, and
+// a file name may legally carry CR/LF on Unix. Raw CR/LF would end the header
+// line and leave the receiving server with an unparseable body while mux still
+// reported success.
+func TestHTTP_UploadEscapesPartHeader(t *testing.T) {
+	srv, got, _ := uploadServer(t, http.StatusOK, `{}`)
+	h := newTestHTTP(t, config.Connection{URL: srv.URL})
+	file := writeTestFile(t, "re\"port\r\n.txt", []byte("payload"))
+
+	res := callRequest(t, h, map[string]any{
+		"method":     "POST",
+		"path":       "/upload",
+		"file_path":  file,
+		"file_field": "we\"ird\r\nX-Injected: yes",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got %s", resultText(t, res))
+	}
+	if got.parseErr != nil {
+		t.Fatalf("part header broke the body: %v", got.parseErr)
+	}
+	for what, v := range map[string]string{"field name": got.fileField, "file name": got.fileName} {
+		if strings.ContainsAny(v, "\r\n") {
+			t.Errorf("%s reached the wire with a raw line break: %q", what, v)
+		}
+		if !strings.Contains(v, "%0D%0A") {
+			t.Errorf("%s should carry the escaped line break, got %q", what, v)
+		}
+	}
+	if string(got.fileBytes) != "payload" {
+		t.Errorf("file bytes = %q", got.fileBytes)
+	}
+}
+
+// Opening a FIFO that has no writer blocks forever, and no timeout is in play
+// yet — the regular-file check has to run before the file is opened.
+func TestHTTP_UploadRejectsFifoWithoutBlocking(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "pipe")
+	if err := exec.Command("mkfifo", fifo).Run(); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+	srv, _, calls := uploadServer(t, http.StatusOK, `{}`)
+	h := newTestHTTP(t, config.Connection{URL: srv.URL})
+
+	done := make(chan *mcp.CallToolResult, 1)
+	go func() {
+		res, err := h.handleRequest(context.Background(), mcp.CallToolRequest{Params: mcp.CallToolParams{
+			Arguments: map[string]any{"method": "POST", "path": "/upload", "file_path": fifo},
+		}})
+		if err != nil {
+			close(done)
+			return
+		}
+		done <- res
+	}()
+
+	select {
+	case res, ok := <-done:
+		if !ok {
+			t.Fatal("handleRequest returned an error")
+		}
+		if !res.IsError || !strings.Contains(resultText(t, res), "not a regular file") {
+			t.Errorf("a FIFO should be refused as not a regular file, got %s", resultText(t, res))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the tool call blocked on the FIFO — the regular-file check must run before os.Open")
+	}
+	if n := atomic.LoadInt32(calls); n != 0 {
+		t.Errorf("%d request(s) reached the server", n)
+	}
+}
+
+// An upload whose output_file cannot be written would move the whole file for
+// nothing, so the destination is checked before the bytes go out.
+func TestHTTP_UploadChecksOutputFileBeforeSending(t *testing.T) {
+	srv, _, calls := uploadServer(t, http.StatusOK, `{}`)
+	h := newTestHTTP(t, config.Connection{URL: srv.URL})
+	file := writeTestFile(t, "a.txt", []byte("payload"))
+	taken := writeTestFile(t, "response.json", []byte("older"))
+
+	res := callRequest(t, h, map[string]any{
+		"method":      "POST",
+		"path":        "/upload",
+		"file_path":   file,
+		"output_file": taken,
+	})
+	if !res.IsError || !strings.Contains(resultText(t, res), "already exists") {
+		t.Errorf("an occupied output_file should be refused up front, got %s", resultText(t, res))
+	}
+	if n := atomic.LoadInt32(calls); n != 0 {
+		t.Errorf("%d upload(s) went out before the destination was checked", n)
+	}
+	if body, _ := os.ReadFile(taken); string(body) != "older" {
+		t.Errorf("existing output_file was modified: %q", body)
+	}
+}
+
+// The destination check has to run before any request goes out — for a JSON
+// POST even more than for an upload, because the server-side effect of the
+// request cannot be taken back once the response turns out to be unsaveable.
+func TestHTTP_OutputFileCheckedBeforeJSONRequest(t *testing.T) {
+	srv, _, calls := uploadServer(t, http.StatusOK, `{}`)
+	h := newTestHTTP(t, config.Connection{URL: srv.URL})
+	taken := writeTestFile(t, "response.json", []byte("older"))
+
+	res := callRequest(t, h, map[string]any{
+		"method":      "POST",
+		"path":        "/orders",
+		"body":        `{"create": true}`,
+		"output_file": taken,
+	})
+	if !res.IsError || !strings.Contains(resultText(t, res), "already exists") {
+		t.Errorf("an occupied output_file should be refused up front, got %s", resultText(t, res))
+	}
+	if n := atomic.LoadInt32(calls); n != 0 {
+		t.Errorf("%d request(s) went out before the destination was checked", n)
+	}
+}
+
+// Ideogram authenticates with a custom header, which Go replays across a
+// cross-host redirect. With uploads the replayed request also carries the file,
+// so the key has to be dropped the way http.go drops token_header.
+func TestIdeogram_RedirectDropsAPIKeyAndReplaysBody(t *testing.T) {
+	target, got, _ := uploadServer(t, http.StatusOK, `{"ok":true}`)
+
+	var firstKey string
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firstKey = r.Header.Get("Api-Key")
+		io.Copy(io.Discard, r.Body)
+		http.Redirect(w, r, target.URL+"/v1/ideogram-v3/describe", http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	ideogram, err := NewIdeogram(config.Connection{URL: redirector.URL, Token: "ideo-key"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := writeTestFile(t, "in.png", pngMagic)
+	res, err := ideogram.handlePost(context.Background(), mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Arguments: map[string]any{"path": "/v1/ideogram-v3/describe", "file_path": file},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("expected success, got %s", resultText(t, res))
+	}
+	if firstKey != "ideo-key" {
+		t.Errorf("first hop Api-Key = %q, want the key", firstKey)
+	}
+	if got.parseErr != nil {
+		t.Fatalf("redirected body unreadable: %v", got.parseErr)
+	}
+	if v := got.header.Get("Api-Key"); v != "" {
+		t.Errorf("Api-Key %q leaked to the redirect target", v)
+	}
+	if got.fileField != "image" || string(got.fileBytes) != string(pngMagic) {
+		t.Errorf("replayed upload incomplete: field=%q bytes=%d", got.fileField, len(got.fileBytes))
+	}
+}
+
+// A server that accepts the connection and then stops reading is the one case
+// uploadTimeout exists for. When it fires, the caller must learn that it was
+// the upload cap — not the server's answer, not their own cancellation.
+func TestHTTP_UploadTimeoutIsExplained(t *testing.T) {
+	old := uploadTimeout
+	uploadTimeout = 60 * time.Millisecond
+	t.Cleanup(func() { uploadTimeout = old })
+
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // never reads the body, never answers, until the test lets go
+	}))
+	t.Cleanup(func() { close(release); srv.Close() })
+	h := newTestHTTP(t, config.Connection{URL: srv.URL})
+	file := writeTestFile(t, "big.bin", []byte("payload"))
+
+	res := callRequest(t, h, map[string]any{"method": "POST", "path": "/upload", "file_path": file})
+	if !res.IsError {
+		t.Fatalf("expected the upload to be aborted, got %s", resultText(t, res))
+	}
+	text := resultText(t, res)
+	for _, want := range []string{"upload aborted after 60ms", "did not finish taking 7 bytes of big.bin", "mux upload timeout"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("error should say %q, got %q", want, text)
+		}
+	}
+	if strings.Contains(text, "awaiting headers") {
+		t.Errorf("Go's misleading timeout wording leaked through: %q", text)
+	}
+
+	// A cancellation by the caller is not the cap and must not be reported as one.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := h.handleRequest(ctx, mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Arguments: map[string]any{"method": "POST", "path": "/upload", "file_path": file},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := resultText(t, res); !res.IsError || strings.Contains(text, "upload aborted after") {
+		t.Errorf("caller cancellation reported as upload cap: %q", text)
+	}
+}
+
+// The upload path must actually use the timeout-free client: a budget sized for
+// JSON round trips would cut off a large file, which is what the docs promise it
+// does not do. Asserted through the wiring, not on clientFor alone.
+func TestHTTP_UploadIsNotCutOffByClientTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	t.Cleanup(srv.Close)
+	h := newTestHTTP(t, config.Connection{URL: srv.URL})
+	h.client.Timeout = 30 * time.Millisecond
+	file := writeTestFile(t, "a.txt", []byte("payload"))
+
+	res := callRequest(t, h, map[string]any{"method": "POST", "path": "/upload", "file_path": file})
+	if res.IsError {
+		t.Errorf("upload should survive a client timeout shorter than the response, got %s", resultText(t, res))
+	}
+
+	// The same request as JSON stays on the budget.
+	res = callRequest(t, h, map[string]any{"method": "POST", "path": "/upload", "body": `{"x":1}`})
+	if !res.IsError {
+		t.Error("a JSON request must still be bounded by the client timeout")
 	}
 }

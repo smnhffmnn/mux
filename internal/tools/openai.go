@@ -108,7 +108,7 @@ func (o *OpenAI) Tools() []ToolDef {
 			mcp.Description("Path to append to the base URL, e.g. /v1/chat/completions"),
 		),
 		mcp.WithString("body",
-			mcp.Description(jsonBodyDesc),
+			mcp.Description("JSON request body (optional). "+jsonBodyDesc),
 		),
 		mcp.WithString("output_file", mcp.Description(outputFileDesc)),
 	}
@@ -168,6 +168,18 @@ func (o *OpenAI) doRequest(ctx context.Context, method string, req mcp.CallToolR
 		path = "/" + path
 	}
 
+	// Check the destination before anything is sent: a request that fails on
+	// "output_file already exists" afterwards has already happened on the
+	// server (a POST may have written) or has moved a whole file for nothing.
+	// saveResponseToFileWithNote stays the authority (its O_EXCL decides the
+	// race); this is only the early exit. It runs before newBodyRequest opens
+	// the upload file, so the early return leaks no file handle.
+	if outputFile := req.GetString("output_file", ""); outputFile != "" {
+		if _, err := validateOutputFile(outputFile); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+	}
+
 	httpReq, upload, err := newBodyRequest(ctx, method, o.baseURL+path, req, "file")
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
@@ -178,7 +190,7 @@ func (o *OpenAI) doRequest(ctx context.Context, method string, req mcp.CallToolR
 
 	resp, err := clientFor(o.client, upload).Do(httpReq)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("request failed: %v", err)), nil
+		return mcp.NewToolResultError(requestError(ctx, err, httpReq, upload)), nil
 	}
 	defer resp.Body.Close()
 

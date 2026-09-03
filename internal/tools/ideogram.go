@@ -17,6 +17,10 @@ import (
 
 const ideogramMaxBody = 512 * 1024 // 512 KB
 
+// ideogramAPIKeyHeader carries the API key. It is a custom header, so Go does
+// not strip it on a cross-host redirect the way it strips Authorization.
+const ideogramAPIKeyHeader = "Api-Key"
+
 // DefaultIdeogramInstructions are used when no custom instructions are set.
 const DefaultIdeogramInstructions = `Ideogram Image Generation API.
 
@@ -71,6 +75,18 @@ func NewIdeogram(conn config.Connection, dialer Dialer) (*Ideogram, error) {
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   60 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return fmt.Errorf("stopped after 10 redirects")
+				}
+				// Go strips Authorization on a host change but replays custom
+				// headers, which would hand the API key — and, on a 307/308,
+				// the uploaded file — to the redirect target.
+				if req.URL.Host != via[0].URL.Host {
+					req.Header.Del(ideogramAPIKeyHeader)
+				}
+				return nil
+			},
 		},
 		baseURL: baseURL,
 		apiKey:  conn.Token,
@@ -85,7 +101,7 @@ func (i *Ideogram) Tools() []ToolDef {
 				"Auth: Api-Key header (automatic).\n\n"+
 				"Useful endpoints:\n"+
 				"- POST /v1/ideogram-v3/generate — Generate image (body: prompt, rendering_speed, resolution, aspect_ratio, style_type, magic_prompt, num_images)\n"+
-				"- POST /v1/ideogram-v3/remix, /replace-background — file_path + form_fields {\"prompt\": \"...\"}\n"+
+				"- POST /v1/ideogram-v3/remix, /v1/ideogram-v3/replace-background — file_path + form_fields {\"prompt\": \"...\"}\n"+
 				"- POST /v1/ideogram-v3/reframe — file_path + form_fields {\"resolution\": \"...\"}\n"+
 				"- POST /v1/ideogram-v3/describe — file_path only",
 			i.baseURL,
@@ -130,7 +146,7 @@ func (i *Ideogram) handleGet(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	}
 
 	httpReq.Header.Set("Accept", "application/json")
-	httpReq.Header.Set("Api-Key", i.apiKey)
+	httpReq.Header.Set(ideogramAPIKeyHeader, i.apiKey)
 
 	resp, err := i.client.Do(httpReq)
 	if err != nil {
@@ -152,8 +168,8 @@ func (i *Ideogram) handlePost(ctx context.Context, req mcp.CallToolRequest) (*mc
 	if path == "" {
 		return mcp.NewToolResultError("path is required"), nil
 	}
-	if req.GetString("body", "") == "" && req.GetString("file_path", "") == "" {
-		return mcp.NewToolResultError("body or file_path is required"), nil
+	if err := requireBodyOrFile(req); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	if !strings.HasPrefix(path, "/") {
@@ -166,11 +182,11 @@ func (i *Ideogram) handlePost(ctx context.Context, req mcp.CallToolRequest) (*mc
 	}
 
 	httpReq.Header.Set("Accept", "application/json")
-	httpReq.Header.Set("Api-Key", i.apiKey)
+	httpReq.Header.Set(ideogramAPIKeyHeader, i.apiKey)
 
 	resp, err := clientFor(i.client, upload).Do(httpReq)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("request failed: %v", err)), nil
+		return mcp.NewToolResultError(requestError(ctx, err, httpReq, upload)), nil
 	}
 	defer resp.Body.Close()
 

@@ -163,8 +163,8 @@ func (r *Recraft) handlePost(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	if path == "" {
 		return mcp.NewToolResultError("path is required"), nil
 	}
-	if req.GetString("body", "") == "" && req.GetString("file_path", "") == "" {
-		return mcp.NewToolResultError("body or file_path is required"), nil
+	if err := requireBodyOrFile(req); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	if !strings.HasPrefix(path, "/") {
@@ -181,7 +181,7 @@ func (r *Recraft) handlePost(ctx context.Context, req mcp.CallToolRequest) (*mcp
 
 	resp, err := clientFor(r.client, upload).Do(httpReq)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("request failed: %v", err)), nil
+		return mcp.NewToolResultError(requestError(ctx, err, httpReq, upload)), nil
 	}
 	defer resp.Body.Close()
 

@@ -8,15 +8,18 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -27,8 +30,11 @@ import (
 // Uploads are the counterpart of output_file: the model names a path, mux
 // moves the bytes, and the file never passes through the conversation.
 const (
-	jsonBodyDesc = "JSON request body (optional). Not allowed together with file_path — " +
-		"the text parts of an upload go into form_fields."
+	// jsonBodyDesc is appended to a per-tool sentence that says whether body is
+	// optional or required. Kept separate so the two halves cannot contradict
+	// each other: body is optional for http/openai, but required for the
+	// recraft/ideogram post tools unless a file is uploaded instead.
+	jsonBodyDesc = "Not allowed together with file_path — the text parts of an upload go into form_fields."
 	filePathDesc = "Absolute path of a local file to upload (supports ~ for home directory). " +
 		"Switches the request to multipart/form-data: the file is streamed from disk as one part and " +
 		"form_fields become the other parts. Cannot be combined with body. " +
@@ -69,14 +75,83 @@ type multipartUpload struct {
 	contentTypeHeader string // multipart/form-data; boundary=…
 }
 
+// stringArg reads a tool argument that the input schema declares as a string.
+// mcp-go passes the raw argument map to the handler without validating it
+// against the schema, and GetString answers with the default for any other
+// type — an argument sent as an object or a number would be dropped without a
+// word, and a request the caller believes carries it would go out without it.
+func stringArg(req mcp.CallToolRequest, key string) (string, error) {
+	v, ok := req.GetArguments()[key]
+	if !ok || v == nil {
+		return "", nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a string, got %T", key, v)
+	}
+	return s, nil
+}
+
+// requireBodyOrFile answers whether a tool that needs either a JSON body or an
+// upload was given one. It goes through stringArg so an argument of the wrong
+// type is reported as such instead of being counted as absent.
+func requireBodyOrFile(req mcp.CallToolRequest) error {
+	body, err := stringArg(req, "body")
+	if err != nil {
+		return err
+	}
+	filePath, err := stringArg(req, "file_path")
+	if err != nil {
+		return err
+	}
+	if body == "" && filePath == "" {
+		return errors.New("body or file_path is required")
+	}
+	return nil
+}
+
+// formFieldsArg returns form_fields as JSON text. The schema declares a
+// string, but the parameter description shows an object literal, so a client
+// may well send a real JSON object: it is re-encoded here rather than
+// dropped. Re-encoding runs over the already decoded value, so a number keeps
+// its value but not necessarily its spelling (0.30 arrives as 0.3); the string
+// form is passed through untouched.
+func formFieldsArg(req mcp.CallToolRequest) (string, error) {
+	v, ok := req.GetArguments()["form_fields"]
+	if !ok || v == nil {
+		return "", nil
+	}
+	switch t := v.(type) {
+	case string:
+		return t, nil
+	case map[string]any:
+		raw, err := json.Marshal(t)
+		if err != nil {
+			return "", fmt.Errorf("form_fields is not encodable as JSON: %w", err)
+		}
+		return string(raw), nil
+	default:
+		return "", fmt.Errorf("form_fields must be a JSON object or a JSON string, got %T", v)
+	}
+}
+
 // parseUpload reads file_path, file_field and form_fields from a tool call.
 // It returns nil when file_path is absent (plain JSON mode) and an error when
 // the arguments contradict each other or the file is unusable. Everything is
 // checked before a request goes out, so a bad path never costs a round trip.
 func parseUpload(req mcp.CallToolRequest, defaultField string) (*multipartUpload, error) {
-	filePath := req.GetString("file_path", "")
-	fileField := req.GetString("file_field", "")
-	formFields := req.GetString("form_fields", "")
+	filePath, err := stringArg(req, "file_path")
+	if err != nil {
+		return nil, err
+	}
+	fileField, err := stringArg(req, "file_field")
+	if err != nil {
+		return nil, err
+	}
+	formFields, err := formFieldsArg(req)
+	if err != nil {
+		return nil, err
+	}
 
 	if filePath == "" {
 		switch {
@@ -87,7 +162,11 @@ func parseUpload(req mcp.CallToolRequest, defaultField string) (*multipartUpload
 		}
 		return nil, nil
 	}
-	if req.GetString("body", "") != "" {
+	body, err := stringArg(req, "body")
+	if err != nil {
+		return nil, err
+	}
+	if body != "" {
 		return nil, errors.New("body and file_path are mutually exclusive: a multipart upload carries its text values in form_fields, not in a JSON body")
 	}
 	if fileField == "" {
@@ -103,21 +182,24 @@ func parseUpload(req mcp.CallToolRequest, defaultField string) (*multipartUpload
 	if !filepath.IsAbs(clean) {
 		return nil, fmt.Errorf("file_path must be an absolute path: %s", filePath)
 	}
-	f, err := os.Open(clean)
+	// Stat before Open: opening a FIFO that has no writer blocks forever, and
+	// at this point neither the caller's context nor a client timeout is in
+	// play — the tool call would simply never return.
+	fi, err := os.Stat(clean)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("file_path not found: %s (resolved on the machine running mux)", clean)
 		}
-		return nil, fmt.Errorf("file_path is not readable: %w", err)
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
 		return nil, fmt.Errorf("file_path is not usable: %w", err)
 	}
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("file_path is not a regular file: %s", clean)
 	}
+	f, err := os.Open(clean)
+	if err != nil {
+		return nil, fmt.Errorf("file_path is not readable: %w", err)
+	}
+	defer f.Close()
 
 	u := &multipartUpload{
 		filePath:    clean,
@@ -144,7 +226,7 @@ func parseFormFields(raw string) (map[string]string, error) {
 	dec.UseNumber()
 	var obj map[string]any
 	if err := dec.Decode(&obj); err != nil {
-		return nil, fmt.Errorf("form_fields must be a JSON object: %v", err)
+		return nil, fmt.Errorf("form_fields must be a JSON object: %w", err)
 	}
 	if obj == nil {
 		return nil, errors.New("form_fields must be a JSON object, got null")
@@ -203,8 +285,11 @@ func (u *multipartUpload) render() error {
 	}
 
 	h := make(textproto.MIMEHeader)
-	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
-		escapeQuotes(u.fileField), escapeQuotes(filepath.Base(u.filePath))))
+	// FileContentDisposition percent-escapes CR and LF as well as quoting, so a
+	// field name or file name carrying a newline cannot break out of the part
+	// header. Both are caller-controlled, and a file name may legally contain
+	// CR/LF on Unix.
+	h.Set("Content-Disposition", multipart.FileContentDisposition(u.fileField, filepath.Base(u.filePath)))
 	h.Set("Content-Type", u.contentType)
 	if _, err := w.CreatePart(h); err != nil {
 		return fmt.Errorf("multipart: %w", err)
@@ -223,12 +308,6 @@ func (u *multipartUpload) render() error {
 	u.tail = tail.Bytes()
 	u.contentTypeHeader = w.FormDataContentType()
 	return nil
-}
-
-var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
-
-func escapeQuotes(s string) string {
-	return quoteEscaper.Replace(s)
 }
 
 // newRequest builds the outgoing request. The body streams head → file → tail
@@ -280,14 +359,21 @@ func (u *multipartUpload) note() string {
 // caller can pick the client and annotate the result. Only Content-Type is set
 // here; Accept and auth stay with the connector.
 func newBodyRequest(ctx context.Context, method, url string, req mcp.CallToolRequest, defaultFileField string) (*http.Request, *multipartUpload, error) {
+	// Refuse an upload on GET before parseUpload touches the file system: the
+	// get tools do not declare the upload parameters, so a file_path here is a
+	// mistake, and answering it with a stat result would turn a read-only
+	// connection into a file-existence oracle.
+	if method == http.MethodGet {
+		if fp, err := stringArg(req, "file_path"); err != nil || fp != "" {
+			return nil, nil, errors.New("file_path is not supported on GET requests")
+		}
+	}
+
 	upload, err := parseUpload(req, defaultFileField)
 	if err != nil {
 		return nil, nil, err
 	}
 	if upload != nil {
-		if method == http.MethodGet {
-			return nil, nil, errors.New("file_path is not supported on GET requests")
-		}
 		httpReq, err := upload.newRequest(ctx, method, url)
 		if err != nil {
 			return nil, nil, err
@@ -295,8 +381,12 @@ func newBodyRequest(ctx context.Context, method, url string, req mcp.CallToolReq
 		return httpReq, upload, nil
 	}
 
+	body, err := stringArg(req, "body")
+	if err != nil {
+		return nil, nil, err
+	}
 	var bodyReader io.Reader
-	if body := req.GetString("body", ""); body != "" {
+	if body != "" {
 		bodyReader = strings.NewReader(body)
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
@@ -309,18 +399,46 @@ func newBodyRequest(ctx context.Context, method, url string, req mcp.CallToolReq
 	return httpReq, nil, nil
 }
 
-// clientFor returns the client to send with: base for JSON calls, a copy
-// without the overall Timeout for uploads. A budget sized for JSON round trips
-// would cut off a large file on a slow link; the upload stays bounded by the
-// transport's ResponseHeaderTimeout (the server has to answer once the body is
-// in) and by the caller's context.
+// uploadTimeout bounds one upload end to end. It is not sized for any real
+// file — 100 MB at 1 MB/s take under two minutes — it exists for a single
+// case: a server that accepts the connection and then stops reading. No other
+// timer covers that. The transport's ResponseHeaderTimeout starts only once
+// the body has been written in full, and the stdio transport has no
+// per-request deadline, so without this cap such a call would hold one of the
+// worker slots until mux restarts. A var so tests can shorten it.
+var uploadTimeout = 30 * time.Minute
+
+// clientFor returns the client to send with: base for JSON calls, a copy with
+// the upload budget instead of the JSON one for uploads. The connectors' own
+// Timeout (30–60 s) is sized for JSON round trips and would cut off a large
+// file on a slow link.
 func clientFor(base *http.Client, upload *multipartUpload) *http.Client {
 	if upload == nil {
 		return base
 	}
 	c := *base
-	c.Timeout = 0
+	c.Timeout = uploadTimeout
 	return &c
+}
+
+// requestError turns a failed Do into the tool result text. An upload that ran
+// into uploadTimeout is named as such — Go's own message reads
+// "Client.Timeout exceeded while awaiting headers", which is literally true
+// (no headers ever came) and hides that the body was still being sent — and
+// the abort is logged, so whoever reads the mux log sees why a long call
+// disappeared. A timeout or cancellation that came from the caller's context
+// is reported as it is: that was the caller's decision, not this cap.
+func requestError(ctx context.Context, err error, req *http.Request, upload *multipartUpload) string {
+	if upload != nil && ctx.Err() == nil {
+		var uerr *url.Error
+		if errors.As(err, &uerr) && uerr.Timeout() {
+			msg := fmt.Sprintf("upload aborted after %s: %s accepted the connection but did not finish taking %d bytes of %s (mux upload timeout, not the server's answer)",
+				uploadTimeout, req.URL.Host, upload.size, filepath.Base(upload.filePath))
+			log.Printf("[upload] %s %s: %s", req.Method, req.URL.Redacted(), msg)
+			return msg
+		}
+	}
+	return fmt.Sprintf("request failed: %v", err)
 }
 
 // statusLine renders the head of a tool result: the HTTP status, plus the

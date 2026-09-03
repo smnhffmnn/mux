@@ -119,7 +119,7 @@ func (h *HTTP) Tools() []ToolDef {
 				mcp.Description("Path to append to the base URL, e.g. /api/users/42"),
 			),
 			mcp.WithString("body",
-				mcp.Description(jsonBodyDesc),
+				mcp.Description("JSON request body (optional). "+jsonBodyDesc),
 			),
 			mcp.WithString("output_file",
 				mcp.Description(outputFileDesc),
@@ -167,6 +167,18 @@ func (h *HTTP) doRequest(ctx context.Context, method string, req mcp.CallToolReq
 
 	url := h.baseURL + path
 
+	// Check the destination before anything is sent: a request that fails on
+	// "output_file already exists" afterwards has already happened on the
+	// server (a POST may have written) or has moved a whole file for nothing.
+	// saveResponseToFileWithNote stays the authority (its O_EXCL decides the
+	// race); this is only the early exit. It runs before newBodyRequest opens
+	// the upload file, so the early return leaks no file handle.
+	if outputFile := req.GetString("output_file", ""); outputFile != "" {
+		if _, err := validateOutputFile(outputFile); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+	}
+
 	httpReq, upload, err := newBodyRequest(ctx, method, url, req, "file")
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
@@ -197,7 +209,7 @@ func (h *HTTP) doRequest(ctx context.Context, method string, req mcp.CallToolReq
 
 	resp, err := clientFor(h.client, upload).Do(httpReq)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("request failed: %v", err)), nil
+		return mcp.NewToolResultError(requestError(ctx, err, httpReq, upload)), nil
 	}
 	defer resp.Body.Close()
 
