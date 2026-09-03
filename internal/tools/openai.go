@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -23,7 +22,7 @@ const DefaultOpenAIInstructions = `OpenAI API.
 
 Tools:
 - get   — GET requests (e.g. /v1/models)
-- request — POST/PUT/PATCH/DELETE with a JSON body
+- request — POST/PUT/PATCH/DELETE with a JSON body, or a multipart file upload
 
 Common POST endpoints (use the request tool):
 - /v1/chat/completions — Chat completions (gpt-4o, gpt-4o-mini, o1, o3-mini, …)
@@ -31,8 +30,13 @@ Common POST endpoints (use the request tool):
 - /v1/embeddings — Text embeddings (text-embedding-3-small/-large)
 - /v1/images/generations — Image generation (DALL·E, gpt-image-*)
 
-Multipart-upload endpoints (e.g. /v1/audio/transcriptions) are not supported
-here — the request tool sends application/json only.
+Multipart endpoints take a local file: pass file_path (absolute path, sent as
+form field "file") and the remaining fields as form_fields, e.g.
+- /v1/audio/transcriptions, /v1/audio/translations — Whisper: form_fields {"model": "whisper-1"}
+- /v1/files — File upload: form_fields {"purpose": "assistants"}
+- /v1/images/edits — Image edit: file_field "image", form_fields {"prompt": "..."}
+The file is streamed from disk and never enters the conversation. One file per
+request.
 
 For binary or large responses pass output_file to stream the body to disk
 instead of returning it inline.
@@ -81,6 +85,35 @@ func NewOpenAI(conn config.Connection, dialer Dialer) (*OpenAI, error) {
 func (o *OpenAI) Tools() []ToolDef {
 	outputFileDesc := "Save response body to this absolute file path instead of returning it inline (supports ~ for home directory). Useful for large or binary responses (audio transcriptions, image bytes). Returns only metadata (status, content-type, path, size). An existing file is never overwritten. Only writes on 2xx responses; errors are returned inline."
 
+	requestOpts := []mcp.ToolOption{
+		mcp.WithDescription(fmt.Sprintf(
+			"Make an HTTP request to %s with a JSON body, or upload a local file as multipart/form-data. Supports POST, PUT, PATCH, and DELETE.\n\n"+
+				"Auth: Bearer token (automatic).\n\n"+
+				"Common POST endpoints:\n"+
+				"- POST /v1/chat/completions — Chat completions (gpt-4o, gpt-4o-mini, o1, o3-mini, …)\n"+
+				"- POST /v1/responses — Responses API\n"+
+				"- POST /v1/embeddings — Text embeddings\n"+
+				"- POST /v1/images/generations — Image generation (DALL·E, gpt-image-*)\n"+
+				"- POST /v1/audio/transcriptions, /v1/audio/translations — Whisper (file_path + form_fields {\"model\": \"whisper-1\"})\n"+
+				"- POST /v1/files — File upload (file_path + form_fields {\"purpose\": \"assistants\"})",
+			o.baseURL,
+		)),
+		mcp.WithString("method",
+			mcp.Required(),
+			mcp.Description("HTTP method: POST, PUT, PATCH, or DELETE"),
+			mcp.Enum("POST", "PUT", "PATCH", "DELETE"),
+		),
+		mcp.WithString("path",
+			mcp.Required(),
+			mcp.Description("Path to append to the base URL, e.g. /v1/chat/completions"),
+		),
+		mcp.WithString("body",
+			mcp.Description(jsonBodyDesc),
+		),
+		mcp.WithString("output_file", mcp.Description(outputFileDesc)),
+	}
+	requestOpts = append(requestOpts, uploadParams("file")...)
+
 	return []ToolDef{
 		{
 			Tool: mcp.NewTool("get",
@@ -98,32 +131,7 @@ func (o *OpenAI) Tools() []ToolDef {
 			Handler: o.handleGet,
 		},
 		{
-			Tool: mcp.NewTool("request",
-				mcp.WithDescription(fmt.Sprintf(
-					"Make an HTTP request with a JSON body to %s. Supports POST, PUT, PATCH, and DELETE.\n\n"+
-						"Auth: Bearer token (automatic).\n\n"+
-						"Common POST endpoints:\n"+
-						"- POST /v1/chat/completions — Chat completions (gpt-4o, gpt-4o-mini, o1, o3-mini, …)\n"+
-						"- POST /v1/responses — Responses API\n"+
-						"- POST /v1/embeddings — Text embeddings\n"+
-						"- POST /v1/images/generations — Image generation (DALL·E, gpt-image-*)\n"+
-						"- POST /v1/audio/transcriptions, /v1/audio/translations — Whisper (multipart, not supported here)",
-					o.baseURL,
-				)),
-				mcp.WithString("method",
-					mcp.Required(),
-					mcp.Description("HTTP method: POST, PUT, PATCH, or DELETE"),
-					mcp.Enum("POST", "PUT", "PATCH", "DELETE"),
-				),
-				mcp.WithString("path",
-					mcp.Required(),
-					mcp.Description("Path to append to the base URL, e.g. /v1/chat/completions"),
-				),
-				mcp.WithString("body",
-					mcp.Description("JSON request body (optional)"),
-				),
-				mcp.WithString("output_file", mcp.Description(outputFileDesc)),
-			),
+			Tool:    mcp.NewTool("request", requestOpts...),
 			Handler: o.handleRequest,
 		},
 	}
@@ -160,30 +168,22 @@ func (o *OpenAI) doRequest(ctx context.Context, method string, req mcp.CallToolR
 		path = "/" + path
 	}
 
-	var bodyReader io.Reader
-	if body := req.GetString("body", ""); body != "" {
-		bodyReader = bytes.NewBufferString(body)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, method, o.baseURL+path, bodyReader)
+	httpReq, upload, err := newBodyRequest(ctx, method, o.baseURL+path, req, "file")
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("invalid request: %v", err)), nil
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	httpReq.Header.Set("Accept", "application/json")
-	if bodyReader != nil {
-		httpReq.Header.Set("Content-Type", "application/json")
-	}
 	httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
 
-	resp, err := o.client.Do(httpReq)
+	resp, err := clientFor(o.client, upload).Do(httpReq)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("request failed: %v", err)), nil
 	}
 	defer resp.Body.Close()
 
 	if outputFile := req.GetString("output_file", ""); outputFile != "" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return saveResponseToFile(resp, resp.Header.Get("Content-Type"), outputFile)
+		return saveResponseToFileWithNote(resp, resp.Header.Get("Content-Type"), outputFile, upload.note())
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, openaiMaxBody))
@@ -191,6 +191,6 @@ func (o *OpenAI) doRequest(ctx context.Context, method string, req mcp.CallToolR
 		return mcp.NewToolResultError(fmt.Sprintf("read response: %v", err)), nil
 	}
 
-	result := fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, resp.Status, string(body))
+	result := statusLine(resp, upload) + "\n\n" + string(body)
 	return mcp.NewToolResultText(result), nil
 }

@@ -32,6 +32,11 @@ Endpoints:
 - POST /v1/ideogram-v3/replace-background — Replace image background (multipart: image, prompt)
 - POST /v1/ideogram-v3/describe — Describe an image (multipart: image)
 
+Multipart endpoints take a local file via the post tool: pass file_path
+(absolute path, sent as form field "image") and the text values as form_fields,
+e.g. {"prompt": "...", "rendering_speed": "TURBO"}; leave body empty. One file
+per request — /edit needs image and mask together and cannot be served yet.
+
 Auth: Api-Key header (automatic)`
 
 // Ideogram wraps the Ideogram REST API as MCP tools.
@@ -74,6 +79,22 @@ func NewIdeogram(conn config.Connection, dialer Dialer) (*Ideogram, error) {
 
 // Tools returns the MCP tools for the Ideogram connection.
 func (i *Ideogram) Tools() []ToolDef {
+	postOpts := []mcp.ToolOption{
+		mcp.WithDescription(fmt.Sprintf(
+			"Make an HTTP POST request to %s with a JSON body, or upload a local image as multipart/form-data, and return the response.\n\n"+
+				"Auth: Api-Key header (automatic).\n\n"+
+				"Useful endpoints:\n"+
+				"- POST /v1/ideogram-v3/generate — Generate image (body: prompt, rendering_speed, resolution, aspect_ratio, style_type, magic_prompt, num_images)\n"+
+				"- POST /v1/ideogram-v3/remix, /replace-background — file_path + form_fields {\"prompt\": \"...\"}\n"+
+				"- POST /v1/ideogram-v3/reframe — file_path + form_fields {\"resolution\": \"...\"}\n"+
+				"- POST /v1/ideogram-v3/describe — file_path only",
+			i.baseURL,
+		)),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Path to append to the base URL, e.g. /v1/ideogram-v3/generate")),
+		mcp.WithString("body", mcp.Description("JSON request body (required unless file_path is given). "+jsonBodyDesc)),
+	}
+	postOpts = append(postOpts, uploadParams("image")...)
+
 	return []ToolDef{
 		{
 			Tool: mcp.NewTool("get",
@@ -87,17 +108,7 @@ func (i *Ideogram) Tools() []ToolDef {
 			Handler: i.handleGet,
 		},
 		{
-			Tool: mcp.NewTool("post",
-				mcp.WithDescription(fmt.Sprintf(
-					"Make an HTTP POST request to %s with a JSON body and return the response.\n\n"+
-						"Auth: Api-Key header (automatic).\n\n"+
-						"Useful endpoints:\n"+
-						"- POST /v1/ideogram-v3/generate — Generate image (body: prompt, rendering_speed, resolution, aspect_ratio, style_type, magic_prompt, num_images)",
-					i.baseURL,
-				)),
-				mcp.WithString("path", mcp.Required(), mcp.Description("Path to append to the base URL, e.g. /v1/ideogram-v3/generate")),
-				mcp.WithString("body", mcp.Required(), mcp.Description("JSON request body")),
-			),
+			Tool:    mcp.NewTool("post", postOpts...),
 			Handler: i.handlePost,
 		},
 	}
@@ -141,26 +152,23 @@ func (i *Ideogram) handlePost(ctx context.Context, req mcp.CallToolRequest) (*mc
 	if path == "" {
 		return mcp.NewToolResultError("path is required"), nil
 	}
-
-	jsonBody, _ := req.RequireString("body")
-	if jsonBody == "" {
-		return mcp.NewToolResultError("body is required"), nil
+	if req.GetString("body", "") == "" && req.GetString("file_path", "") == "" {
+		return mcp.NewToolResultError("body or file_path is required"), nil
 	}
 
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, i.baseURL+path, strings.NewReader(jsonBody))
+	httpReq, upload, err := newBodyRequest(ctx, http.MethodPost, i.baseURL+path, req, "image")
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("invalid request: %v", err)), nil
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("Api-Key", i.apiKey)
 
-	resp, err := i.client.Do(httpReq)
+	resp, err := clientFor(i.client, upload).Do(httpReq)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("request failed: %v", err)), nil
 	}
@@ -171,6 +179,6 @@ func (i *Ideogram) handlePost(ctx context.Context, req mcp.CallToolRequest) (*mc
 		return mcp.NewToolResultError(fmt.Sprintf("read response: %v", err)), nil
 	}
 
-	result := fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, resp.Status, string(body))
+	result := statusLine(resp, upload) + "\n\n" + string(body)
 	return mcp.NewToolResultText(result), nil
 }
