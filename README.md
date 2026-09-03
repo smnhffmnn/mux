@@ -11,7 +11,7 @@ mux is a [Model Context Protocol](https://modelcontextprotocol.io) gateway that 
 - **Databases** -- MariaDB, PostgreSQL, ClickHouse with schema introspection and query tools; Meilisearch full-text search
 - **MCP Proxy** -- forward tool calls to upstream MCP servers with Bearer, HTTP Basic, custom-header, or OAuth auth, optionally routed through a tunnel (YouTrack, Sentry, Notion, Asana MCP, Netdata, or any MCP endpoint)
 - **API Integrations** -- Microsoft Graph (mail, calendar, SharePoint), Google Workspace (Drive, Docs, Sheets, Gmail, Calendar, Tasks), Google Tag Manager, Google Gemini, OpenAI, ElevenLabs, Brave Search, Firecrawl, Hyperbrowser (stealth browser), fal.ai (async inference queue), Higgsfield (image/video generation via its hosted MCP), Recraft + Ideogram (image generation), Asana, YouTrack Agile (sprint boards), IMAP mail
-- **Generic HTTP** -- connect any REST API with token auth (Bearer or Basic), custom headers, and file output
+- **Generic HTTP** -- connect any REST API with token auth (Bearer or Basic), custom headers, file output and multipart file upload
 - **Git Credentials** -- serve PATs from the secret store to git via `mux git-credential`
 - **WireGuard Tunnels** -- reach databases on private networks through userspace WireGuard (no root, no VPN client)
 - **Remote Provisioning** -- centrally manage connections and tunnels for your team from one or more HTTP endpoints (configure multiple `[[provisioning]]` blocks to combine sources)

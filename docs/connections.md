@@ -169,7 +169,7 @@ type = "openai"
 | Tool | Description |
 |------|-------------|
 | `{name}_get` | HTTP GET to the OpenAI API. Params: `path` (required, e.g. `/v1/models`), `output_file` (optional, stream binary/large responses to disk). |
-| `{name}_request` | HTTP POST/PUT/PATCH/DELETE with a JSON body. Params: `method`, `path`, `body` (JSON string), `output_file`. Use for `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/images/generations`. Multipart endpoints (e.g. `/v1/audio/transcriptions`) are not supported. |
+| `{name}_request` | HTTP POST/PUT/PATCH/DELETE with a JSON body, or a multipart file upload. Params: `method`, `path`, `body` (JSON string), `output_file`, `file_path`, `file_field` (default `file`), `form_fields`. Use for `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/images/generations`; multipart endpoints such as `/v1/audio/transcriptions` or `/v1/files` take `file_path` plus `form_fields` (e.g. `{"model": "whisper-1"}`). See [Uploading files](#uploading-files). |
 
 Default instructions describe both tools and list common POST endpoints.
 
@@ -225,7 +225,7 @@ type = "recraft"
 | Tool | Description |
 |------|-------------|
 | `{name}_get` | HTTP GET request to the Recraft API. Parameter: `path` (required, e.g. `/users/me`). |
-| `{name}_post` | HTTP POST request with JSON body to the Recraft API. Parameters: `path` (required, e.g. `/images/generations`), `body` (required, JSON string). |
+| `{name}_post` | HTTP POST with a JSON body or a multipart image upload. Parameters: `path` (required, e.g. `/images/generations`), `body` (JSON string, required unless `file_path` is given), `file_path`, `file_field` (default `file`), `form_fields`. See [Uploading files](#uploading-files). |
 
 Default instructions describe available endpoints:
 
@@ -241,6 +241,8 @@ Default instructions describe available endpoints:
 | `POST /images/inpaint` | Inpainting (multipart: file, mask, prompt). |
 | `POST /images/replaceBackground` | Replace image background (multipart: file, prompt). |
 | `POST /styles` | Create a style reference (multipart: files). |
+
+The multipart endpoints take the image via `file_path`; text values such as `prompt` or `strength` go into `form_fields`. One file per request — `/images/inpaint` (file + mask) and a multi-file `/styles` call are out of reach for now.
 
 ### Ideogram
 
@@ -263,7 +265,7 @@ type = "ideogram"
 | Tool | Description |
 |------|-------------|
 | `{name}_get` | HTTP GET request to the Ideogram API. Parameter: `path` (required). |
-| `{name}_post` | HTTP POST request with JSON body to the Ideogram API. Parameters: `path` (required, e.g. `/v1/ideogram-v3/generate`), `body` (required, JSON string). |
+| `{name}_post` | HTTP POST with a JSON body or a multipart image upload. Parameters: `path` (required, e.g. `/v1/ideogram-v3/generate`), `body` (JSON string, required unless `file_path` is given), `file_path`, `file_field` (default `image`), `form_fields`. See [Uploading files](#uploading-files). |
 
 Default instructions describe available endpoints:
 
@@ -275,6 +277,8 @@ Default instructions describe available endpoints:
 | `POST /v1/ideogram-v3/reframe` | Reframe/extend an image (multipart: image, resolution). |
 | `POST /v1/ideogram-v3/replace-background` | Replace image background (multipart: image, prompt). |
 | `POST /v1/ideogram-v3/describe` | Describe an image (multipart: image). |
+
+The multipart endpoints take the image via `file_path` (sent as form field `image`); `prompt`, `resolution` and the like go into `form_fields`. One file per request — `/v1/ideogram-v3/edit` needs `image` and `mask` together and cannot be served yet.
 
 ### Brave Search
 
@@ -607,9 +611,23 @@ instructions = "Internal product API. Use /api/v1/products to list products."
 | Tool | Description |
 |------|-------------|
 | `{name}_get` | HTTP GET request. Parameters: `path` (required), `output_file` (optional — save response to file). |
-| `{name}_request` | HTTP request with body (POST, PUT, PATCH, DELETE). Parameters: `path`, `method`, `body`, `output_file`. Available unless `read_only = true`. |
+| `{name}_request` | HTTP request with body (POST, PUT, PATCH, DELETE). Parameters: `path`, `method`, `body` (JSON), `output_file`, and for uploads `file_path`, `file_field` (default `file`), `form_fields`. Available unless `read_only = true`. |
 
 Both tools support an optional `output_file` parameter. When set, the response body is streamed to the specified file path (no size limit) and only metadata (status, content-type, path, size) is returned. Useful for large responses like images or binary data.
+
+#### Uploading files
+
+`{name}_request` — and the `request`/`post` tools of the OpenAI, Recraft and Ideogram connectors — can send a local file as `multipart/form-data`. This is the counterpart of `output_file`: the model names a path, mux moves the bytes, and the file never passes through the conversation.
+
+- `file_path` — absolute path of the file (supports `~`). Setting it switches the request to multipart; `body` is not allowed in this mode.
+- `file_field` — form field the file is sent under (default `file`; Ideogram uses `image`).
+- `form_fields` — the other text parts as a JSON object of scalars, e.g. `{"title": "Banner", "public": true}`. Numbers and booleans are sent as their JSON text; `null` and nested values are rejected.
+
+The file is streamed from disk with an exact `Content-Length`; the part's `Content-Type` comes from the file extension, or from the first bytes when the extension is unknown. The result reports what went out (`Uploaded banner.png as "file": 70123 bytes, image/png`). Auth headers and redirect handling are the same as for JSON requests, and a 307/308 replays the body from disk; the one difference is `Content-Type`, where a header configured on the connection gives way to the multipart boundary.
+
+Uploads run on their own time budget of 30 minutes instead of the 30–60 seconds a JSON round trip gets, so a large file on a slow link is not cut off (100 MB at 1 MB/s take under two minutes). The budget exists for one case: a server that accepts the connection and then stops reading. No other timer covers that — the transport's response-header timeout (30 s) starts only once the body has been written in full, and the stdio transport has no per-request deadline that would otherwise end the call. When it fires, the tool result says so in plain words (`upload aborted after 30m0s: … did not finish taking N bytes of …`) rather than Go's "awaiting headers", and mux logs the abort under `[upload]`. There is no size limit on the mux side; the target API enforces its own.
+
+The path is resolved by the mux process, not by the caller: in a container the file has to be inside a mounted directory (see [container.md](container.md#configuration)). One file per request; `form_fields` without `file_path` is an error rather than a form-encoded body.
 
 ### Google Gemini
 

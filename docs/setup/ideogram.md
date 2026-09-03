@@ -26,3 +26,4 @@ Click **Test** to verify the connection.
 
 - Ideogram offers AI-powered image generation with a strong focus on text rendering within images.
 - The API URL typically does not need to be changed.
+- Remix, reframe, replace-background and describe take a local image via `file_path` on the `post` tool (sent as form field `image`).

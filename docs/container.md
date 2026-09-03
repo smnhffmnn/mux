@@ -69,6 +69,12 @@ docker run \
 per-connection variables listed in `config.example.toml`). Fine for single
 values, unsuited to structured connection definitions.
 
+**Uploads** are not a fourth way in, but they hang off the mount. `file_path` on
+the `request`/`post` tools (HTTP, OpenAI, Recraft, Ideogram) is opened by mux
+itself, so a file that lives on the host is invisible unless its directory is
+mounted; the tool then answers `file_path not found: … (resolved on the machine
+running mux)`. Mount the directory the agent writes its files to.
+
 There is no vault in the container. The vault unlocks interactively
 (passphrase or WebAuthn) and nothing in a headless container can answer that
 prompt; in exclusive mode a sealed vault refuses every secret read. Leave

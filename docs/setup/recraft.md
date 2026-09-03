@@ -26,3 +26,4 @@ Click **Test** to verify the connection.
 
 - Recraft offers image generation and editing.
 - The API URL typically does not need to be changed.
+- Image editing endpoints (`/images/vectorize`, `/images/removeBackground`, `/images/imageToImage`, …) take a local image via `file_path` on the `post` tool.

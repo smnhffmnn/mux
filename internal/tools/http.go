@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -105,27 +104,31 @@ func (h *HTTP) Tools() []ToolDef {
 	}
 
 	if !h.readOnly {
-		writeDesc := fmt.Sprintf("Make an HTTP request with a body to %s. Supports POST, PUT, PATCH, and DELETE.", h.baseURL)
+		writeDesc := fmt.Sprintf("Make an HTTP request with a body to %s. Supports POST, PUT, PATCH, and DELETE. "+
+			"The body is JSON by default; with file_path it becomes a multipart/form-data upload streamed from a local file.", h.baseURL)
+
+		opts := []mcp.ToolOption{
+			mcp.WithDescription(writeDesc),
+			mcp.WithString("method",
+				mcp.Required(),
+				mcp.Description("HTTP method: POST, PUT, PATCH, or DELETE"),
+				mcp.Enum("POST", "PUT", "PATCH", "DELETE"),
+			),
+			mcp.WithString("path",
+				mcp.Required(),
+				mcp.Description("Path to append to the base URL, e.g. /api/users/42"),
+			),
+			mcp.WithString("body",
+				mcp.Description("JSON request body (optional). "+jsonBodyDesc),
+			),
+			mcp.WithString("output_file",
+				mcp.Description(outputFileDesc),
+			),
+		}
+		opts = append(opts, uploadParams("file")...)
 
 		tools = append(tools, ToolDef{
-			Tool: mcp.NewTool("request",
-				mcp.WithDescription(writeDesc),
-				mcp.WithString("method",
-					mcp.Required(),
-					mcp.Description("HTTP method: POST, PUT, PATCH, or DELETE"),
-					mcp.Enum("POST", "PUT", "PATCH", "DELETE"),
-				),
-				mcp.WithString("path",
-					mcp.Required(),
-					mcp.Description("Path to append to the base URL, e.g. /api/users/42"),
-				),
-				mcp.WithString("body",
-					mcp.Description("JSON request body (optional)"),
-				),
-				mcp.WithString("output_file",
-					mcp.Description(outputFileDesc),
-				),
-			),
+			Tool:    mcp.NewTool("request", opts...),
 			Handler: h.handleRequest,
 		})
 	}
@@ -164,24 +167,33 @@ func (h *HTTP) doRequest(ctx context.Context, method string, req mcp.CallToolReq
 
 	url := h.baseURL + path
 
-	var bodyReader io.Reader
-	if body, err := req.RequireString("body"); err == nil && body != "" {
-		bodyReader = bytes.NewBufferString(body)
+	// Check the destination before anything is sent: a request that fails on
+	// "output_file already exists" afterwards has already happened on the
+	// server (a POST may have written) or has moved a whole file for nothing.
+	// saveResponseToFileWithNote stays the authority (its O_EXCL decides the
+	// race); this is only the early exit. It runs before newBodyRequest opens
+	// the upload file, so the early return leaks no file handle.
+	if outputFile := req.GetString("output_file", ""); outputFile != "" {
+		if _, err := validateOutputFile(outputFile); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	httpReq, upload, err := newBodyRequest(ctx, method, url, req, "file")
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("invalid request: %v", err)), nil
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	httpReq.Header.Set("Accept", "application/json")
-	if bodyReader != nil {
-		httpReq.Header.Set("Content-Type", "application/json")
-	}
 	// Custom headers may override the defaults above; the token header below
 	// wins over a custom header of the same name (auth stays vault-managed).
 	for name, value := range h.headers {
 		httpReq.Header.Set(name, value)
+	}
+	if upload != nil {
+		// The multipart boundary is per request — a configured Content-Type
+		// header would break the upload, so it loses here.
+		httpReq.Header.Set("Content-Type", upload.contentTypeHeader)
 	}
 	if h.token != "" {
 		switch {
@@ -195,15 +207,15 @@ func (h *HTTP) doRequest(ctx context.Context, method string, req mcp.CallToolReq
 		}
 	}
 
-	resp, err := h.client.Do(httpReq)
+	resp, err := clientFor(h.client, upload).Do(httpReq)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("request failed: %v", err)), nil
+		return mcp.NewToolResultError(requestError(ctx, err, httpReq, upload)), nil
 	}
 	defer resp.Body.Close()
 
 	// If output_file is set and response is successful, stream to disk
 	if outputFile := req.GetString("output_file", ""); outputFile != "" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return saveResponseToFile(resp, resp.Header.Get("Content-Type"), outputFile)
+		return saveResponseToFileWithNote(resp, resp.Header.Get("Content-Type"), outputFile, upload.note())
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
@@ -211,6 +223,6 @@ func (h *HTTP) doRequest(ctx context.Context, method string, req mcp.CallToolReq
 		return mcp.NewToolResultError(fmt.Sprintf("read response: %v", err)), nil
 	}
 
-	result := fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, resp.Status, string(body))
+	result := statusLine(resp, upload) + "\n\n" + string(body)
 	return mcp.NewToolResultText(result), nil
 }

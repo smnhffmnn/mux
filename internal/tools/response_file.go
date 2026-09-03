@@ -47,6 +47,13 @@ func validateOutputFile(outputFile string) (string, error) {
 // can still write into anywhere they have permission for, and a hostile
 // directory symlink on the parent path could redirect the write.
 func saveResponseToFile(resp *http.Response, contentType, outputFile string) (*mcp.CallToolResult, error) {
+	return saveResponseToFileWithNote(resp, contentType, outputFile, "")
+}
+
+// saveResponseToFileWithNote is saveResponseToFile with an extra line in the
+// result — used to report what was uploaded when the response of an upload is
+// itself written to disk.
+func saveResponseToFileWithNote(resp *http.Response, contentType, outputFile, note string) (*mcp.CallToolResult, error) {
 	outputFile = config.ExpandHome(outputFile)
 	clean := filepath.Clean(outputFile)
 	if !filepath.IsAbs(clean) {
@@ -72,7 +79,7 @@ func saveResponseToFile(resp *http.Response, contentType, outputFile string) (*m
 		return mcp.NewToolResultError(fmt.Sprintf("write file: %v", err)), nil
 	}
 
-	return mcp.NewToolResultText(responseFileResult(resp, contentType, clean, n, "")), nil
+	return mcp.NewToolResultText(responseFileResult(resp, contentType, clean, n, note)), nil
 }
 
 // saveResponseToGeneratedFile streams an HTTP response body to a fresh file in
