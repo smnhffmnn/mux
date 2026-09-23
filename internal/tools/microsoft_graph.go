@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -113,8 +114,9 @@ func (mg *MicrosoftGraph) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("list_conversations",
-				mcp.WithDescription("List conversations (grouped by thread) in a mail folder. Defaults to Inbox."),
-				mcp.WithNumber("limit", mcp.Description("Max conversations to return (default: 20)")),
+				mcp.WithDescription("List conversations (grouped by thread) in a mail folder. Defaults to Inbox. Reads a window of the newest messages (up to 250 per call); page backwards with offset (250, 500, …) until the folder's totalItemCount from list_mail_folders is reached."),
+				mcp.WithNumber("limit", mcp.Description("Max conversations to return (default: 20). The window fetched is limit*3 messages, capped at 250.")),
+				mcp.WithNumber("offset", mcp.Description("Skip this many of the newest messages before reading the window (default: 0). Counts messages, not conversations — a thread can appear on two adjacent pages.")),
 				mcp.WithString("folder_id", mcp.Description("Mail folder ID to list (default: Inbox). Use list_mail_folders to discover folder IDs.")),
 			),
 			Handler: mg.handleListConversations,
@@ -415,6 +417,10 @@ func (mg *MicrosoftGraph) handleListConversations(ctx context.Context, req mcp.C
 	if fetchCount > 250 {
 		fetchCount = 250
 	}
+	offset := 0
+	if v, ok := req.GetArguments()["offset"].(float64); ok && v > 0 {
+		offset = int(v)
+	}
 
 	folderID := strings.TrimSpace(req.GetString("folder_id", ""))
 	if folderID == "" {
@@ -423,6 +429,9 @@ func (mg *MicrosoftGraph) handleListConversations(ctx context.Context, req mcp.C
 
 	fields := "id,conversationId,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,isRead,flag,bodyPreview"
 	path := fmt.Sprintf("/me/mailFolders/%s/messages?$top=%d&$orderby=receivedDateTime+desc&$select=%s", url.PathEscape(folderID), fetchCount, fields)
+	if offset > 0 {
+		path += fmt.Sprintf("&$skip=%d", offset)
+	}
 
 	data, status, err := mg.doGraph(ctx, http.MethodGet, path, nil)
 	if err != nil {
@@ -890,11 +899,10 @@ func (mg *MicrosoftGraph) doGraph(ctx context.Context, method, path string, body
 // --- Conversation helpers ---
 
 func (mg *MicrosoftGraph) getConversationMessages(ctx context.Context, convID, fields, folderID string) ([]graphRawMessage, error) {
-	// conversationId is not efficiently filterable in Graph API — $filter combined
-	// with $orderby returns InefficientFilter error. Fetch messages in pages and
-	// filter client-side. folderID scopes the lookup to a single mail folder; an
-	// empty folderID searches across all folders (needed to find archived threads).
-	// Paginates up to maxPages to find conversations beyond the first page.
+	// Preferred path: $filter on conversationId without $orderby — Graph rejects the
+	// combination with InefficientFilter, but the plain filter is served from an index
+	// and finds the thread regardless of how old it is. Falls back to a newest-first
+	// scan (client-side filter) if the filter request fails.
 	selectFields := fields + ",conversationId"
 	// Reduce page size when fetching full body to avoid hitting response size limits.
 	pageSize := 250
@@ -905,11 +913,34 @@ func (mg *MicrosoftGraph) getConversationMessages(ctx context.Context, convID, f
 	if folderID != "" {
 		basePath = "/me/mailFolders/" + url.PathEscape(folderID) + "/messages"
 	}
-	path := fmt.Sprintf("%s?$orderby=receivedDateTime+desc&$select=%s&$top=%d", basePath, selectFields, pageSize)
 
-	const maxPages = 4
+	matched, err := mg.collectMessages(ctx, fmt.Sprintf("%s?$filter=%s&$select=%s&$top=%d", basePath, conversationFilter(convID), selectFields, pageSize), convID, 8)
+	if err != nil {
+		log.Printf("[graph] conversation filter failed, scanning instead: %v", err)
+		matched, err = mg.collectMessages(ctx, fmt.Sprintf("%s?$orderby=receivedDateTime+desc&$select=%s&$top=%d", basePath, selectFields, pageSize), convID, 4)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Chronological order (oldest first); the API returns newest-first or index order.
+	sort.SliceStable(matched, func(i, j int) bool {
+		return matched[i].ReceivedDateTime < matched[j].ReceivedDateTime
+	})
+	return matched, nil
+}
+
+// conversationFilter builds the URL-encoded $filter value for one conversation.
+// Single quotes inside an OData string literal are doubled.
+func conversationFilter(convID string) string {
+	return url.QueryEscape("conversationId eq '" + strings.ReplaceAll(convID, "'", "''") + "'")
+}
+
+// collectMessages walks a Graph messages listing (following @odata.nextLink up to
+// maxPages) and returns the messages of the given conversation. Stops early once a
+// page adds nothing after earlier matches.
+func (mg *MicrosoftGraph) collectMessages(ctx context.Context, path, convID string, maxPages int) ([]graphRawMessage, error) {
 	var matched []graphRawMessage
-
 	for page := 0; path != "" && page < maxPages; page++ {
 		data, status, err := mg.doGraph(ctx, http.MethodGet, path, nil)
 		if err != nil {
@@ -933,14 +964,10 @@ func (mg *MicrosoftGraph) getConversationMessages(ctx context.Context, convID, f
 				matched = append(matched, m)
 			}
 		}
-
-		// If we had matches before this page but found none on it, the
-		// conversation's messages are fully collected — stop early.
 		if prevCount > 0 && len(matched) == prevCount {
 			break
 		}
 
-		// Follow pagination
 		if resp.NextLink != "" {
 			after, ok := strings.CutPrefix(resp.NextLink, graphBaseURL)
 			if !ok {
@@ -951,12 +978,6 @@ func (mg *MicrosoftGraph) getConversationMessages(ctx context.Context, convID, f
 			path = ""
 		}
 	}
-
-	// Reverse to chronological order (oldest first) — the API returns newest-first.
-	for i, j := 0, len(matched)-1; i < j; i, j = i+1, j-1 {
-		matched[i], matched[j] = matched[j], matched[i]
-	}
-
 	return matched, nil
 }
 

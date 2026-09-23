@@ -386,3 +386,31 @@ func TestStripHTMLTags(t *testing.T) {
 		})
 	}
 }
+
+func TestEnvelopeWindow(t *testing.T) {
+	tests := []struct {
+		name                 string
+		total, offset, limit uint32
+		from, to             uint32
+		ok                   bool
+	}{
+		{"empty mailbox", 0, 0, 200, 0, 0, false},
+		{"fewer than a page", 50, 0, 200, 1, 50, true},
+		{"exactly a page", 200, 0, 200, 1, 200, true},
+		{"first page of many", 770, 0, 200, 571, 770, true},
+		{"second page", 770, 200, 200, 371, 570, true},
+		{"last partial page", 770, 600, 200, 1, 170, true},
+		{"offset at end", 770, 770, 200, 0, 0, false},
+		{"offset beyond end", 770, 900, 200, 0, 0, false},
+		{"zero limit", 770, 0, 0, 0, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			from, to, ok := envelopeWindow(tt.total, tt.offset, tt.limit)
+			if ok != tt.ok || from != tt.from || to != tt.to {
+				t.Errorf("envelopeWindow(%d, %d, %d) = (%d, %d, %v), want (%d, %d, %v)",
+					tt.total, tt.offset, tt.limit, from, to, ok, tt.from, tt.to, tt.ok)
+			}
+		})
+	}
+}

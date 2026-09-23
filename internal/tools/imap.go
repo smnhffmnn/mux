@@ -27,7 +27,8 @@ import (
 )
 
 const (
-	imapFetchLimit  = 200        // max messages to fetch for threading
+	imapFetchLimit  = 200        // page size: newest messages read per list window / lookup page
+	imapScanMax     = 5000       // max messages scanned (newest first) when locating a conversation
 	imapBodyMaxSize = 256 * 1024 // max raw message size for body extraction
 	imapTextMaxSize = 64 * 1024  // max extracted text body size
 )
@@ -35,7 +36,9 @@ const (
 // DefaultIMAPInstructions provides guidance for LLMs using IMAP tools.
 const DefaultIMAPInstructions = `IMAP mailbox with conversation threading. Conversations are grouped by subject.
 Conversation IDs are stable as long as the subject doesn't change.
-The inbox window is limited to the most recent ~200 messages.
+list_conversations reads a window of the newest 200 inbox messages; page backwards with offset (0, 200, 400 …).
+list_mailboxes reports messages/unseen per folder, so the number of pages can be computed.
+get/archive/delete/reply/forward locate a conversation beyond the window (newest 5000 messages, thread completed via subject search).
 Each tool call opens a fresh IMAP connection (no persistent session).
 Archive/delete operations move messages to Archive/Trash folders.
 Draft creation saves to the Drafts folder — it does NOT send.`
@@ -81,8 +84,9 @@ func (im *IMAP) Tools() []ToolDef {
 	return []ToolDef{
 		{
 			Tool: mcp.NewTool("list_conversations",
-				mcp.WithDescription("List IMAP inbox conversations grouped by thread. Returns conversations with latest message, participants, and message count."),
+				mcp.WithDescription("List IMAP inbox conversations grouped by thread. Reads a window of the newest 200 messages (offset 0); page backwards with offset 200, 400, … until list_mailboxes' message count is reached. Returns conversations with latest message, participants, and message count."),
 				mcp.WithNumber("limit", mcp.Description("Max conversations to return (default: 20)")),
+				mcp.WithNumber("offset", mcp.Description("Skip this many of the newest inbox messages before reading the 200-message window (default: 0). Counts messages, not conversations — a thread can appear on two adjacent pages.")),
 			),
 			Handler: im.handleListConversations,
 		},
@@ -103,7 +107,7 @@ func (im *IMAP) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("list_mailboxes",
-				mcp.WithDescription("List all IMAP mailbox folders."),
+				mcp.WithDescription("List all IMAP mailbox folders with their message and unseen counts."),
 			),
 			Handler: im.handleListMailboxes,
 		},
@@ -205,30 +209,67 @@ func (im *IMAP) withClient(ctx context.Context, fn func(*imapclient.Client) (*mc
 	return fn(c)
 }
 
-// fetchEnvelopes fetches the last N messages from the given mailbox.
+// envelopeWindow computes the sequence-number range of one page of the newest
+// messages: offset skips the newest messages, limit is the page size. ok is false
+// when the page lies beyond the mailbox (or the mailbox is empty).
+func envelopeWindow(total, offset, limit uint32) (from, to uint32, ok bool) {
+	if total == 0 || limit == 0 || offset >= total {
+		return 0, 0, false
+	}
+	to = total - offset
+	from = 1
+	if to > limit {
+		from = to - limit + 1
+	}
+	return from, to, true
+}
+
+// fetchEnvelopes fetches the newest N messages from the given mailbox.
 func fetchEnvelopes(c *imapclient.Client, mailbox string, limit uint32) ([]*imaplib.Message, error) {
+	msgs, _, err := fetchEnvelopesWindow(c, mailbox, 0, limit)
+	return msgs, err
+}
+
+// fetchEnvelopesWindow fetches one page of envelopes (see envelopeWindow) and
+// returns the mailbox's total message count alongside, so callers can page.
+func fetchEnvelopesWindow(c *imapclient.Client, mailbox string, offset, limit uint32) ([]*imaplib.Message, uint32, error) {
 	mbox, err := c.Select(mailbox, true)
 	if err != nil {
-		return nil, fmt.Errorf("SELECT %s: %w", mailbox, err)
+		return nil, 0, fmt.Errorf("SELECT %s: %w", mailbox, err)
 	}
-	if mbox.Messages == 0 {
-		return nil, nil
-	}
-
-	from := uint32(1)
-	if mbox.Messages > limit {
-		from = mbox.Messages - limit + 1
+	from, to, ok := envelopeWindow(mbox.Messages, offset, limit)
+	if !ok {
+		return nil, mbox.Messages, nil
 	}
 
 	seqSet := new(imaplib.SeqSet)
-	seqSet.AddRange(from, mbox.Messages)
+	seqSet.AddRange(from, to)
 
+	msgs, err := fetchEnvelopeSet(c, seqSet, false)
+	return msgs, mbox.Messages, err
+}
+
+// fetchEnvelopesByUID fetches envelopes for the given UIDs of the selected mailbox.
+func fetchEnvelopesByUID(c *imapclient.Client, uids []uint32) ([]*imaplib.Message, error) {
+	if len(uids) == 0 {
+		return nil, nil
+	}
+	seqSet := new(imaplib.SeqSet)
+	seqSet.AddNum(uids...)
+	return fetchEnvelopeSet(c, seqSet, true)
+}
+
+func fetchEnvelopeSet(c *imapclient.Client, seqSet *imaplib.SeqSet, byUID bool) ([]*imaplib.Message, error) {
 	items := []imaplib.FetchItem{imaplib.FetchEnvelope, imaplib.FetchUid, imaplib.FetchFlags}
 
 	messages := make(chan *imaplib.Message, 100)
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Fetch(seqSet, items, messages)
+		if byUID {
+			done <- c.UidFetch(seqSet, items, messages)
+		} else {
+			done <- c.Fetch(seqSet, items, messages)
+		}
 	}()
 
 	var result []*imaplib.Message
@@ -647,9 +688,13 @@ func (im *IMAP) handleListConversations(ctx context.Context, req mcp.CallToolReq
 	if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
 		limit = int(v)
 	}
+	var offset uint32
+	if v, ok := req.GetArguments()["offset"].(float64); ok && v > 0 {
+		offset = uint32(v)
+	}
 
 	return im.withClient(ctx, func(c *imapclient.Client) (*mcp.CallToolResult, error) {
-		rawMsgs, err := fetchEnvelopes(c, "INBOX", imapFetchLimit)
+		rawMsgs, _, err := fetchEnvelopesWindow(c, "INBOX", offset, imapFetchLimit)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -669,17 +714,9 @@ func (im *IMAP) handleGetConversation(ctx context.Context, req mcp.CallToolReque
 	}
 
 	return im.withClient(ctx, func(c *imapclient.Client) (*mcp.CallToolResult, error) {
-		rawMsgs, err := fetchEnvelopes(c, "INBOX", imapFetchLimit)
+		thread, err := im.findConversation(c, convID)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
-		}
-
-		msgs := msgsFromIMAP(rawMsgs)
-		groups := threadMessages(msgs)
-
-		thread, ok := groups[convID]
-		if !ok {
-			return mcp.NewToolResultError(fmt.Sprintf("conversation %s not found in recent messages", convID)), nil
 		}
 
 		uids := make([]uint32, len(thread))
@@ -724,13 +761,14 @@ func (im *IMAP) handleSearchMessages(ctx context.Context, req mcp.CallToolReques
 	}
 
 	return im.withClient(ctx, func(c *imapclient.Client) (*mcp.CallToolResult, error) {
-		// First: fetch all recent envelopes for consistent threading
+		// The newest window is threaded completely (consistent with list_conversations);
+		// matches older than the window are fetched by UID and threaded among themselves.
 		rawMsgs, err := fetchEnvelopes(c, "INBOX", imapFetchLimit)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		// Search for matching UIDs
+		// SEARCH runs server-side over the whole mailbox.
 		criteria := imaplib.NewSearchCriteria()
 		criteria.Text = []string{query}
 		matchedUIDs, err := c.UidSearch(criteria)
@@ -740,14 +778,33 @@ func (im *IMAP) handleSearchMessages(ctx context.Context, req mcp.CallToolReques
 		if len(matchedUIDs) == 0 {
 			return imapJSONResult([]imapConversation{})
 		}
+		if len(matchedUIDs) > imapScanMax {
+			matchedUIDs = matchedUIDs[len(matchedUIDs)-imapScanMax:] // UIDs ascend with age: keep the newest
+		}
 
-		// Build UID set for fast lookup
 		matchSet := make(map[uint32]bool, len(matchedUIDs))
 		for _, uid := range matchedUIDs {
 			matchSet[uid] = true
 		}
+		inWindow := make(map[uint32]bool, len(rawMsgs))
+		for _, m := range rawMsgs {
+			inWindow[m.Uid] = true
+		}
+		var older []uint32
+		for _, uid := range matchedUIDs {
+			if !inWindow[uid] {
+				older = append(older, uid)
+			}
+		}
+		if len(older) > 0 {
+			olderMsgs, err := fetchEnvelopesByUID(c, older)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			rawMsgs = append(rawMsgs, olderMsgs...)
+		}
 
-		// Thread all messages, then filter to conversations with at least one match
+		// Thread everything, then keep conversations with at least one match
 		msgs := msgsFromIMAP(rawMsgs)
 		groups := threadMessages(msgs)
 
@@ -774,16 +831,29 @@ func (im *IMAP) handleListMailboxes(ctx context.Context, _ mcp.CallToolRequest) 
 			done <- c.List("", "*", mailboxes)
 		}()
 
-		var result []map[string]any
+		var infos []*imaplib.MailboxInfo
 		for mbox := range mailboxes {
-			result = append(result, map[string]any{
-				"name":       mbox.Name,
-				"delimiter":  string(mbox.Delimiter),
-				"attributes": mbox.Attributes,
-			})
+			infos = append(infos, mbox)
 		}
 		if err := <-done; err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("LIST failed: %v", err)), nil
+		}
+
+		var result []map[string]any
+		for _, mbox := range infos {
+			entry := map[string]any{
+				"name":       mbox.Name,
+				"delimiter":  string(mbox.Delimiter),
+				"attributes": mbox.Attributes,
+			}
+			if !hasFlag(mbox.Attributes, imaplib.NoSelectAttr) {
+				// STATUS is cheap and lets callers size their paging (messages / 200 windows).
+				if st, err := c.Status(mbox.Name, []imaplib.StatusItem{imaplib.StatusMessages, imaplib.StatusUnseen}); err == nil {
+					entry["messages"] = st.Messages
+					entry["unseen"] = st.Unseen
+				}
+			}
+			result = append(result, entry)
 		}
 
 		return imapJSONResult(result)
@@ -1008,18 +1078,57 @@ func (im *IMAP) handleCreateForwardDraft(ctx context.Context, req mcp.CallToolRe
 // --- Shared helpers ---
 
 // findConversation fetches envelopes, threads them, and returns the messages for the given conversation ID.
+// findConversation locates a conversation anywhere in the newest imapScanMax inbox
+// messages: it scans page by page (newest first) until the thread appears, then
+// completes the thread with a server-side subject search, so messages of the same
+// conversation older than that page are included too.
 func (im *IMAP) findConversation(c *imapclient.Client, convID string) ([]imapMsg, error) {
-	rawMsgs, err := fetchEnvelopes(c, "INBOX", imapFetchLimit)
-	if err != nil {
-		return nil, err
+	var (
+		thread []imapMsg
+		total  uint32
+	)
+	for offset := uint32(0); ; offset += imapFetchLimit {
+		rawMsgs, mboxTotal, err := fetchEnvelopesWindow(c, "INBOX", offset, imapFetchLimit)
+		if err != nil {
+			return nil, err
+		}
+		total = mboxTotal
+		if len(rawMsgs) == 0 {
+			break
+		}
+		if t, ok := threadMessages(msgsFromIMAP(rawMsgs))[convID]; ok {
+			thread = t
+			break
+		}
+		next := offset + imapFetchLimit
+		if next >= total || next >= imapScanMax {
+			break
+		}
+	}
+	if len(thread) == 0 {
+		scanned := total
+		if scanned > imapScanMax {
+			scanned = imapScanMax
+		}
+		return nil, fmt.Errorf("conversation %s not found in the newest %d inbox messages", convID, scanned)
 	}
 
-	msgs := msgsFromIMAP(rawMsgs)
-	groups := threadMessages(msgs)
-
-	thread, ok := groups[convID]
-	if !ok {
-		return nil, fmt.Errorf("conversation %s not found in recent messages", convID)
+	// SEARCH SUBJECT is a case-insensitive substring match, so the normalized subject
+	// finds every Re:/Fwd: variant on any page; re-threading keeps only the messages
+	// whose conversation ID matches.
+	if core := normalizeSubject(thread[0].Subject); core != "" {
+		criteria := imaplib.NewSearchCriteria()
+		criteria.Header.Add("Subject", core)
+		if uids, err := c.UidSearch(criteria); err == nil && len(uids) > len(thread) {
+			if len(uids) > imapScanMax {
+				uids = uids[len(uids)-imapScanMax:]
+			}
+			if raw, err := fetchEnvelopesByUID(c, uids); err == nil {
+				if full, ok := threadMessages(msgsFromIMAP(raw))[convID]; ok && len(full) > len(thread) {
+					thread = full
+				}
+			}
+		}
 	}
 	return thread, nil
 }
