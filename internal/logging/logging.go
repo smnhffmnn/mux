@@ -22,18 +22,17 @@ const (
 	maxSize = 5 * 1024 * 1024
 )
 
-// Setup opens <dir>/logs/mux.log (rotating a grown file aside first) and
+// Setup opens <dir>/mux.log (rotating a grown file aside first) and
 // wires the standard logger to it. In stdio mode the file is the only
 // destination — stdout belongs to the MCP protocol and stderr stays as quiet
 // as it always was. Otherwise log lines go to both stderr and the file.
 // Every line carries the pid, because several instances (desktop app, stdio
 // bridges) may share one file. Returns the log file path.
 func Setup(dir string, stdio bool) (string, error) {
-	logDir := filepath.Join(dir, "logs")
-	if err := os.MkdirAll(logDir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create log directory: %w", err)
 	}
-	path := filepath.Join(logDir, fileName)
+	path := filepath.Join(dir, fileName)
 	rotate(path)
 
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)

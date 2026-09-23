@@ -29,7 +29,7 @@ func TestSetupCreatesFileAndWritesThroughLogger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	if want := filepath.Join(dir, "logs", "mux.log"); path != want {
+	if want := filepath.Join(dir, "mux.log"); path != want {
 		t.Fatalf("path = %q, want %q", path, want)
 	}
 	if Path() != path {
@@ -69,11 +69,7 @@ func TestSetupNonStdioKeepsStderr(t *testing.T) {
 func TestRotateMovesOversizedFile(t *testing.T) {
 	resetLogger(t)
 	dir := t.TempDir()
-	logDir := filepath.Join(dir, "logs")
-	if err := os.MkdirAll(logDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(logDir, "mux.log")
+	path := filepath.Join(dir, "mux.log")
 	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), maxSize+1), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -26,11 +26,11 @@ RUN CGO_ENABLED=0 go build -tags notray \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/mux .
 
-# An empty directory to copy in as the config dir. Distroless has no shell, so
-# there is no RUN mkdir in the runtime stage — the ownership has to be set by
-# the COPY that puts it there, or mux starts as nonroot against a root-owned
-# directory and cannot even open its log file.
-RUN mkdir -p /out/config/mux
+# Empty directories to copy in as the config and log dirs. Distroless has no
+# shell, so there is no RUN mkdir in the runtime stage — the ownership has to
+# be set by the COPY that puts them there, or mux starts as nonroot against
+# root-owned directories and cannot even open its log file.
+RUN mkdir -p /out/config/mux /out/state/mux
 
 # --- Runtime -------------------------------------------------------------
 # base-debian12 rather than static: mux resolves hostnames through the
@@ -40,6 +40,7 @@ FROM gcr.io/distroless/base-debian12:nonroot
 
 COPY --from=build /out/mux /mux
 COPY --from=build --chown=nonroot:nonroot /out/config /config
+COPY --from=build --chown=nonroot:nonroot /out/state /state
 
 # mux resolves its config directory as $XDG_CONFIG_HOME/mux, so the mount point
 # is /config/mux — which maps one-to-one onto ~/.config/mux on a host. Mounting
@@ -47,6 +48,10 @@ COPY --from=build --chown=nonroot:nonroot /out/config /config
 # defaults.
 ENV XDG_CONFIG_HOME=/config
 VOLUME ["/config/mux"]
+
+# The log file goes to $XDG_STATE_HOME/mux. The same lines reach stderr, so
+# `docker logs` has them without a mount; mount /state/mux to keep the file.
+ENV XDG_STATE_HOME=/state
 
 EXPOSE 7700
 

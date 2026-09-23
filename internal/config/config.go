@@ -81,6 +81,22 @@ func preferredDir(home string) string {
 	return filepath.Join(home, ".config", ServiceName)
 }
 
+// LogDir returns the directory mux writes its log file to.
+// Windows: <Dir()>\logs
+// Otherwise: $XDG_STATE_HOME/mux if set to an absolute path, ~/.local/state/mux
+// as fallback. Logs are state, not configuration, so they stay out of Dir().
+func LogDir() string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(Dir(), "logs")
+	}
+	// The spec requires ignoring relative values.
+	if xdg := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(xdg) {
+		return filepath.Join(xdg, ServiceName)
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "state", ServiceName)
+}
+
 // MigrateLegacyDir performs a one-time migration of ~/.mux to the preferred
 // XDG path. It is safe to call on every startup — the function is a no-op
 // when there is nothing to migrate, when both paths already exist, or on

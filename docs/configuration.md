@@ -99,7 +99,7 @@ The vault requires TLS for WebAuthn. See the [Vault section in the README](../RE
 
 ## Logs
 
-mux writes its diagnostics to `logs/mux.log` inside the default config directory (e.g. `~/.config/mux/logs/mux.log` — a `--config` override does not move the log), in every mode — including stdio, where stdout belongs to the MCP protocol and log output used to be discarded entirely. Desktop and headless instances additionally keep logging to stderr. Every line carries the writing instance's pid, because a desktop app and stdio bridges may share the file.
+mux writes its diagnostics to `$XDG_STATE_HOME/mux/mux.log` (default `~/.local/state/mux/mux.log`; on Windows `%USERPROFILE%\.mux\logs\mux.log`), in every mode — including stdio, where stdout belongs to the MCP protocol and log output used to be discarded entirely. Desktop and headless instances additionally keep logging to stderr. Every line carries the writing instance's pid, because a desktop app and stdio bridges may share the file.
 
 The file is rotated at startup once it exceeds 5 MB; one previous generation is kept as `mux.log.1`.
 
