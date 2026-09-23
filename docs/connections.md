@@ -122,7 +122,7 @@ type = "microsoft-graph"
 | `{name}_auth_status` | Check authentication status. |
 | `{name}_auth_login` | Start device code flow. Returns a `user_code` and verification URL. |
 | `{name}_auth_poll` | Poll for device code completion. Parameter: `device_code` (required). |
-| `{name}_list_conversations` | List inbox conversations grouped by thread. Parameter: `limit` (default: 20). |
+| `{name}_list_conversations` | List conversations grouped by thread. Reads a window of the newest messages (`limit`×3, at most 250) — page backwards with `offset` (messages to skip: 250, 500, …) until the folder's `totalItemCount` from `list_mail_folders` is reached. Parameters: `limit` (default: 20), `offset` (default: 0), `folder_id` (default: Inbox). |
 | `{name}_get_conversation` | Get all messages in a conversation, with full body. Scans recent messages across all folders by default; pass `folder_id` to scope to one folder. For a specific older/archived message, use `get_message`. Parameters: `conversation_id` (required), `folder_id` (optional). |
 | `{name}_get_message` | Get a single message by ID with full body, regardless of folder (incl. archived). Use to fetch the full body of a message found via `search_messages` (which returns only `bodyPreview`). Parameter: `message_id` (required). |
 | `{name}_archive_conversation` | Move all inbox messages of a conversation to Archive. Parameter: `conversation_id` (required). |
@@ -471,10 +471,10 @@ user = "user@example.com"
 
 | Tool | Description |
 |------|-------------|
-| `{name}_list_conversations` | List inbox conversations grouped by thread. Returns latest message, participants, and message count. Parameter: `limit` (optional). |
+| `{name}_list_conversations` | List inbox conversations grouped by thread. Reads a window of the newest 200 messages — page backwards with `offset` (messages to skip: 200, 400, …) until the count from `list_mailboxes` is reached. Returns latest message, participants, and message count. Parameters: `limit` (optional), `offset` (optional). |
 | `{name}_get_conversation` | Get all messages in a conversation thread with full body text. Parameter: `conversation_id` (required). |
 | `{name}_search_messages` | Search messages by text, grouped by conversation. Parameters: `query` (required), `limit` (optional). |
-| `{name}_list_mailboxes` | List all IMAP mailbox folders. |
+| `{name}_list_mailboxes` | List all IMAP mailbox folders with `messages` and `unseen` counts. |
 | `{name}_archive_conversation` | Archive a conversation (move to Archive or Trash). Parameter: `conversation_id` (required). |
 | `{name}_delete_conversation` | Delete a conversation (move to Trash, not permanent). Parameter: `conversation_id` (required). |
 | `{name}_create_reply_draft` | Create a reply draft for the latest message. Saved to Drafts, does NOT send. Parameters: `conversation_id`, `body` (required). |
