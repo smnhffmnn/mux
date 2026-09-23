@@ -47,23 +47,12 @@ Secrets in a mounted `secrets.toml` work as they do on a host. There is no
 keychain in the container — the keyring probe fails immediately
 (`dbus-launch: executable file not found`) and mux uses the file store.
 
-Mount it read-write. mux writes its log file there, and the config-management
-MCP tools (`connection_add`, `secret_set`, …) write `config.toml` and
-`secrets.toml`.
+Mount it read-write. The config-management MCP tools (`connection_add`,
+`secret_set`, …) write `config.toml` and `secrets.toml`.
 
-A read-only mount is workable but lossy, and it fails in a way worth knowing in
-advance. Config and secrets still load and connections still register, but mux
-cannot create `logs/` and reports `file logging unavailable: … read-only file
-system` on startup, then runs without a log file. Mounting the two files
-individually read-only avoids that, because the directory around them stays
-writable:
-
-```bash
-docker run \
-  -v ./config.toml:/config/mux/config.toml:ro \
-  -v ./secrets.toml:/config/mux/secrets.toml:ro \
-  mux:dev
-```
+The log file lives outside the config directory, at `/state/mux/mux.log`
+(`XDG_STATE_HOME=/state`). The same lines go to stderr and `docker logs`; mount
+`/state/mux` only to keep the file across container restarts.
 
 **Environment** — individual settings and secrets (`MUX_PORT`, and the
 per-connection variables listed in `config.example.toml`). Fine for single

@@ -184,11 +184,10 @@ More info: https://github.com/smnhffmnn/mux
 	// No-op on fresh installs and on Windows; logs and continues on failure.
 	config.MigrateLegacyDir()
 
-	// Route the standard logger to <config-dir>/logs/mux.log (after the
-	// migration, so the file lands in the final directory). Every mode gets
+	// Route the standard logger to <log-dir>/mux.log. Every mode gets
 	// the file; desktop/headless keep stderr alongside it. Without a file the
 	// previous behaviour remains: stderr when visible, silence in stdio.
-	logPath, logErr := logging.Setup(config.Dir(), useStdio)
+	logPath, logErr := logging.Setup(config.LogDir(), useStdio)
 	if logErr != nil {
 		// Also to stderr: in stdio mode the standard logger is still discarded
 		// at this point, and this is the one line explaining why no log exists.
