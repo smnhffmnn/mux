@@ -183,6 +183,29 @@ func oauthProxyMount(name, url string, port int, tokenStore *config.KeychainToke
 	}
 }
 
+// oauthAuthorizedMount returns the oauth.Manager callback for instances
+// without an App (headless mode): after a successful authorization it mounts
+// the freshly authorized proxy so its tools appear without a restart. The
+// mount runs in a goroutine — the callback is invoked synchronously from the
+// OAuth callback handler while the provider's browser redirect waits.
+func oauthAuthorizedMount(cfg *config.Config, s *server.MCPServer) func(string) {
+	return func(service string) {
+		conn := cfg.FindAnyConnection(service)
+		if conn == nil || conn.URL == "" {
+			return
+		}
+		url := conn.URL
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			mount := oauthProxyMount(service, url, cfg.Server.Port, config.NewKeychainTokenStore(service))
+			if err := proxy.RegisterMount(ctx, s, mount); err != nil {
+				log.Printf("[oauth] Failed to mount %s after authorization: %v", service, err)
+			}
+		}()
+	}
+}
+
 // newProxyTokenMount builds a non-OAuth proxy mount for a connection, honouring
 // a custom token header and extra static headers, and routing through the
 // connection's tunnel when one is set. It is fail-closed on tunnels: if the
