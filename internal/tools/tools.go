@@ -160,6 +160,12 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		if err == nil {
 			toolDefs = ya.Tools()
 		}
+	case config.TypeYouTrackREST:
+		var yr *YouTrackREST
+		yr, err = NewYouTrackREST(conn, dialer)
+		if err == nil {
+			toolDefs = yr.Tools()
+		}
 	case config.TypeHyperbrowser:
 		var hb *Hyperbrowser
 		hb, err = NewHyperbrowser(conn, dialer)
@@ -233,6 +239,8 @@ func DefaultInstructions(connType string) string {
 		return DefaultGoogleWorkspaceInstructions
 	case config.TypeHyperbrowser:
 		return DefaultHyperbrowserInstructions
+	case config.TypeYouTrackREST:
+		return DefaultYouTrackRESTInstructions
 	default:
 		return ""
 	}

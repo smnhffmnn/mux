@@ -179,4 +179,8 @@ type SaveConnectionRequest struct {
 	TokenScheme  string `json:"tokenScheme,omitempty"`
 	BasicSuffix  string `json:"basicSuffix,omitempty"`
 	Headers      string `json:"headers,omitempty"` // newline-separated "Name: Value" lines
+
+	// youtrack-rest write guards, newline-separated "Project:Field" entries.
+	ProtectedFields string `json:"protectedFields,omitempty"`
+	SetOnceFields   string `json:"setOnceFields,omitempty"`
 }

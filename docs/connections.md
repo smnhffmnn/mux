@@ -448,6 +448,65 @@ type = "asana"
 | `{name}_update_task` | Update an existing task. Parameters: `task` (required), `name`, `assignee`, `due_on`, `notes`, `completed` (optional). |
 | `{name}_search` | Search tasks in a workspace. Parameters: `workspace` (required), `text`, `assignee`, `completed`, `project`, `due_on_before`, `due_on_after` (optional). |
 
+### YouTrack REST
+
+Issues, comments, change history, attachments, agile boards and the administration API of a YouTrack instance over its REST API, shaped for a model: readable IDs, ISO 8601 timestamps in the token owner's profile time zone, custom fields as a name → value map, comments paged to completion, images as image content. Replaces the `youtrack` MCP-proxy alias for issue work and the `youtrack-agile` type for sprint queries (both keep working).
+
+**Required fields**: `name`, `type`, `url` (the YouTrack base URL — `https://instance.youtrack.cloud` or `https://host/youtrack`; no `/api`, no `/mcp`)
+
+**Optional fields**: `read_only` (default: false — reading tools only), `protected_fields`, `set_once_fields`, `tunnel`, `instructions`
+
+**Secret**: `{name}-token` in secret store (Permanent Token; the tools act as that account)
+
+Write guards are enforced in code for every client: `protected_fields` lists fields the connection never writes, `set_once_fields` fields it writes only while they are still empty. Entries read `Project:Field` or `Field` (every project).
+
+```toml
+[[connections]]
+name = "youtrack"
+type = "youtrack-rest"
+url = "https://instance.youtrack.cloud"
+protected_fields = ["P:Sprint priority"]
+set_once_fields = ["P:Department"]
+instructions = "P = projects, T = tickets. State Review means waiting for feedback."
+```
+
+**MCP tools exposed** (reading):
+
+| Tool | Description |
+|------|-------------|
+| `{name}_me` | Login, name, email and profile time zone of the account; whether the connection is read-only. |
+| `{name}_search_issues` | Search with YouTrack query syntax. Parameters: `query` (required), `top` (≤ 200), `skip`, `include_description`. Compact issues with all custom fields. |
+| `{name}_get_issue` | One issue in full: fields, tags, links by relation, attachments, watchers, all comments. Parameters: `issue` (required), `include_comments`, `include_description`. |
+| `{name}_get_comments` | Comments with author, timestamps, visibility, attachments. Parameters: `issue` (required), `top`, `skip` (whole thread without them). |
+| `{name}_get_activities` | Change history for one issue or a query. Parameters: `issue` or `query`, `categories`, `author`, `start`, `end`, `newest_first`, `top`, `skip`. |
+| `{name}_get_attachment` | Attachment content: images ≤ 5 MB as image content, small text inline, otherwise saved to a file. Parameters: `issue`, `attachment` (id or name), `output_file`. |
+| `{name}_list_projects` | Projects with id, short name, name, leader. Parameter: `include_archived`. |
+| `{name}_get_project` | A project with its fields: type, required, allowed values (resolved states separately). Parameter: `project`. |
+| `{name}_find_users` | Users by login, name or email fragment. Parameters: `query` (required), `top`. |
+| `{name}_list_link_types` | Link types and the relation phrases `link_issues` accepts. |
+| `{name}_list_boards` | Agile boards with projects and current sprint. |
+| `{name}_get_current_sprint` | Current sprint of a board (ISO dates). Parameter: `board` (id or name). |
+| `{name}_list_sprints` | Sprints of a board, newest first. Parameters: `board`, `top`. |
+
+**MCP tools exposed** (when `read_only = false`):
+
+| Tool | Description |
+|------|-------------|
+| `{name}_create_issue` | Parameters: `project`, `summary` (required), `description`, `fields` (name → value). |
+| `{name}_update_issue` | Parameters: `issue` (required), `summary`, `description`, `fields` (name → value; `null` clears). |
+| `{name}_add_comment` | Parameters: `issue`, `text` (required), `visibility_groups`, `visibility_users`. |
+| `{name}_attach` | Upload files streamed from disk, several per call. Parameters: `issue`, `file_paths` (required). Returns the full attachment list. |
+| `{name}_watch` | Add watchers. Parameters: `issue`, `users` (required). |
+| `{name}_link_issues` | Parameters: `issue`, `relation` (phrase as seen from issue, e.g. `parent for`), `target` (required). |
+| `{name}_log_work` | Parameters: `issue`, `duration` (`90` or `1h 30m`; required), `date` (YYYY-MM-DD), `text`, `type`. |
+| `{name}_run_command` | YouTrack command on one or more issues, the universal write path. Parameters: `issues`, `command` (required), `comment`, `silent`, `dry_run`. Same guards as the field tools. |
+| `{name}_admin_get` | Raw GET on `/api/admin/…` or `/hub/api/rest/…`. Parameters: `path` (required), `output_file`. |
+| `{name}_admin_request` | Raw POST/PUT/PATCH/DELETE on `/api/admin/…` or `/hub/api/rest/…`. Parameters: `method`, `path` (required), `body`. |
+
+Field values: strings for enum/state/version/build/owned/group values and user logins, arrays for multi-value fields, `YYYY-MM-DD` for date fields (stored as YouTrack does, 12:00 UTC), RFC 3339 or `YYYY-MM-DD HH:MM` in the profile time zone for date-and-time fields, numbers for integer/float, minutes or `1h 30m` for period fields.
+
+The endpoints and `fields=` selectors the type sends are listed in a registry and checked against YouTrack's published OpenAPI document (`/api/openapi.json`) by the test suite — vendored snapshot in `internal/tools/testdata/`, refreshed with `scripts/youtrack-openapi-snapshot.sh`; the `YouTrack API drift` workflow repeats the check weekly against the live document.
+
 ### IMAP
 
 Connects to an IMAP mailbox with conversation threading (subject-based grouping). Supports MIME parsing, RFC 2047 encoded headers, and common mailbox operations.
@@ -559,7 +618,7 @@ url = "https://mcp.sentry.dev/mcp"
 
 URLs ending in `/sse` use SSE transport; everything else uses Streamable HTTP.
 
-Proxy-type aliases (`youtrack`, `sentry`, `netdata`, `notion`, `asana-mcp`, `higgsfield`) behave identically to `proxy` but provide semantic clarity. `sentry` and `notion` additionally default `oauth = true`. `asana-mcp` defaults `oauth = true` and URL to `https://mcp.asana.com/v2/mcp`. `higgsfield` defaults `oauth = true`, URL to `https://mcp.higgsfield.ai/mcp`, and scopes to `openid email offline_access` (the `offline_access` scope obtains a refresh token, so the proxy keeps working without re-authentication).
+Proxy-type aliases (`youtrack`, `sentry`, `netdata`, `notion`, `asana-mcp`, `higgsfield`) behave identically to `proxy` but provide semantic clarity. `youtrack` proxies JetBrains' built-in YouTrack MCP server; for issue work prefer the native [YouTrack REST](#youtrack-rest) type. `sentry` and `notion` additionally default `oauth = true`. `asana-mcp` defaults `oauth = true` and URL to `https://mcp.asana.com/v2/mcp`. `higgsfield` defaults `oauth = true`, URL to `https://mcp.higgsfield.ai/mcp`, and scopes to `openid email offline_access` (the `offline_access` scope obtains a refresh token, so the proxy keeps working without re-authentication).
 
 ### Google Workspace
 

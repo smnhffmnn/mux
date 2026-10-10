@@ -54,7 +54,7 @@ var AllTypes = []TypeDef{
 		{Key: "token_header", Label: "Token Header (optional)", Placeholder: "Authorization: Bearer (default)"},
 		{Key: "headers", Label: "Headers (optional)", Placeholder: "One \"Name: Value\" per line", Multiline: true},
 	}},
-	{Type: TypeYouTrack, Label: "YouTrack", Fields: []TypeField{
+	{Type: TypeYouTrack, Label: "YouTrack (MCP proxy)", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "https://instance.myjetbrains.com/mcp"},
 		{Key: "token", Label: "Token", Placeholder: "perm:...", Secret: true},
 	}},
@@ -141,10 +141,16 @@ var AllTypes = []TypeDef{
 	{Type: TypeGoogleWorkspace, Label: "Google Workspace", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "http://localhost:8000/mcp"},
 	}},
-	{Type: TypeYouTrackAgile, Label: "YouTrack Agile", Fields: []TypeField{
+	{Type: TypeYouTrackAgile, Label: "YouTrack Agile (superseded by YouTrack REST)", Fields: []TypeField{
 		{Key: "url", Label: "Base URL", Placeholder: "https://instance.myjetbrains.com/youtrack"},
 		{Key: "token", Label: "Permanent Token", Placeholder: "perm:...", Secret: true},
 		{Key: "database", Label: "Board ID", Placeholder: "123-45"},
+	}},
+	{Type: TypeYouTrackREST, Label: "YouTrack REST", Fields: []TypeField{
+		{Key: "url", Label: "Base URL", Placeholder: "https://instance.youtrack.cloud or https://instance.myjetbrains.com/youtrack (no /api, no /mcp)"},
+		{Key: "token", Label: "Permanent Token", Placeholder: "perm:...", Secret: true},
+		{Key: "protected_fields", Label: "Protected fields (optional)", Placeholder: "One per line, \"Project:Field\" or \"Field\" — never written by this connection, e.g. P:Sprint priority", Multiline: true},
+		{Key: "set_once_fields", Label: "Set-once fields (optional)", Placeholder: "One per line, \"Project:Field\" or \"Field\" — written only while still empty, e.g. P:Department", Multiline: true},
 	}},
 	{Type: TypeHyperbrowser, Label: "Hyperbrowser", Fields: []TypeField{
 		{Key: "url", Label: "API URL", Placeholder: "https://api.hyperbrowser.ai (default)"},

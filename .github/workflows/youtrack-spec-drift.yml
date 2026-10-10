@@ -1,0 +1,41 @@
+name: YouTrack API drift
+
+# The youtrack-rest connection type is a hand-written adapter over YouTrack's
+# REST API. Its endpoints and field selectors are listed in a registry
+# (internal/tools/youtrack_rest.go) and checked against YouTrack's published
+# OpenAPI document by the spec tests. CI runs them against the vendored
+# snapshot; this workflow runs them against the live document every week, so
+# an upstream rename or removal fails here before it fails a user, and new API
+# surface shows up in the report as "not built yet".
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Fetch the live OpenAPI document
+        run: curl -fsSL --max-time 60 https://youtrack.jetbrains.com/api/openapi.json -o /tmp/youtrack-openapi.json
+
+      - name: Check the endpoints and selectors mux uses against the live document
+        run: YOUTRACK_OPENAPI=/tmp/youtrack-openapi.json go test ./internal/tools -run 'TestYouTrackREST_Spec' -count=1 -v
+
+      - name: Report what changed since the vendored snapshot
+        if: always()
+        run: scripts/youtrack-openapi-report.sh /tmp/youtrack-openapi.json internal/tools/testdata/youtrack-openapi.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: youtrack-openapi-live
+          path: /tmp/youtrack-openapi.json
+          retention-days: 30

@@ -181,6 +181,26 @@ export class Connection {
              */
             this["headers"] = undefined;
         }
+        if (/** @type {any} */(false)) {
+            /**
+             * ProtectedFields and SetOnceFields are write guards for connection types
+             * that edit issue fields (youtrack-rest). Entries read "Project:Field" or
+             * just "Field" (every project). A protected field is never written through
+             * this connection; a set-once field is written only while it is still
+             * empty. Enforced in code so the rule holds for every client and agent,
+             * not only for the ones that read the connection's instructions.
+             * @member
+             * @type {string[] | undefined}
+             */
+            this["protectedFields"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string[] | undefined}
+             */
+            this["setOnceFields"] = undefined;
+        }
 
         Object.assign(this, $$source);
     }
@@ -192,9 +212,17 @@ export class Connection {
      */
     static createFrom($$source = {}) {
         const $$createField21_0 = $$createType0;
+        const $$createField22_0 = $$createType1;
+        const $$createField23_0 = $$createType1;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("headers" in $$parsedSource) {
             $$parsedSource["headers"] = $$createField21_0($$parsedSource["headers"]);
+        }
+        if ("protectedFields" in $$parsedSource) {
+            $$parsedSource["protectedFields"] = $$createField22_0($$parsedSource["protectedFields"]);
+        }
+        if ("setOnceFields" in $$parsedSource) {
+            $$parsedSource["setOnceFields"] = $$createField23_0($$parsedSource["setOnceFields"]);
         }
         return new Connection(/** @type {Partial<Connection>} */($$parsedSource));
     }
@@ -202,3 +230,4 @@ export class Connection {
 
 // Private type creation functions
 const $$createType0 = $Create.Map($Create.Any, $Create.Any);
+const $$createType1 = $Create.Array($Create.Any);

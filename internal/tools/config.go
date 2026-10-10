@@ -118,6 +118,15 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 			mcp.WithString("headers",
 				mcp.Description("Extra HTTP headers sent with every request (http and proxy types), one 'Name: Value' per line (e.g. 'Notion-Version: 2022-06-28')."),
 			),
+			mcp.WithBoolean("read_only",
+				mcp.Description("Expose reading tools only (databases: no execute; http: no request; youtrack-rest: no write and no admin tools). Default false."),
+			),
+			mcp.WithString("protected_fields",
+				mcp.Description("youtrack-rest: fields this connection never writes, one per line as 'Project:Field' or 'Field' (e.g. 'P:Sprint priority')."),
+			),
+			mcp.WithString("set_once_fields",
+				mcp.Description("youtrack-rest: fields this connection writes only while they are still empty, one per line as 'Project:Field' or 'Field'."),
+			),
 		),
 		Handler: ct.handleConnectionAdd,
 	}
@@ -286,6 +295,12 @@ func (ct *ConfigTools) handleConnectionList(_ context.Context, _ mcp.CallToolReq
 		if c.Instructions != "" {
 			entry["instructions"] = c.Instructions
 		}
+		if len(c.ProtectedFields) > 0 {
+			entry["protected_fields"] = c.ProtectedFields
+		}
+		if len(c.SetOnceFields) > 0 {
+			entry["set_once_fields"] = c.SetOnceFields
+		}
 		entry["secrets_set"] = map[string]bool{
 			"password": c.Password != "",
 			"token":    c.Token != "",
@@ -412,6 +427,15 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 			return mcp.NewToolResultError(fmt.Sprintf("invalid headers: %v", err)), nil
 		}
 		conn.Headers = headers
+	}
+	if v, ok := req.GetArguments()["read_only"].(bool); ok {
+		conn.ReadOnly = v
+	}
+	if v := req.GetString("protected_fields", ""); v != "" {
+		conn.ProtectedFields = config.ParseLines(v)
+	}
+	if v := req.GetString("set_once_fields", ""); v != "" {
+		conn.SetOnceFields = config.ParseLines(v)
 	}
 
 	config.ApplyConnectionDefaults(&conn)
