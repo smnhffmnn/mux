@@ -428,14 +428,20 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 		}
 		conn.Headers = headers
 	}
-	if v, ok := req.GetArguments()["read_only"].(bool); ok {
-		conn.ReadOnly = v
+	if _, ok := req.GetArguments()["read_only"]; ok {
+		conn.ReadOnly = req.GetBool("read_only", false)
 	}
 	if v := req.GetString("protected_fields", ""); v != "" {
 		conn.ProtectedFields = config.ParseLines(v)
+		if err := config.ValidateFieldGuards(conn.ProtectedFields); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid protected_fields: %v", err)), nil
+		}
 	}
 	if v := req.GetString("set_once_fields", ""); v != "" {
 		conn.SetOnceFields = config.ParseLines(v)
+		if err := config.ValidateFieldGuards(conn.SetOnceFields); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid set_once_fields: %v", err)), nil
+		}
 	}
 
 	config.ApplyConnectionDefaults(&conn)

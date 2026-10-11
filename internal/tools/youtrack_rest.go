@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net"
@@ -75,8 +76,8 @@ type YouTrackREST struct {
 	token        string
 	readOnly     bool
 	instructions string
-	protected    []ytGuard
-	setOnce      []ytGuard
+	protected    []config.FieldGuard
+	setOnce      []config.FieldGuard
 	outputDir    string
 
 	tzMu sync.Mutex
@@ -95,11 +96,11 @@ func NewYouTrackREST(conn config.Connection, dialer Dialer) (*YouTrackREST, erro
 	if err != nil {
 		return nil, err
 	}
-	protected, err := parseYouTrackGuards(conn.ProtectedFields)
+	protected, err := config.ParseFieldGuards(conn.ProtectedFields)
 	if err != nil {
 		return nil, fmt.Errorf("youtrack-rest: protected_fields: %w", err)
 	}
-	setOnce, err := parseYouTrackGuards(conn.SetOnceFields)
+	setOnce, err := config.ParseFieldGuards(conn.SetOnceFields)
 	if err != nil {
 		return nil, fmt.Errorf("youtrack-rest: set_once_fields: %w", err)
 	}
@@ -169,9 +170,6 @@ type ytEndpoint struct {
 	// The spec test checks that they are still undocumented, so the entry
 	// moves to Params the day JetBrains documents them.
 	UndocumentedParams []string
-	// Raw marks the admin pass-through: the caller supplies the path, so
-	// there is nothing to resolve against the spec.
-	Raw bool
 }
 
 // Field selectors. Nested selectors on polymorphic properties (custom field
@@ -190,7 +188,7 @@ const (
 	ytIssueSearchFields  = ytIssueCompactFields + ",description"
 	ytIssueGuardFields   = "id,idReadable,project(id,shortName),customFields(name,$type,value(id,name,login))"
 	ytIssueWatchFields   = "id,idReadable,watchers(hasStar,issueWatchers(user(login)))"
-	ytActivityFields     = "id,$type,timestamp,author(login,fullName),category(id),target($type,id,idReadable),field(presentation,id,$type),added(id,$type,name,login,presentation,text,idReadable,summary),removed(id,$type,name,login,presentation,text,idReadable,summary)"
+	ytActivityFields     = "id,$type,timestamp,author(login,fullName),category(id),target($type,id,idReadable,issue(idReadable)),field(presentation,id,$type,customField(fieldType(id))),added(id,$type,name,login,presentation,text,idReadable,summary),removed(id,$type,name,login,presentation,text,idReadable,summary)"
 	ytWorkItemFields     = "id,date,duration(minutes,presentation),text,type(id,name),author(login),creator(login),created"
 	ytWorkItemTypeFields = "id,name"
 	ytProjectFields      = "id,shortName,name,archived,leader(login)"
@@ -204,8 +202,11 @@ const (
 	ytIDFields           = "id,idReadable"
 )
 
-// ytEndpoints is the complete list of REST calls the type can make. Handlers
-// address entries by key; call refuses anything that is not listed.
+// ytEndpoints is the complete list of REST calls the type can make through
+// call. Handlers address entries by key; call refuses anything that is not
+// listed. The admin pass-through (admin_get/admin_request) is the one path
+// beside it: the caller supplies the path, adminURL confines it to /api/admin
+// and /hub/api/rest, and there is nothing to resolve against the spec.
 var ytEndpoints = map[string]ytEndpoint{
 	"me":                    {Method: http.MethodGet, Path: "/users/me", Fields: ytMeFields},
 	"users":                 {Method: http.MethodGet, Path: "/users", Fields: ytUserFields, Params: []string{"$top"}, UndocumentedParams: []string{"query"}},
@@ -227,7 +228,6 @@ var ytEndpoints = map[string]ytEndpoint{
 	"issue.attachment.add":  {Method: http.MethodPost, Path: "/issues/{id}/attachments", Fields: ytAttachmentFields},
 	"issue.links":           {Method: http.MethodGet, Path: "/issues/{id}/links", Fields: ytLinkFields},
 	"issue.link.add":        {Method: http.MethodPost, Path: "/issues/{id}/links/{issueLinkId}/issues", Fields: ytIDFields},
-	"issue.workitems":       {Method: http.MethodGet, Path: "/issues/{id}/timeTracking/workItems", Fields: ytWorkItemFields, Params: []string{"$top", "$skip"}},
 	"issue.workitem.add":    {Method: http.MethodPost, Path: "/issues/{id}/timeTracking/workItems", Fields: ytWorkItemFields},
 	"issue.watcher.add":     {Method: http.MethodPost, Path: "/issues/{id}/watchers/issueWatchers", Fields: "user(login),isStarred", Undocumented: true},
 	"projects":              {Method: http.MethodGet, Path: "/admin/projects", Fields: ytProjectFields, Params: []string{"$top", "$skip"}},
@@ -240,7 +240,6 @@ var ytEndpoints = map[string]ytEndpoint{
 	"agile.sprints":         {Method: http.MethodGet, Path: "/agiles/{id}/sprints", Fields: ytSprintFields, Params: []string{"$top"}},
 	"commands":              {Method: http.MethodPost, Path: "/commands", Fields: ytCommandFields},
 	"commands.assist":       {Method: http.MethodPost, Path: "/commands/assist", Fields: ytAssistFields},
-	"admin.raw":             {Raw: true},
 }
 
 // --- HTTP ---
@@ -251,7 +250,7 @@ var ytEndpoints = map[string]ytEndpoint{
 // path and selector the type can send.
 func (y *YouTrackREST) call(ctx context.Context, key string, pathParams map[string]string, query url.Values, body any) ([]byte, int, error) {
 	ep, ok := ytEndpoints[key]
-	if !ok || ep.Raw {
+	if !ok {
 		return nil, 0, fmt.Errorf("youtrack-rest: endpoint %q is not registered", key)
 	}
 	path := ep.Path
@@ -580,51 +579,14 @@ func ytParsePeriod(v any) (int, error) {
 }
 
 // --- Write guards ---
-
-// ytGuard names a field in a project (Project "" = every project).
-type ytGuard struct {
-	Project string
-	Field   string
-}
-
-// parseYouTrackGuards reads "Project:Field" and "Field" entries. "*" stands
-// for every project. Field names keep their spelling; matching is
-// case-insensitive.
-func parseYouTrackGuards(entries []string) ([]ytGuard, error) {
-	var out []ytGuard
-	for _, e := range entries {
-		e = strings.TrimSpace(e)
-		if e == "" {
-			continue
-		}
-		project, field, found := strings.Cut(e, ":")
-		if !found {
-			field, project = project, ""
-		}
-		project = strings.TrimSpace(project)
-		field = strings.TrimSpace(field)
-		if project == "*" {
-			project = ""
-		}
-		if field == "" {
-			return nil, fmt.Errorf("entry %q names no field (expected \"Project:Field\" or \"Field\")", e)
-		}
-		out = append(out, ytGuard{Project: project, Field: field})
-	}
-	return out, nil
-}
-
-func (g ytGuard) matches(project, field string) bool {
-	if g.Project != "" && !strings.EqualFold(g.Project, project) {
-		return false
-	}
-	return strings.EqualFold(g.Field, field)
-}
+//
+// The guard lists are parsed by config.ParseFieldGuards (shared with the
+// desktop form and connection_add, which validate entries before saving).
 
 // isProtected reports whether a field may never be written in a project.
 func (y *YouTrackREST) isProtected(project, field string) bool {
 	for _, g := range y.protected {
-		if g.matches(project, field) {
+		if g.Matches(project, field) {
 			return true
 		}
 	}
@@ -634,7 +596,7 @@ func (y *YouTrackREST) isProtected(project, field string) bool {
 // isSetOnce reports whether a field may only be written while empty.
 func (y *YouTrackREST) isSetOnce(project, field string) bool {
 	for _, g := range y.setOnce {
-		if g.matches(project, field) {
+		if g.Matches(project, field) {
 			return true
 		}
 	}
@@ -649,13 +611,16 @@ func ytSetOnceError(project, field string, issue string) error {
 	return fmt.Errorf("field %q in project %s is set-once on this connection (set_once_fields) and already has a value on %s — not written", field, project, issue)
 }
 
-// ytCommandMentions reports whether a YouTrack command names a field: a
-// case-insensitive match on word boundaries. Field names with spaces
-// ("Sprint priority") match as a phrase. Conservative by design — a refused
-// command names the guard, a missed one would write the field.
+// ytCommandMentions reports whether a piece of command text names a field: a
+// case-insensitive match on word boundaries after collapsing whitespace on
+// both sides, so "Sprint  priority" still matches "Sprint priority". It runs
+// over the command as typed and over the descriptions YouTrack returns from
+// /commands/assist ("Set Priority High"), which name the canonical field even
+// when the command used a bare value or an alias. Conservative by design: a
+// refused command names the guard, a missed one would write the field.
 func ytCommandMentions(command, field string) bool {
-	c := strings.ToLower(command)
-	f := strings.ToLower(strings.TrimSpace(field))
+	c := strings.ToLower(strings.Join(strings.Fields(command), " "))
+	f := strings.ToLower(strings.Join(strings.Fields(field), " "))
 	if f == "" {
 		return false
 	}
@@ -673,6 +638,14 @@ func ytCommandMentions(command, field string) bool {
 		}
 		start = i + 1
 	}
+}
+
+var ytHTMLTag = regexp.MustCompile(`<[^>]*>`)
+
+// ytStripTags turns an HTML fragment from /commands/assist ("Set Priority
+// <span class=\"bold\">High</span>") into plain, single-spaced text.
+func ytStripTags(s string) string {
+	return strings.Join(strings.Fields(html.UnescapeString(ytHTMLTag.ReplaceAllString(s, ""))), " ")
 }
 
 func ytWordRune(r rune) bool {

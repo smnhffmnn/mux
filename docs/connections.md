@@ -462,7 +462,7 @@ Write guards are enforced in code for every client: `protected_fields` lists fie
 
 ```toml
 [[connections]]
-name = "youtrack"
+name = "youtrack-rest"
 type = "youtrack-rest"
 url = "https://instance.youtrack.cloud"
 protected_fields = ["P:Sprint priority"]
@@ -499,11 +499,11 @@ instructions = "P = projects, T = tickets. State Review means waiting for feedba
 | `{name}_watch` | Add watchers. Parameters: `issue`, `users` (required). |
 | `{name}_link_issues` | Parameters: `issue`, `relation` (phrase as seen from issue, e.g. `parent for`), `target` (required). |
 | `{name}_log_work` | Parameters: `issue`, `duration` (`90` or `1h 30m`; required), `date` (YYYY-MM-DD), `text`, `type`. |
-| `{name}_run_command` | YouTrack command on one or more issues, the universal write path. Parameters: `issues`, `command` (required), `comment`, `silent`, `dry_run`. Same guards as the field tools. |
-| `{name}_admin_get` | Raw GET on `/api/admin/…` or `/hub/api/rest/…`. Parameters: `path` (required), `output_file`. |
-| `{name}_admin_request` | Raw POST/PUT/PATCH/DELETE on `/api/admin/…` or `/hub/api/rest/…`. Parameters: `method`, `path` (required), `body`. |
+| `{name}_run_command` | YouTrack command on one or more issues, the universal write path. Parameters: `issues`, `command` (required), `comment`, `silent`, `dry_run`. YouTrack parses the command first (`/commands/assist`); a command it does not understand, or one whose parsed form touches a guarded field — also as a bare value or alias — is refused. |
+| `{name}_admin_get` | Raw GET on `/api/admin/…` or `/hub/api/rest/…`. Parameters: `path` (required), `output_file`. Paths are normalized before the prefix check; the issue subtree `/api/admin/projects/{id}/issues` is refused. |
+| `{name}_admin_request` | Raw POST/PUT/PATCH/DELETE on `/api/admin/…` or `/hub/api/rest/…`. Parameters: `method`, `path` (required), `body`. Same path rules as `admin_get`, so the field guards cannot be bypassed through the administration API. |
 
-Field values: strings for enum/state/version/build/owned/group values and user logins, arrays for multi-value fields, `YYYY-MM-DD` for date fields (stored as YouTrack does, 12:00 UTC), RFC 3339 or `YYYY-MM-DD HH:MM` in the profile time zone for date-and-time fields, numbers for integer/float, minutes or `1h 30m` for period fields.
+Field values: strings for enum/state/version/build/owned/group values and user logins, arrays for multi-value fields, `YYYY-MM-DD` for date fields (stored as YouTrack does, 12:00 UTC), RFC 3339 or `YYYY-MM-DD HH:MM` in the profile time zone for date-and-time fields, numbers for integer/float, minutes or `1h 30m` for period fields, `null` to clear a field. Work item dates and sprint bounds are rendered in UTC, the zone YouTrack stores them in.
 
 The endpoints and `fields=` selectors the type sends are listed in a registry and checked against YouTrack's published OpenAPI document (`/api/openapi.json`) by the test suite — vendored snapshot in `internal/tools/testdata/`, refreshed with `scripts/youtrack-openapi-snapshot.sh`; the `YouTrack API drift` workflow repeats the check weekly against the live document.
 

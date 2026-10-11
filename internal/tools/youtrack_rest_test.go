@@ -22,7 +22,9 @@ import (
 
 // A fake YouTrack: enough of the REST API for the handlers to exercise their
 // shaping, paging, guards and encodings. Requests are recorded so tests can
-// assert on what went out.
+// assert on what went out. Shapes follow what a production instance returned
+// while the type was built (field $types, link ids, activity items, error
+// bodies); the fake ignores fields= and answers full objects.
 
 type ytFake struct {
 	mu       sync.Mutex
@@ -35,24 +37,25 @@ type ytFakeRequest struct {
 	Path   string
 	Query  map[string]string
 	Body   string
-	Files  []string // multipart file names
+	Files  []string // multipart file parts as field=filename, sorted
 }
 
 const (
-	ytFakeDueDate = int64(1792065600000) // 2026-10-15T12:00:00Z — a date-only field as YouTrack stores it
-	ytFakeCreated = int64(1792054800000) // 2026-10-15T09:00:00Z
+	ytFakeDueDate  = int64(1792065600000) // 2026-10-15T12:00:00Z — a date-only field as YouTrack stores it
+	ytFakeCreated  = int64(1792054800000) // 2026-10-15T09:00:00Z
+	ytFakeMidnight = int64(1792022400000) // 2026-10-15T00:00:00Z — work item date / sprint start convention
 )
 
-func ytFakeIssueJSON(id string, department any) string {
+func ytFakeIssueJSON(id, internalID string, department any) string {
 	dep := "null"
 	if department != nil {
 		dep = fmt.Sprintf(`{"name":%q,"$type":"EnumBundleElement"}`, department)
 	}
 	return fmt.Sprintf(`{
-	  "id":"2-100","idReadable":%q,"summary":"Fix the thing","description":"Long text",
+	  "id":%q,"idReadable":%q,"summary":"Fix the thing","description":"Long text",
 	  "created":%d,"updated":%d,"resolved":null,
 	  "project":{"id":"77-27","shortName":"P","name":"Projects","$type":"Project"},
-	  "reporter":{"login":"jane.doe","name":"Jane Doe"},"updater":{"login":"john.roe"},
+	  "reporter":{"login":"jane.doe","fullName":"Jane Doe"},"updater":{"login":"john.roe"},
 	  "tags":[{"name":"reviewed"}],
 	  "visibility":{"$type":"UnlimitedVisibility"},
 	  "watchers":{"hasStar":true,"issueWatchers":[{"user":{"login":"john.roe"}}]},
@@ -62,7 +65,7 @@ func ytFakeIssueJSON(id string, department any) string {
 	    {"id":"57-0","direction":"BOTH","linkType":{"id":"57-0","name":"Relates","sourceToTarget":"relates to","targetToSource":"","directed":false},"issues":[]}
 	  ],
 	  "attachments":[{"id":"92-1","name":"shot.png","size":68,"mimeType":"image/png","created":%d,"author":{"login":"jane.doe"},"url":"/api/files/92-1?sign=abc"}],
-	  "commentsCount":2,
+	  "commentsCount":101,
 	  "customFields":[
 	    {"id":"1","name":"Priority","$type":"SingleEnumIssueCustomField","value":{"name":"High","$type":"EnumBundleElement"},"projectCustomField":{"field":{"name":"Priority","fieldType":{"id":"enum[1]"}}}},
 	    {"id":"2","name":"State","$type":"StateIssueCustomField","value":{"name":"Open","isResolved":false,"$type":"StateBundleElement"},"projectCustomField":{"field":{"name":"State","fieldType":{"id":"state[1]"}}}},
@@ -70,10 +73,10 @@ func ytFakeIssueJSON(id string, department any) string {
 	    {"id":"4","name":"Due date","$type":"DateIssueCustomField","value":%d,"projectCustomField":{"field":{"name":"Due date","fieldType":{"id":"date"}}}},
 	    {"id":"5","name":"Spent time","$type":"PeriodIssueCustomField","value":{"minutes":270,"presentation":"4h 30m","$type":"PeriodValue"},"projectCustomField":{"field":{"name":"Spent time","fieldType":{"id":"period"}}}},
 	    {"id":"6","name":"Fix versions","$type":"MultiVersionIssueCustomField","value":[{"name":"2026.20"},{"name":"2026.21"}],"projectCustomField":{"field":{"name":"Fix versions","fieldType":{"id":"version[*]"}}}},
-	    {"id":"7","name":"Sprint priority","$type":"SingleEnumIssueCustomField","value":null,"projectCustomField":{"field":{"name":"Sprint priority","fieldType":{"id":"enum[1]"}}}},
+	    {"id":"7","name":"Sprint priority","$type":"MultiVersionIssueCustomField","value":[],"projectCustomField":{"field":{"name":"Sprint priority","fieldType":{"id":"version[*]"}}}},
 	    {"id":"8","name":"Department","$type":"SingleEnumIssueCustomField","value":%s,"projectCustomField":{"field":{"name":"Department","fieldType":{"id":"enum[1]"}}}},
 	    {"id":"9","name":"Estimation","$type":"SimpleIssueCustomField","value":3,"projectCustomField":{"field":{"name":"Estimation","fieldType":{"id":"integer"}}}}
-	  ],"$type":"Issue"}`, id, ytFakeCreated, ytFakeCreated, ytFakeCreated, ytFakeDueDate, dep)
+	  ],"$type":"Issue"}`, internalID, id, ytFakeCreated, ytFakeCreated, ytFakeCreated, ytFakeDueDate, dep)
 }
 
 const ytFakeProjectFields = `[
@@ -83,7 +86,7 @@ const ytFakeProjectFields = `[
   {"id":"78-4","$type":"SimpleProjectCustomField","canBeEmpty":true,"field":{"name":"Due date","fieldType":{"id":"date"}}},
   {"id":"78-5","$type":"PeriodProjectCustomField","canBeEmpty":true,"field":{"name":"Spent time","fieldType":{"id":"period"}}},
   {"id":"78-6","$type":"VersionProjectCustomField","canBeEmpty":true,"field":{"name":"Fix versions","fieldType":{"id":"version[*]"}}},
-  {"id":"78-7","$type":"EnumProjectCustomField","canBeEmpty":true,"field":{"name":"Sprint priority","fieldType":{"id":"enum[1]"}}},
+  {"id":"78-7","$type":"VersionProjectCustomField","canBeEmpty":true,"field":{"name":"Sprint priority","fieldType":{"id":"version[*]"}}},
   {"id":"78-8","$type":"EnumProjectCustomField","canBeEmpty":true,"field":{"name":"Department","fieldType":{"id":"enum[1]"}}},
   {"id":"78-9","$type":"SimpleProjectCustomField","canBeEmpty":true,"field":{"name":"Estimation","fieldType":{"id":"integer"}}},
   {"id":"78-10","$type":"SimpleProjectCustomField","canBeEmpty":true,"field":{"name":"Deadline","fieldType":{"id":"date and time"}}}
@@ -91,6 +94,33 @@ const ytFakeProjectFields = `[
 
 // 1x1 transparent PNG.
 var ytFakePNG = []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0, 1, 0, 0, 5, 0, 1, 0x0d, 0x0a, 0x2d, 0xb4, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82}
+
+// ytFakeComments renders one page of the 101-comment thread of P-1: the
+// first two comments carry distinct authors and visibility, the rest are
+// filler, the 101st sits alone on the second page.
+func ytFakeComments(skip int) string {
+	var parts []string
+	for i := skip; i < skip+youtrackPageSize && i < 101; i++ {
+		switch i {
+		case 0:
+			parts = append(parts, fmt.Sprintf(`{"id":"4-1","text":"first","created":%d,"author":{"login":"jane.doe"},"visibility":{"$type":"UnlimitedVisibility"}}`, ytFakeCreated))
+		case 1:
+			parts = append(parts, fmt.Sprintf(`{"id":"4-2","text":"second","created":%d,"updated":%d,"author":{"login":"john.roe"},"visibility":{"$type":"LimitedVisibility","permittedGroups":[{"name":"IT"}]}}`, ytFakeCreated+3600000, ytFakeCreated+7200000))
+		default:
+			parts = append(parts, fmt.Sprintf(`{"id":"4-%d","text":"comment %d","created":%d,"author":{"login":"jane.doe"}}`, i+1, i+1, ytFakeCreated+int64(i)*60000))
+		}
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+const ytFakeActivities = `[
+  {"id":"a-1","$type":"CustomFieldActivityItem","timestamp":1792054800000,"author":{"login":"jane.doe"},"category":{"id":"CustomFieldCategory"},"target":{"$type":"Issue","id":"2-100","idReadable":"P-1"},"field":{"presentation":"State","id":"state","customField":{"fieldType":{"id":"state[1]"}}},"added":[{"name":"In Progress","$type":"StateBundleElement"}],"removed":[{"name":"Open","$type":"StateBundleElement"}]},
+  {"id":"a-2","$type":"CommentActivityItem","timestamp":1792058400000,"author":{"login":"john.roe"},"category":{"id":"CommentsCategory"},"target":{"$type":"IssueComment","id":"4-2","issue":{"idReadable":"P-1"}},"added":[{"text":"second","$type":"IssueComment"}],"removed":[]},
+  {"id":"a-3","$type":"SimpleValueActivityItem","timestamp":1792062000000,"author":{"login":"jane.doe"},"category":{"id":"CustomFieldCategory"},"target":{"$type":"Issue","id":"2-100","idReadable":"P-1"},"field":{"presentation":"Due date","id":"due","customField":{"fieldType":{"id":"date"}}},"added":1792065600000,"removed":1791979200000},
+  {"id":"a-4","$type":"IssueResolvedActivityItem","timestamp":1792065600000,"author":{"login":"jane.doe"},"category":{"id":"IssueResolvedCategory"},"target":{"$type":"Issue","id":"2-100","idReadable":"P-1"},"field":{"presentation":"resolved","id":"resolved"},"added":1792065600000,"removed":null},
+  {"id":"a-5","$type":"SimpleValueActivityItem","timestamp":1792065700000,"author":{"login":"jane.doe"},"category":{"id":"CustomFieldCategory"},"target":{"$type":"Issue","id":"2-100","idReadable":"P-1"},"field":{"presentation":"Estimation","id":"est","customField":{"fieldType":{"id":"integer"}}},"added":1500000,"removed":3},
+  {"id":"a-6","$type":"CustomFieldActivityItem","timestamp":1792065800000,"author":{"login":"jane.doe"},"category":{"id":"CustomFieldCategory"},"target":{"$type":"Issue","id":"2-100","idReadable":"P-1"},"field":{"presentation":"Spent time","id":"spent","customField":{"fieldType":{"id":"period"}}},"added":1652,"removed":1562}
+]`
 
 func newYTFake(t *testing.T) *ytFake {
 	t.Helper()
@@ -123,7 +153,9 @@ func newYTFake(t *testing.T) *ytFake {
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, body)
 	}
-	attachments := `[{"id":"92-1","name":"shot.png","size":68,"mimeType":"image/png","created":1792054800000,"author":{"login":"jane.doe"},"url":"/api/files/92-1?sign=abc"}%s]`
+	attachments := `[{"id":"92-1","name":"shot.png","size":68,"mimeType":"image/png","created":1792054800000,"author":{"login":"jane.doe"},"url":"/api/files/92-1?sign=abc"},` +
+		`{"id":"92-3","name":"notes.txt","size":11,"mimeType":"text/plain","created":1792054800000,"author":{"login":"jane.doe"},"url":"/api/files/92-3?sign=def"},` +
+		`{"id":"92-4","name":"blob.bin","size":4,"mimeType":"application/octet-stream","created":1792054800000,"author":{"login":"jane.doe"},"url":"/api/files/92-4?sign=ghi"}%s]`
 	var uploaded []string
 
 	mux.HandleFunc("/api/users/me", func(w http.ResponseWriter, r *http.Request) {
@@ -133,7 +165,7 @@ func newYTFake(t *testing.T) *ytFake {
 			io.WriteString(w, `{"error":"Unauthorized","error_description":"You are not logged in."}`)
 			return
 		}
-		jsonOK(w, `{"id":"26-0","login":"jane.doe","name":"Jane Doe","email":"jane@example.com","profiles":{"general":{"timezone":{"id":"Europe/Berlin","offset":120}}}}`)
+		jsonOK(w, `{"id":"26-0","login":"jane.doe","fullName":"Jane Doe","email":"jane@example.com","profiles":{"general":{"timezone":{"id":"Europe/Berlin","offset":120}}}}`)
 	})
 	mux.HandleFunc("/api/users", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
@@ -150,22 +182,22 @@ func newYTFake(t *testing.T) *ytFake {
 	mux.HandleFunc("/api/issues", func(w http.ResponseWriter, r *http.Request) {
 		rec := record(r)
 		if r.Method == http.MethodPost {
-			jsonOK(w, ytFakeIssueJSON("P-3", nil))
+			jsonOK(w, ytFakeIssueJSON("P-3", "2-300", nil))
 			return
 		}
 		if rec.Query["$skip"] == "50" {
 			jsonOK(w, `[]`)
 			return
 		}
-		jsonOK(w, "["+ytFakeIssueJSON("P-1", "IT")+","+ytFakeIssueJSON("P-2", nil)+"]")
+		jsonOK(w, "["+ytFakeIssueJSON("P-1", "2-100", "IT")+","+ytFakeIssueJSON("P-2", "2-200", nil)+"]")
 	})
 	mux.HandleFunc("/api/issues/P-1", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
-		jsonOK(w, ytFakeIssueJSON("P-1", "IT"))
+		jsonOK(w, ytFakeIssueJSON("P-1", "2-100", "IT"))
 	})
 	mux.HandleFunc("/api/issues/P-2", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
-		jsonOK(w, ytFakeIssueJSON("P-2", nil))
+		jsonOK(w, ytFakeIssueJSON("P-2", "2-200", nil))
 	})
 	mux.HandleFunc("/api/issues/P-404", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
@@ -178,11 +210,9 @@ func newYTFake(t *testing.T) *ytFake {
 			jsonOK(w, `{"id":"4-9","text":"posted","created":1792054800000,"author":{"login":"jane.doe"},"visibility":{"$type":"LimitedVisibility","permittedGroups":[{"name":"IT"}],"permittedUsers":[]}}`)
 			return
 		}
-		if rec.Query["$skip"] != "0" && rec.Query["$skip"] != "" {
-			jsonOK(w, `[]`)
-			return
-		}
-		jsonOK(w, `[{"id":"4-1","text":"first","created":1792054800000,"author":{"login":"jane.doe"},"visibility":{"$type":"UnlimitedVisibility"}},{"id":"4-2","text":"second","created":1792058400000,"updated":1792062000000,"author":{"login":"john.roe"},"visibility":{"$type":"LimitedVisibility","permittedGroups":[{"name":"IT"}]}}]`)
+		skip := 0
+		fmt.Sscanf(rec.Query["$skip"], "%d", &skip)
+		jsonOK(w, ytFakeComments(skip))
 	})
 	mux.HandleFunc("/api/issues/P-1/attachments", func(w http.ResponseWriter, r *http.Request) {
 		rec := record(r)
@@ -205,13 +235,23 @@ func newYTFake(t *testing.T) *ytFake {
 		w.Header().Set("Content-Type", "image/png")
 		w.Write(ytFakePNG)
 	})
+	mux.HandleFunc("/api/files/92-3", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		w.Header().Set("Content-Type", "text/plain")
+		io.WriteString(w, "hello notes")
+	})
+	mux.HandleFunc("/api/files/92-4", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Write([]byte{0, 1, 2, 3})
+	})
 	mux.HandleFunc("/api/issues/P-1/links", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
 		jsonOK(w, `[{"id":"57-3s","direction":"OUTWARD","linkType":{"id":"57-3","name":"Subtask","sourceToTarget":"parent for","targetToSource":"subtask of","directed":true},"issues":[]},{"id":"57-3t","direction":"INWARD","linkType":{"id":"57-3","name":"Subtask","sourceToTarget":"parent for","targetToSource":"subtask of","directed":true},"issues":[]},{"id":"57-0","direction":"BOTH","linkType":{"id":"57-0","name":"Relates","sourceToTarget":"relates to","targetToSource":"","directed":false},"issues":[]}]`)
 	})
 	mux.HandleFunc("/api/issues/P-1/links/57-3s/issues", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
-		jsonOK(w, `{"id":"2-100","idReadable":"P-2"}`)
+		jsonOK(w, `{"id":"2-200","idReadable":"P-2"}`)
 	})
 	mux.HandleFunc("/api/issues/P-1/watchers/issueWatchers", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
@@ -219,11 +259,15 @@ func newYTFake(t *testing.T) *ytFake {
 	})
 	mux.HandleFunc("/api/issues/P-1/timeTracking/workItems", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
-		jsonOK(w, `{"id":"142-1","date":1792022400000,"duration":{"minutes":90,"presentation":"1h 30m"},"text":"review","type":{"id":"63-0","name":"Development"},"author":{"login":"jane.doe"},"created":1792054800000}`)
+		jsonOK(w, fmt.Sprintf(`{"id":"142-1","date":%d,"duration":{"minutes":90,"presentation":"1h 30m"},"text":"review","type":{"id":"63-0","name":"Development"},"author":{"login":"jane.doe"},"created":%d}`, ytFakeMidnight, ytFakeCreated))
 	})
 	mux.HandleFunc("/api/issues/P-1/activities", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
-		jsonOK(w, `[{"id":"a-1","$type":"CustomFieldActivityItem","timestamp":1792054800000,"author":{"login":"jane.doe"},"category":{"id":"CustomFieldCategory"},"target":{"$type":"Issue","id":"2-100","idReadable":"P-1"},"field":{"presentation":"State","id":"state"},"added":[{"name":"In Progress","$type":"StateBundleElement"}],"removed":[{"name":"Open","$type":"StateBundleElement"}]},{"id":"a-2","$type":"CommentActivityItem","timestamp":1792058400000,"author":{"login":"john.roe"},"category":{"id":"CommentsCategory"},"target":{"$type":"IssueComment","id":"4-2"},"added":[{"text":"second","$type":"IssueComment"}],"removed":[]}]`)
+		jsonOK(w, ytFakeActivities)
+	})
+	mux.HandleFunc("/api/activities", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		jsonOK(w, ytFakeActivities)
 	})
 	mux.HandleFunc("/api/admin/projects", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
@@ -253,9 +297,37 @@ func newYTFake(t *testing.T) *ytFake {
 		record(r)
 		jsonOK(w, `{"issues":[{"idReadable":"P-1"}]}`)
 	})
+	// The assist fake parses the way YouTrack does: it names the canonical
+	// field for whatever the text sets, also for a bare value ("High" is read
+	// as a Sprint priority value here) and for irregular whitespace.
 	mux.HandleFunc("/api/commands/assist", func(w http.ResponseWriter, r *http.Request) {
-		record(r)
-		jsonOK(w, `{"commands":[{"description":"State Open","error":false}],"suggestions":[{"option":"Open","description":"State"}]}`)
+		rec := record(r)
+		var body struct {
+			Query string `json:"query"`
+		}
+		json.Unmarshal([]byte(rec.Body), &body)
+		q := strings.ToLower(strings.Join(strings.Fields(body.Query), " "))
+		var cmds []string
+		switch {
+		case strings.Contains(q, "bogus"):
+			cmds = append(cmds, `{"description":"Unknown command: bogus","error":true}`)
+		case q == "high":
+			cmds = append(cmds, `{"description":"Set Sprint priority <span class=\"bold\">High</span>","error":false}`)
+		default:
+			for _, part := range strings.Split(q, " and ") {
+				switch {
+				case strings.HasPrefix(part, "sprint priority"):
+					cmds = append(cmds, `{"description":"Set Sprint priority <span class=\"bold\">2026.21</span>","error":false}`)
+				case strings.HasPrefix(part, "department"):
+					cmds = append(cmds, `{"description":"Set Department <span class=\"bold\">Sales</span>","error":false}`)
+				case strings.HasPrefix(part, "state"):
+					cmds = append(cmds, `{"description":"Set State <span class=\"bold\">Open</span>","error":false}`)
+				default:
+					cmds = append(cmds, fmt.Sprintf(`{"description":%q,"error":false}`, "Add new tag <span class=\"bold\">"+part+"</span>"))
+				}
+			}
+		}
+		jsonOK(w, `{"commands":[`+strings.Join(cmds, ",")+`],"suggestions":[{"option":"Open","description":"State"}]}`)
 	})
 	mux.HandleFunc("/api/agiles", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
@@ -263,7 +335,7 @@ func newYTFake(t *testing.T) *ytFake {
 	})
 	mux.HandleFunc("/api/agiles/97-1/sprints/current", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
-		jsonOK(w, `{"id":"101-5","name":"2026.21","start":1792022400000,"finish":1793663999999,"goal":null,"archived":false,"isDefault":false,"unresolvedIssuesCount":7}`)
+		jsonOK(w, fmt.Sprintf(`{"id":"101-5","name":"2026.21","start":%d,"finish":1793663999999,"goal":null,"archived":false,"isDefault":false,"unresolvedIssuesCount":7}`, ytFakeMidnight))
 	})
 	mux.HandleFunc("/api/agiles/97-1/sprints", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
@@ -289,6 +361,18 @@ func (f *ytFake) last(method, pathSuffix string) (ytFakeRequest, bool) {
 		}
 	}
 	return ytFakeRequest{}, false
+}
+
+func (f *ytFake) count(method, pathSuffix string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, r := range f.requests {
+		if r.Method == method && strings.HasSuffix(r.Path, pathSuffix) {
+			n++
+		}
+	}
+	return n
 }
 
 func newTestYouTrack(t *testing.T, f *ytFake, mutate func(*config.Connection)) *YouTrackREST {
@@ -366,6 +450,22 @@ func TestYouTrackREST_BaseURL(t *testing.T) {
 	}
 }
 
+func TestYouTrackREST_Me(t *testing.T) {
+	f := newYTFake(t)
+	y := newTestYouTrack(t, f, nil)
+	res, err := y.handleMe(context.Background(), toolRequest(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := resultJSON(t, res)
+	if out["login"] != "jane.doe" || out["name"] != "Jane Doe" || out["time_zone"] != "Europe/Berlin" || out["read_only"] != false {
+		t.Errorf("me = %v", out)
+	}
+	if r, _ := f.last(http.MethodGet, "/api/users/me"); r.Query["fields"] != ytMeFields {
+		t.Errorf("me selector = %q", r.Query["fields"])
+	}
+}
+
 func TestYouTrackREST_GetIssueShapesTheIssue(t *testing.T) {
 	f := newYTFake(t)
 	y := newTestYouTrack(t, f, nil)
@@ -396,8 +496,8 @@ func TestYouTrackREST_GetIssueShapesTheIssue(t *testing.T) {
 	if fv := fields["Fix versions"].([]any); len(fv) != 2 || fv[0] != "2026.20" {
 		t.Errorf("multi value wrong: %v", fv)
 	}
-	if fields["Sprint priority"] != nil {
-		t.Errorf("empty field should be null, got %v", fields["Sprint priority"])
+	if sp, ok := fields["Sprint priority"].([]any); !ok || len(sp) != 0 {
+		t.Errorf("empty multi field should be [], got %v", fields["Sprint priority"])
 	}
 	if fields["Estimation"] != float64(3) {
 		t.Errorf("integer field = %v", fields["Estimation"])
@@ -409,12 +509,22 @@ func TestYouTrackREST_GetIssueShapesTheIssue(t *testing.T) {
 	if l := links[0].(map[string]any); l["role"] != "parent for" || l["issues"].([]any)[0] != "I-1" {
 		t.Errorf("link rendering wrong: %v", l)
 	}
+	// Comments are paged to completion: 100 on the first page, 1 on the second.
 	comments := out["comments"].([]any)
-	if len(comments) != 2 {
-		t.Fatalf("comments: want both pages merged, got %d", len(comments))
+	if len(comments) != 101 {
+		t.Fatalf("comments: want 101 merged over two pages, got %d", len(comments))
 	}
 	if c := comments[1].(map[string]any); c["visibility"] != "limited to group IT" || c["author"] != "john.roe" {
 		t.Errorf("comment rendering wrong: %v", c)
+	}
+	if c := comments[100].(map[string]any); c["text"] != "comment 101" {
+		t.Errorf("last comment = %v", c)
+	}
+	if n := f.count(http.MethodGet, "/api/issues/P-1/comments"); n != 2 {
+		t.Errorf("comments fetched in %d requests, want 2 pages", n)
+	}
+	if r, _ := f.last(http.MethodGet, "/api/issues/P-1/comments"); r.Query["$skip"] != "100" || r.Query["$top"] != "100" {
+		t.Errorf("second page query = %v", r.Query)
 	}
 	if w := out["watchers"].([]any); len(w) != 1 || w[0] != "john.roe" {
 		t.Errorf("watchers wrong: %v", w)
@@ -422,12 +532,33 @@ func TestYouTrackREST_GetIssueShapesTheIssue(t *testing.T) {
 	if out["url"] != f.srv.URL+"/issue/P-1" {
 		t.Errorf("url = %v", out["url"])
 	}
-	// Comments were paged with $top/$skip and the issue was fetched with the full selector.
-	if r, ok := f.last(http.MethodGet, "/api/issues/P-1/comments"); !ok || r.Query["$top"] != "100" {
-		t.Errorf("comments paging query = %v", r.Query)
-	}
 	if r, _ := f.last(http.MethodGet, "/api/issues/P-1"); r.Query["fields"] != ytIssueFields {
 		t.Errorf("issue selector = %q", r.Query["fields"])
+	}
+}
+
+func TestYouTrackREST_GetComments(t *testing.T) {
+	f := newYTFake(t)
+	y := newTestYouTrack(t, f, nil)
+	res, err := y.handleGetComments(context.Background(), toolRequest(map[string]any{"issue": "P-1"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := resultJSON(t, res)
+	if out["count"] != float64(101) || out["note"] != nil {
+		t.Errorf("whole thread: %v %v", out["count"], out["note"])
+	}
+	res, err = y.handleGetComments(context.Background(), toolRequest(map[string]any{"issue": "P-1", "top": float64(2), "skip": float64(1)}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = resultJSON(t, res)
+	r, _ := f.last(http.MethodGet, "/api/issues/P-1/comments")
+	if r.Query["$top"] != "2" || r.Query["$skip"] != "1" {
+		t.Errorf("page query = %v", r.Query)
+	}
+	if comments := out["comments"].([]any); len(comments) == 0 || comments[0].(map[string]any)["text"] != "second" {
+		t.Errorf("page content = %v", comments)
 	}
 }
 
@@ -462,6 +593,17 @@ func TestYouTrackREST_SearchPagesAndHints(t *testing.T) {
 	if r.Query["$top"] != "2" || r.Query["$skip"] != "0" || r.Query["query"] != "project: P" || r.Query["fields"] != ytIssueCompactFields {
 		t.Errorf("search query = %v", r.Query)
 	}
+	res, err = y.handleSearchIssues(context.Background(), toolRequest(map[string]any{"query": "project: P", "include_description": true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = resultJSON(t, res)
+	if out["issues"].([]any)[0].(map[string]any)["description"] != "Long text" {
+		t.Error("include_description must return the description")
+	}
+	if r, _ := f.last(http.MethodGet, "/api/issues"); r.Query["fields"] != ytIssueSearchFields {
+		t.Errorf("search selector with description = %q", r.Query["fields"])
+	}
 }
 
 func TestYouTrackREST_UpdateIssueGuardsAndEncoding(t *testing.T) {
@@ -470,7 +612,7 @@ func TestYouTrackREST_UpdateIssueGuardsAndEncoding(t *testing.T) {
 	ctx := context.Background()
 
 	// Protected field: refused before anything is written.
-	res, err := y.handleUpdateIssue(ctx, toolRequest(map[string]any{"issue": "P-1", "fields": map[string]any{"Sprint priority": "High"}}))
+	res, err := y.handleUpdateIssue(ctx, toolRequest(map[string]any{"issue": "P-1", "fields": map[string]any{"Sprint priority": "2026.21"}}))
 	mustError(t, res, err, "protected")
 	if _, posted := f.last(http.MethodPost, "/api/issues/P-1"); posted {
 		t.Fatal("protected field must not reach the server")
@@ -538,7 +680,7 @@ func TestYouTrackREST_UpdateIssueGuardsAndEncoding(t *testing.T) {
 		"State":        `{"name":"Closed"}`,
 		"Assignee":     `{"login":"john.roe"}`,
 		"Due date":     `1793707200000`, // 2026-11-03T12:00:00Z
-		"Spent time":   `{"minutes":90}`,
+		"Spent time":   `{"minutes":90,"presentation":"1h 30m"}`,
 		"Fix versions": `[{"name":"2026.22"}]`,
 		"Estimation":   `5`,
 		"Deadline":     `1793712600000`, // 2026-11-03 14:30 Europe/Berlin (CET) = 13:30Z
@@ -554,6 +696,18 @@ func TestYouTrackREST_UpdateIssueGuardsAndEncoding(t *testing.T) {
 	}
 	if r.Query["fields"] != ytIssueFields {
 		t.Errorf("update must request the full issue back, got %q", r.Query["fields"])
+	}
+
+	// Clearing a multi-value field sends an empty list, not null.
+	res, err = y.handleUpdateIssue(ctx, toolRequest(map[string]any{"issue": "P-1", "fields": map[string]any{"Fix versions": nil}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("clear failed: %s", resultText(t, res))
+	}
+	if r, _ := f.last(http.MethodPost, "/api/issues/P-1"); !strings.Contains(r.Body, `"value":[]`) {
+		t.Errorf("multi-value clear body = %s", r.Body)
 	}
 
 	// Unknown field names the project's fields.
@@ -598,38 +752,73 @@ func TestYouTrackREST_CreateIssueEncodesFromProjectSchema(t *testing.T) {
 	}
 	// Set-once fields may be set on creation (the field is empty by definition);
 	// protected fields may not.
-	res, err = y.handleCreateIssue(context.Background(), toolRequest(map[string]any{"project": "P", "summary": "x", "fields": map[string]any{"Sprint priority": "High"}}))
+	res, err = y.handleCreateIssue(context.Background(), toolRequest(map[string]any{"project": "P", "summary": "x", "fields": map[string]any{"Sprint priority": "2026.21"}}))
 	mustError(t, res, err, "protected")
 }
 
-func TestYouTrackREST_RunCommandGuardAndDryRun(t *testing.T) {
+func TestYouTrackREST_RunCommandGuardsThroughAssist(t *testing.T) {
 	f := newYTFake(t)
 	y := newTestYouTrack(t, f, nil)
 	ctx := context.Background()
+	run := func(args map[string]any) (*mcp.CallToolResult, error) {
+		return y.handleRunCommand(ctx, toolRequest(args))
+	}
 
-	res, err := y.handleRunCommand(ctx, toolRequest(map[string]any{"issues": []any{"P-1"}, "command": "sprint priority High State Open"}))
+	// Field named as typed: refused by the text pre-check, before assist.
+	res, err := run(map[string]any{"issues": []any{"P-1"}, "command": "sprint priority 2026.21 State Open"})
+	mustError(t, res, err, "protected")
+	if f.count(http.MethodPost, "/api/commands/assist") != 0 {
+		t.Fatal("text pre-check must refuse before asking YouTrack to parse")
+	}
+	// Irregular whitespace still matches.
+	res, err = run(map[string]any{"issues": []any{"P-1"}, "command": "Sprint  priority\t2026.21"})
+	mustError(t, res, err, "protected")
+
+	// Bare value: the text names no field, YouTrack's parse does.
+	res, err = run(map[string]any{"issues": []any{"P-1"}, "command": "High"})
 	mustError(t, res, err, "protected")
 	if _, posted := f.last(http.MethodPost, "/api/commands"); posted {
 		t.Fatal("guarded command must not be sent")
 	}
+
 	// Set-once: P-1 has a Department, P-2 does not.
-	res, err = y.handleRunCommand(ctx, toolRequest(map[string]any{"issues": []any{"P-2", "P-1"}, "command": "Department Sales"}))
+	res, err = run(map[string]any{"issues": []any{"P-2", "P-1"}, "command": "Department Sales"})
 	mustError(t, res, err, "set-once")
 	mustError(t, res, err, "P-1")
+	res, err = run(map[string]any{"issues": []any{"P-2"}, "command": "Department Sales"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("set-once on an empty field must pass: %s", resultText(t, res))
+	}
 
-	res, err = y.handleRunCommand(ctx, toolRequest(map[string]any{"issues": []any{"P-1"}, "command": "State Open", "dry_run": true}))
+	// A command YouTrack does not understand is refused, nothing applied.
+	before := f.count(http.MethodPost, "/api/commands")
+	res, err = run(map[string]any{"issues": []any{"P-1"}, "command": "bogus"})
+	mustError(t, res, err, "does not understand")
+	if f.count(http.MethodPost, "/api/commands") != before {
+		t.Fatal("unparseable command must not be applied")
+	}
+
+	// dry_run: parse plus the guard verdict, nothing applied.
+	res, err = run(map[string]any{"issues": []any{"P-1"}, "command": "High", "dry_run": true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := resultJSON(t, res)
-	if out["valid"] != true || out["dry_run"] != true {
+	if out["valid"] != true || out["dry_run"] != true || out["would_be_refused"] == nil {
 		t.Errorf("dry run result: %v", out)
 	}
-	if _, posted := f.last(http.MethodPost, "/api/commands"); posted {
-		t.Fatal("dry run must only call assist")
+	if parsed := out["parsed"].([]any); parsed[0].(map[string]any)["description"] != "Set Sprint priority High" {
+		t.Errorf("parsed description must be plain text: %v", parsed)
+	}
+	if f.count(http.MethodPost, "/api/commands") != before {
+		t.Fatal("dry run must not apply")
 	}
 
-	res, err = y.handleRunCommand(ctx, toolRequest(map[string]any{"issues": []any{"P-1"}, "command": "State Open", "comment": "done", "silent": true}))
+	// A clean command is applied with comment and silent, and the issues re-read.
+	res, err = run(map[string]any{"issues": []any{"P-1"}, "command": "State Open", "comment": "done", "silent": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -643,6 +832,9 @@ func TestYouTrackREST_RunCommandGuardAndDryRun(t *testing.T) {
 	}
 	if issues := out["issues"].([]any); len(issues) != 1 {
 		t.Errorf("command result must re-read the issues, got %v", out)
+	}
+	if r, _ := f.last(http.MethodPost, "/api/commands/assist"); !strings.Contains(r.Body, `"caret":10`) {
+		t.Errorf("assist caret must be the rune count, body = %s", r.Body)
 	}
 }
 
@@ -674,7 +866,7 @@ func TestYouTrackREST_AttachStreamsAllFiles(t *testing.T) {
 			uploaded++
 		}
 	}
-	if uploaded != 2 || len(atts) != 3 {
+	if uploaded != 2 || len(atts) != 5 {
 		t.Errorf("attachment list after upload: %v", atts)
 	}
 	if out["warning"] != nil {
@@ -723,8 +915,8 @@ func TestYouTrackREST_LinkIssuesResolvesRelation(t *testing.T) {
 	if !ok {
 		t.Fatal("link not posted to the outward subtask link")
 	}
-	if !strings.Contains(r.Body, `"id":"2-100"`) {
-		t.Errorf("link body must carry the target's internal id, got %s", r.Body)
+	if !strings.Contains(r.Body, `"id":"2-200"`) {
+		t.Errorf("link body must carry the target's internal id (2-200), got %s", r.Body)
 	}
 	res, err = y.handleLinkIssues(context.Background(), toolRequest(map[string]any{"issue": "P-1", "relation": "blocks", "target": "P-2"}))
 	mustError(t, res, err, "parent for")
@@ -748,6 +940,15 @@ func TestYouTrackREST_LogWork(t *testing.T) {
 	}
 	res, err = y.handleLogWork(context.Background(), toolRequest(map[string]any{"issue": "P-1", "duration": "2d"}))
 	mustError(t, res, err, "days and weeks")
+
+	// Work item dates are stored at 00:00 UTC; a profile zone west of UTC
+	// must still read the same day.
+	ny, _ := time.LoadLocation("America/New_York")
+	var w ytRawWorkItem
+	w.Date = ytFakeMidnight
+	if got := renderWorkItem(w, ny).Date; got != "2026-10-15" {
+		t.Errorf("work item date in New York = %s, want 2026-10-15", got)
+	}
 }
 
 func TestYouTrackREST_AddCommentWithVisibility(t *testing.T) {
@@ -767,10 +968,13 @@ func TestYouTrackREST_AddCommentWithVisibility(t *testing.T) {
 	}
 }
 
-func TestYouTrackREST_GetAttachmentInlinesImages(t *testing.T) {
+func TestYouTrackREST_GetAttachmentContentPaths(t *testing.T) {
 	f := newYTFake(t)
 	y := newTestYouTrack(t, f, nil)
-	res, err := y.handleGetAttachment(context.Background(), toolRequest(map[string]any{"issue": "P-1", "attachment": "shot.png"}))
+	ctx := context.Background()
+
+	// Image: inline image content.
+	res, err := y.handleGetAttachment(ctx, toolRequest(map[string]any{"issue": "P-1", "attachment": "shot.png"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -790,9 +994,32 @@ func TestYouTrackREST_GetAttachmentInlinesImages(t *testing.T) {
 		t.Errorf("download must follow the signed host-relative url, got %v", r)
 	}
 
+	// Text: inlined.
+	res, err = y.handleGetAttachment(ctx, toolRequest(map[string]any{"issue": "P-1", "attachment": "notes.txt"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError || !strings.Contains(resultText(t, res), "hello notes") {
+		t.Errorf("text attachment must be inlined: %s", resultText(t, res))
+	}
+
+	// Binary without output_file: saved under the output directory.
+	res, err = y.handleGetAttachment(ctx, toolRequest(map[string]any{"issue": "P-1", "attachment": "92-4"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := resultText(t, res)
+	if res.IsError || !strings.Contains(text, "Saved to: "+y.outputDir) {
+		t.Fatalf("binary attachment must be saved to the output directory: %s", text)
+	}
+	saved, _ := os.ReadDir(y.outputDir)
+	if len(saved) != 1 || !strings.Contains(saved[0].Name(), "blob.bin") {
+		t.Errorf("saved files = %v", saved)
+	}
+
 	// output_file wins over inlining.
 	dest := filepath.Join(t.TempDir(), "shot.png")
-	res, err = y.handleGetAttachment(context.Background(), toolRequest(map[string]any{"issue": "P-1", "attachment": "92-1", "output_file": dest}))
+	res, err = y.handleGetAttachment(ctx, toolRequest(map[string]any{"issue": "P-1", "attachment": "92-1", "output_file": dest}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -802,7 +1029,7 @@ func TestYouTrackREST_GetAttachmentInlinesImages(t *testing.T) {
 	if b, err := os.ReadFile(dest); err != nil || len(b) != len(ytFakePNG) {
 		t.Errorf("saved file wrong: %v, %d bytes", err, len(b))
 	}
-	res, err = y.handleGetAttachment(context.Background(), toolRequest(map[string]any{"issue": "P-1", "attachment": "missing.png"}))
+	res, err = y.handleGetAttachment(ctx, toolRequest(map[string]any{"issue": "P-1", "attachment": "missing.png"}))
 	mustError(t, res, err, "available: shot.png")
 }
 
@@ -817,27 +1044,59 @@ func TestYouTrackREST_ActivitiesAndSprints(t *testing.T) {
 	}
 	out := resultJSON(t, res)
 	acts := out["activities"].([]any)
-	if len(acts) != 2 {
+	if len(acts) != 6 {
 		t.Fatalf("activities = %v", acts)
 	}
 	a0 := acts[0].(map[string]any)
 	if a0["type"] != "field" || a0["field"] != "State" || a0["added"].([]any)[0] != "In Progress" || a0["removed"].([]any)[0] != "Open" {
 		t.Errorf("field activity = %v", a0)
 	}
-	if a1 := acts[1].(map[string]any); a1["type"] != "comment" || a1["added"].([]any)[0] != "second" {
+	// A comment activity targets the comment; the issue comes from target.issue.
+	if a1 := acts[1].(map[string]any); a1["type"] != "comment" || a1["added"].([]any)[0] != "second" || a1["issue"] != "P-1" {
 		t.Errorf("comment activity = %v", a1)
+	}
+	// Date field changes render as dates, resolution as a timestamp, numbers as written.
+	if a2 := acts[2].(map[string]any); a2["type"] != "field" || a2["added"].([]any)[0] != "2026-10-15" || a2["removed"].([]any)[0] != "2026-10-14" {
+		t.Errorf("date activity = %v", a2)
+	}
+	if a3 := acts[3].(map[string]any); a3["type"] != "resolved" || a3["added"].([]any)[0] != "2026-10-15T14:00:00+02:00" || a3["removed"] != nil {
+		t.Errorf("resolved activity = %v", a3)
+	}
+	if a4 := acts[4].(map[string]any); a4["added"].([]any)[0] != "1500000" || a4["removed"].([]any)[0] != "3" {
+		t.Errorf("integer activity = %v", a4)
+	}
+	if a5 := acts[5].(map[string]any); a5["added"].([]any)[0] != "27h 32m" || a5["removed"].([]any)[0] != "26h 2m" {
+		t.Errorf("period activity = %v", a5)
 	}
 	r, _ := f.last(http.MethodGet, "/api/issues/P-1/activities")
 	if r.Query["categories"] != ytDefaultActivityCategories || r.Query["start"] != "1790805600000" { // 2026-10-01 00:00 Europe/Berlin (CEST) = 2026-09-30T22:00Z
 		t.Errorf("activity query = %v", r.Query)
 	}
+	if r.Query["fields"] != ytActivityFields {
+		t.Errorf("activity selector = %q", r.Query["fields"])
+	}
 
+	// Query mode goes to /activities with issueQuery and author.
+	res, err = y.handleGetActivities(ctx, toolRequest(map[string]any{"query": "project: P", "author": "jane.doe", "categories": "CommentsCategory", "newest_first": true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = resultJSON(t, res)
+	r, ok := f.last(http.MethodGet, "/api/activities")
+	if !ok || r.Query["issueQuery"] != "project: P" || r.Query["author"] != "jane.doe" || r.Query["categories"] != "CommentsCategory" || r.Query["reverse"] != "true" {
+		t.Errorf("query-mode request = %v", r.Query)
+	}
+	if out["query"] != "project: P" {
+		t.Errorf("query-mode result = %v", out)
+	}
+
+	// Sprint bounds are rendered in UTC, the zone they are stored in.
 	res, err = y.handleGetCurrentSprint(ctx, toolRequest(map[string]any{"board": "sprint board"}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	out = resultJSON(t, res)
-	if out["name"] != "2026.21" || out["start"] != "2026-10-15T02:00:00+02:00" {
+	if out["name"] != "2026.21" || out["start"] != "2026-10-15T00:00:00Z" || out["finish"] != "2026-11-02T23:59:59Z" {
 		t.Errorf("sprint = %v", out)
 	}
 	res, err = y.handleListSprints(ctx, toolRequest(map[string]any{"board": "97-1", "top": float64(2)}))
@@ -884,6 +1143,23 @@ func TestYouTrackREST_ReadOnlyHidesWritesAndAdmin(t *testing.T) {
 	}
 }
 
+func TestYouTrackREST_DescribeGuards(t *testing.T) {
+	p := []config.FieldGuard{{Project: "P", Field: "Sprint priority"}}
+	s := []config.FieldGuard{{Field: "Department"}}
+	if got := describeGuards(nil, nil); got != "" {
+		t.Errorf("no guards: %q", got)
+	}
+	if got := describeGuards(nil, s); got != ` This connection writes the set-once fields "Department" (every project) only while they are still empty.` {
+		t.Errorf("set-once only: %q", got)
+	}
+	if got := describeGuards(p, nil); got != ` This connection refuses writes to the protected fields "Sprint priority" in P.` {
+		t.Errorf("protected only: %q", got)
+	}
+	if got := describeGuards(p, s); !strings.Contains(got, `"Sprint priority" in P and writes the set-once fields`) || strings.Contains(got, " to ;") {
+		t.Errorf("both: %q", got)
+	}
+}
+
 func TestYouTrackREST_AdminPassThrough(t *testing.T) {
 	f := newYTFake(t)
 	y := newTestYouTrack(t, f, nil)
@@ -896,6 +1172,9 @@ func TestYouTrackREST_AdminPassThrough(t *testing.T) {
 	if res.IsError || !strings.Contains(resultText(t, res), "Priorities") {
 		t.Errorf("admin_get: %s", resultText(t, res))
 	}
+	if r, _ := f.last(http.MethodGet, "/api/admin/customFieldSettings/bundles/enum"); r.Query["fields"] != "id,name" {
+		t.Errorf("query string must be forwarded, got %v", r.Query)
+	}
 	res, err = y.handleAdminGet(ctx, toolRequest(map[string]any{"path": "/hub/api/rest/users?fields=login"}))
 	if err != nil {
 		t.Fatal(err)
@@ -905,6 +1184,40 @@ func TestYouTrackREST_AdminPassThrough(t *testing.T) {
 	}
 	res, err = y.handleAdminGet(ctx, toolRequest(map[string]any{"path": "/api/issues/P-1"}))
 	mustError(t, res, err, "must start with /api/admin/")
+
+	// Dot segments, encoded separators and the issue subtree never reach the server.
+	before := len(f.requests)
+	for path, want := range map[string]string{
+		"/api/admin/../issues/P-1":                "not normalized",
+		"/api/admin/./projects":                   "not normalized",
+		"/api/admin//projects":                    "not normalized",
+		"/hub/api/rest/../../api/issues/P-1":      "not normalized",
+		"/api/admin/%2e%2e/issues/P-1":            "encoded",
+		"/api/admin/projects%2F..%2Fissues":       "encoded",
+		"/api/admin/projects/77-27/issues":        "addresses issues",
+		"/api/admin/projects/77-27/issues/2-100":  "addresses issues",
+		"/admin/projects/77-27/issues/2-100":      "addresses issues",
+		"https://evil.example/api/admin/projects": "not a URL",
+	} {
+		res, err = y.handleAdminRequest(ctx, toolRequest(map[string]any{"method": "POST", "path": path, "body": `{"customFields":[]}`}))
+		mustError(t, res, err, want)
+		res, err = y.handleAdminGet(ctx, toolRequest(map[string]any{"path": path}))
+		mustError(t, res, err, want)
+	}
+	if len(f.requests) != before {
+		t.Fatalf("refused admin paths must not produce requests, got %d", len(f.requests)-before)
+	}
+	// Allowed neighbours of the refused subtree still work.
+	for _, path := range []string{"/api/admin/projects/77-27/customFields", "/admin/projects/77-27", "/api/admin/projects/", "/api/admin/projects/77-27/customFields?$top=5"} {
+		u, err := y.adminURL(path)
+		if err != nil {
+			t.Errorf("%s refused: %v", path, err)
+		}
+		if !strings.HasPrefix(u, f.srv.URL+"/api/admin/projects") {
+			t.Errorf("%s resolved to %s", path, u)
+		}
+	}
+
 	res, err = y.handleAdminRequest(ctx, toolRequest(map[string]any{"method": "POST", "path": "/api/admin/customFieldSettings/bundles/enum", "body": "{not json"}))
 	mustError(t, res, err, "valid JSON")
 	res, err = y.handleAdminRequest(ctx, toolRequest(map[string]any{"method": "GET", "path": "/api/admin/x"}))
@@ -943,7 +1256,7 @@ func TestYouTrackREST_Helpers(t *testing.T) {
 	if ms, _ := ytParseDateOnly("2026-10-15"); ms != ytFakeDueDate {
 		t.Errorf("date-only must be noon UTC, got %d", ms)
 	}
-	if ms, _ := ytParseWorkDate("2026-10-15"); ms != 1792022400000 {
+	if ms, _ := ytParseWorkDate("2026-10-15"); ms != ytFakeMidnight {
 		t.Errorf("work date must be midnight UTC, got %d", ms)
 	}
 	if ytDate(ytFakeDueDate, berlin) != "2026-10-15" || ytDate(ytFakeDueDate, time.UTC) != "2026-10-15" {
@@ -965,17 +1278,22 @@ func TestYouTrackREST_Helpers(t *testing.T) {
 			t.Errorf("period %v must be refused", bad)
 		}
 	}
+	if ytPeriodPresentation(90) != "1h 30m" || ytPeriodPresentation(120) != "2h" || ytPeriodPresentation(45) != "45m" {
+		t.Error("period presentation is off")
+	}
 	if !ytCommandMentions("Sprint Priority High", "sprint priority") || ytCommandMentions("Department Sales", "Depart") || !ytCommandMentions("add tag x Department IT", "Department") {
 		t.Error("command mention matching is off")
 	}
-	guards, err := parseYouTrackGuards([]string{"P:Sprint priority", " Department ", "*:Tag"})
-	if err != nil || len(guards) != 3 || guards[0].Project != "P" || guards[1].Project != "" || guards[2].Project != "" || guards[2].Field != "Tag" {
-		t.Errorf("guards = %+v (%v)", guards, err)
+	if !ytCommandMentions("Sprint  priority\tHigh", "Sprint priority") || !ytCommandMentions("Set Sprint priority High", "sprint  priority") {
+		t.Error("command mention matching must collapse whitespace on both sides")
 	}
-	if _, err := parseYouTrackGuards([]string{"P:"}); err == nil {
-		t.Error("guard without field must be refused")
+	if got := ytStripTags(`Set Priority <span class="bold">High</span> &amp; more`); got != "Set Priority High & more" {
+		t.Errorf("strip tags = %q", got)
 	}
 	if y, err := NewYouTrackREST(config.Connection{URL: "https://x.youtrack.cloud/mcp", Token: "t"}, nil); err == nil || y != nil {
 		t.Error("MCP url must be refused at construction")
+	}
+	if _, err := NewYouTrackREST(config.Connection{URL: "https://x.youtrack.cloud", Token: "t", ProtectedFields: []string{"P:"}}, nil); err == nil || !strings.Contains(err.Error(), "protected_fields") {
+		t.Errorf("guard entry without field must be refused at construction, got %v", err)
 	}
 }

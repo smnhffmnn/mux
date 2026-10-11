@@ -1,7 +1,11 @@
 package tools
 
 import (
+	"strings"
+
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/smnhffmnn/mux/internal/config"
 )
 
 // Tools returns the MCP tools of a YouTrack REST connection. Read tools are
@@ -151,10 +155,7 @@ func (y *YouTrackREST) Tools() []ToolDef {
 		return tools
 	}
 
-	guardHint := ""
-	if len(y.protected)+len(y.setOnce) > 0 {
-		guardHint = " This connection refuses writes to " + describeGuards(y.protected, "protected") + describeGuards(y.setOnce, "set-once") + "."
-	}
+	guardHint := describeGuards(y.protected, y.setOnce)
 
 	tools = append(tools,
 		ToolDef{
@@ -228,7 +229,8 @@ func (y *YouTrackREST) Tools() []ToolDef {
 			Tool: mcp.NewTool("run_command",
 				mcp.WithDescription("Apply a YouTrack command to one or more issues — the universal write path for everything the dedicated tools do not cover (tags, sprint/board moves, bulk changes, workflow commands). "+
 					"Same syntax as the command dialog, e.g. \"State In Progress Assignee me\", \"add tag reviewed\", \"Fix versions 2026.21\". "+
-					"dry_run parses the command without applying it and returns what YouTrack understood."+guardHint),
+					"YouTrack parses the command first; a command it does not understand, or one that touches a guarded field, is refused and nothing is applied. "+
+					"dry_run returns the parse (and whether the guards would refuse it) without applying anything."+guardHint),
 				mcp.WithArray("issues", mcp.Required(), mcp.Description("Readable issue IDs"), mcp.WithStringItems()),
 				mcp.WithString("command", mcp.Required(), mcp.Description("Command text")),
 				mcp.WithString("comment", mcp.Description("Comment to add alongside the command")),
@@ -241,7 +243,7 @@ func (y *YouTrackREST) Tools() []ToolDef {
 		ToolDef{
 			Tool: mcp.NewTool("admin_get",
 				mcp.WithDescription("Raw GET against the administration API — /api/admin/… (projects, custom fields, bundles, workflows, link types) or /hub/api/rest/… (Hub: users, groups, roles). "+
-					"Pass fields= yourself; the JSON comes back as is. Reach: a project's workflow *usage* (/admin/projects/{id}/workflows) is not the workflow itself; a project's custom field is an instance of a global field prototype with its own bundle per project; a project role is not a global role."),
+					"Pass fields= yourself; the JSON comes back as is. Paths must be normalized (no . or .. segments); the issue subtree /api/admin/projects/{id}/issues is refused — issues have their own tools. Reach: a project's workflow *usage* (/admin/projects/{id}/workflows) is not the workflow itself; a project's custom field is an instance of a global field prototype with its own bundle per project; a project role is not a global role."),
 				mcp.WithString("path", mcp.Required(), mcp.Description("Path starting with /api/admin/ or /hub/api/rest/, including the query string")),
 				mcp.WithString("output_file", mcp.Description("Save the response to this absolute path (supports ~)")),
 				mcp.WithReadOnlyHintAnnotation(true),
@@ -251,6 +253,7 @@ func (y *YouTrackREST) Tools() []ToolDef {
 		ToolDef{
 			Tool: mcp.NewTool("admin_request",
 				mcp.WithDescription("Raw POST/PUT/PATCH/DELETE against /api/admin/… or /hub/api/rest/… with a JSON body — creates and changes projects, fields, bundles, workflow usages, roles. "+
+					"Paths must be normalized; the issue subtree /api/admin/projects/{id}/issues is refused so the field guards cannot be bypassed. "+
 					"Writes with the token owner's rights, which may be instance-wide: a DELETE of a role in a project view can remove a global assignment, and a bundle deletion affects every project sharing it. Read with admin_get first."),
 				mcp.WithString("method", mcp.Required(), mcp.Description("POST, PUT, PATCH or DELETE"), mcp.Enum("POST", "PUT", "PATCH", "DELETE")),
 				mcp.WithString("path", mcp.Required(), mcp.Description("Path starting with /api/admin/ or /hub/api/rest/, including the query string (add fields= to see the result)")),
@@ -263,26 +266,32 @@ func (y *YouTrackREST) Tools() []ToolDef {
 	return tools
 }
 
-// describeGuards renders a guard list for tool descriptions.
-func describeGuards(guards []ytGuard, kind string) string {
-	if len(guards) == 0 {
+// describeGuards renders the guard lists as one sentence for the write tools'
+// descriptions; "" when the connection has no guards.
+func describeGuards(protected, setOnce []config.FieldGuard) string {
+	var clauses []string
+	if len(protected) > 0 {
+		clauses = append(clauses, "refuses writes to the protected fields "+joinAnd(guardNames(protected)))
+	}
+	if len(setOnce) > 0 {
+		clauses = append(clauses, "writes the set-once fields "+joinAnd(guardNames(setOnce))+" only while they are still empty")
+	}
+	if len(clauses) == 0 {
 		return ""
 	}
-	var parts []string
+	return " This connection " + strings.Join(clauses, " and ") + "."
+}
+
+func guardNames(guards []config.FieldGuard) []string {
+	out := make([]string, 0, len(guards))
 	for _, g := range guards {
 		if g.Project == "" {
-			parts = append(parts, "\""+g.Field+"\" (every project)")
+			out = append(out, "\""+g.Field+"\" (every project)")
 		} else {
-			parts = append(parts, "\""+g.Field+"\" in "+g.Project)
+			out = append(out, "\""+g.Field+"\" in "+g.Project)
 		}
 	}
-	s := kind + " fields " + joinAnd(parts)
-	if kind == "set-once" {
-		s = "; and writes only while still empty to " + s
-	} else {
-		s = "the " + s
-	}
-	return s
+	return out
 }
 
 func joinAnd(parts []string) string {
@@ -292,16 +301,5 @@ func joinAnd(parts []string) string {
 	case 1:
 		return parts[0]
 	}
-	return joinWithComma(parts[:len(parts)-1]) + " and " + parts[len(parts)-1]
-}
-
-func joinWithComma(parts []string) string {
-	out := ""
-	for i, p := range parts {
-		if i > 0 {
-			out += ", "
-		}
-		out += p
-	}
-	return out
+	return strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
 }

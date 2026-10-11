@@ -12,11 +12,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -568,11 +571,9 @@ func (y *YouTrackREST) handleLogWork(ctx context.Context, req mcp.CallToolReques
 	return ytResultJSON(map[string]any{"issue": issue, "work_item": renderWorkItem(raw, loc)})
 }
 
-// guardCommand runs the field guards over a command text: a protected field
-// that the command names is refused outright; a set-once field is refused for
-// every target issue that already carries a value. Only guards whose project
-// matches a target issue's project are considered.
-func (y *YouTrackREST) guardCommand(ctx context.Context, issues []string, command string) ([]ytRawIssue, error) {
+// commandTargets loads the issues a command addresses — project and the
+// current values of their custom fields, the input of the guards.
+func (y *YouTrackREST) commandTargets(ctx context.Context, issues []string) ([]ytRawIssue, error) {
 	targets := make([]ytRawIssue, 0, len(issues))
 	for _, id := range issues {
 		var cur ytRawIssue
@@ -581,28 +582,66 @@ func (y *YouTrackREST) guardCommand(ctx context.Context, issues []string, comman
 		}
 		targets = append(targets, cur)
 	}
+	return targets, nil
+}
+
+// guardCommandText runs the field guards over one piece of command text: the
+// command as typed, and each command YouTrack parsed from it. A protected
+// field the text names is refused outright; a set-once field is refused for
+// every target that already carries a value. Only guards whose project
+// matches a target's project are considered.
+func (y *YouTrackREST) guardCommandText(targets []ytRawIssue, text string) error {
 	for _, t := range targets {
 		project := t.Project.ShortName
 		for _, g := range y.protected {
-			if (g.Project == "" || strings.EqualFold(g.Project, project)) && ytCommandMentions(command, g.Field) {
-				return nil, ytProtectedError(project, g.Field)
+			if g.MatchesProject(project) && ytCommandMentions(text, g.Field) {
+				return ytProtectedError(project, g.Field)
 			}
 		}
 		for _, g := range y.setOnce {
-			if g.Project != "" && !strings.EqualFold(g.Project, project) {
-				continue
-			}
-			if !ytCommandMentions(command, g.Field) {
+			if !g.MatchesProject(project) || !ytCommandMentions(text, g.Field) {
 				continue
 			}
 			for _, f := range t.CustomFields {
 				if strings.EqualFold(f.Name, g.Field) && !f.empty() {
-					return nil, ytSetOnceError(project, g.Field, t.IDReadable)
+					return ytSetOnceError(project, g.Field, t.IDReadable)
 				}
 			}
 		}
 	}
-	return targets, nil
+	return nil
+}
+
+type ytParsedCommand struct {
+	Description string `json:"description"`
+	Error       bool   `json:"error"`
+}
+
+type ytAssist struct {
+	Commands    []ytParsedCommand `json:"commands"`
+	Suggestions []struct {
+		Option      string `json:"option"`
+		Description string `json:"description"`
+	} `json:"suggestions"`
+}
+
+// assistCommand asks YouTrack to parse a command without applying it. The
+// descriptions come back as HTML fragments naming the canonical field ("Set
+// Priority <span class=\"bold\">High</span>" for the bare command "High");
+// tags are stripped so the guards and the caller see plain text.
+func (y *YouTrackREST) assistCommand(ctx context.Context, command string, issueRefs []map[string]string) (*ytAssist, error) {
+	body := map[string]any{"query": command, "caret": utf8.RuneCountInString(command), "issues": issueRefs}
+	var assist ytAssist
+	if err := y.callJSON(ctx, "commands.assist", nil, nil, body, &assist); err != nil {
+		return nil, err
+	}
+	for i := range assist.Commands {
+		assist.Commands[i].Description = ytStripTags(assist.Commands[i].Description)
+	}
+	for i := range assist.Suggestions {
+		assist.Suggestions[i].Description = ytStripTags(assist.Suggestions[i].Description)
+	}
+	return &assist, nil
 }
 
 func (y *YouTrackREST) handleRunCommand(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -614,46 +653,62 @@ func (y *YouTrackREST) handleRunCommand(ctx context.Context, req mcp.CallToolReq
 	if strings.TrimSpace(command) == "" || len(issues) == 0 {
 		return mcp.NewToolResultError("issues (one or more readable IDs) and command are required"), nil
 	}
-	if _, err := y.guardCommand(ctx, issues, command); err != nil {
+	targets, err := y.commandTargets(ctx, issues)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	// Cheap pre-check on the text as typed.
+	if err := y.guardCommandText(targets, command); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	issueRefs := make([]map[string]string, 0, len(issues))
 	for _, id := range issues {
 		issueRefs = append(issueRefs, map[string]string{"idReadable": id})
 	}
+	// YouTrack's own parse is the authority on which fields a command touches:
+	// a bare value ("High") or an alias never contains the field name, its
+	// parsed description ("Set Priority High") does.
+	assist, err := y.assistCommand(ctx, command, issueRefs)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	var parseErrors []string
+	var guardErr error
+	for _, c := range assist.Commands {
+		if c.Error {
+			parseErrors = append(parseErrors, c.Description)
+			continue
+		}
+		if guardErr == nil {
+			guardErr = y.guardCommandText(targets, c.Description)
+		}
+	}
 	if req.GetBool("dry_run", false) {
-		body := map[string]any{"query": command, "caret": len(command), "issues": issueRefs}
-		var assist struct {
-			Commands []struct {
-				Description string `json:"description"`
-				Error       bool   `json:"error"`
-			} `json:"commands"`
-			Suggestions []struct {
-				Option      string `json:"option"`
-				Description string `json:"description"`
-			} `json:"suggestions"`
-		}
-		if err := y.callJSON(ctx, "commands.assist", nil, nil, body, &assist); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		valid := len(assist.Commands) > 0
-		for _, c := range assist.Commands {
-			if c.Error {
-				valid = false
-			}
-		}
 		sugg := assist.Suggestions
 		if len(sugg) > 20 {
 			sugg = sugg[:20]
 		}
-		return ytResultJSON(map[string]any{
+		out := map[string]any{
 			"dry_run":     true,
 			"command":     command,
 			"issues":      issues,
-			"valid":       valid,
+			"valid":       len(assist.Commands) > 0 && len(parseErrors) == 0,
 			"parsed":      assist.Commands,
 			"suggestions": sugg,
-		})
+		}
+		if guardErr != nil {
+			out["would_be_refused"] = guardErr.Error()
+		}
+		return ytResultJSON(out)
+	}
+	if len(parseErrors) > 0 {
+		return mcp.NewToolResultError(fmt.Sprintf("YouTrack does not understand the command: %s — nothing applied (dry_run shows suggestions)", strings.Join(parseErrors, "; "))), nil
+	}
+	if len(assist.Commands) == 0 {
+		return mcp.NewToolResultError(fmt.Sprintf("YouTrack parsed no command from %q — nothing applied", command)), nil
+	}
+	if guardErr != nil {
+		return mcp.NewToolResultError(guardErr.Error()), nil
 	}
 	body := map[string]any{"query": command, "issues": issueRefs}
 	if comment := req.GetString("comment", ""); comment != "" {
@@ -677,31 +732,63 @@ func (y *YouTrackREST) handleRunCommand(ctx context.Context, req mcp.CallToolReq
 		}
 		after = append(after, y.renderIssue(raw, loc, false))
 	}
-	out := map[string]any{"command": command, "applied_to": issues, "issues": after}
+	out := map[string]any{"command": command, "applied": assist.Commands, "applied_to": issues, "issues": after}
 	if len(issues) > youtrackCommandRereads {
 		out["note"] = fmt.Sprintf("showing the first %d of %d issues", youtrackCommandRereads, len(issues))
 	}
 	return ytResultJSON(out)
 }
 
+// ytAdminIssuesPath matches the issue subtree of a project in the admin API
+// (/admin/projects/{id}/issues…). It creates and writes issues past the field
+// guards, so the pass-through refuses it: issues have their own tools.
+var ytAdminIssuesPath = regexp.MustCompile(`^/projects/[^/]+/issues(?:/|$)`)
+
 // adminURL resolves an admin pass-through path. Two roots are allowed:
 // /api/admin/… on the YouTrack base URL and /hub/api/rest/… on the host (Hub
 // lives beside YouTrack, not under its context path). The /admin/… shorthand
-// is accepted.
-func (y *YouTrackREST) adminURL(path string) (string, error) {
-	path = strings.TrimSpace(path)
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
+// is accepted. The path is parsed and cleaned before the prefix check, so dot
+// segments or encoded separators cannot walk out of the two subtrees.
+func (y *YouTrackREST) adminURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if strings.Contains(raw, "://") {
+		return "", fmt.Errorf("path %q must be an absolute path on the instance (/api/admin/… or /hub/api/rest/…), not a URL", raw)
 	}
+	if !strings.HasPrefix(raw, "/") {
+		raw = "/" + raw
+	}
+	lower := strings.ToLower(raw)
+	if strings.Contains(lower, "%2e") || strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") || strings.ContainsRune(raw, '\\') {
+		return "", fmt.Errorf("path %q: encoded dots, slashes or backslashes are not accepted", raw)
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.Opaque != "" || u.Path == "" {
+		return "", fmt.Errorf("path %q must be an absolute path on the instance (/api/admin/… or /hub/api/rest/…), not a URL", raw)
+	}
+	cleaned := path.Clean(u.Path)
+	if cleaned != u.Path && cleaned+"/" != u.Path {
+		return "", fmt.Errorf("path %q is not normalized (no . or .. segments, no double slashes)", raw)
+	}
+	var root, rel string
+	hub := false
 	switch {
-	case strings.HasPrefix(path, "/api/admin/") || path == "/api/admin":
-		return y.baseURL + path, nil
-	case strings.HasPrefix(path, "/admin/") || path == "/admin":
-		return y.apiURL + path, nil
-	case strings.HasPrefix(path, "/hub/api/rest/") || path == "/hub/api/rest":
-		return y.rootURL + path, nil
+	case cleaned == "/api/admin" || strings.HasPrefix(cleaned, "/api/admin/"):
+		root, rel = y.baseURL+"/api/admin", strings.TrimPrefix(cleaned, "/api/admin")
+	case cleaned == "/admin" || strings.HasPrefix(cleaned, "/admin/"):
+		root, rel = y.apiURL+"/admin", strings.TrimPrefix(cleaned, "/admin")
+	case cleaned == "/hub/api/rest" || strings.HasPrefix(cleaned, "/hub/api/rest/"):
+		root, rel, hub = y.rootURL+"/hub/api/rest", strings.TrimPrefix(cleaned, "/hub/api/rest"), true
+	default:
+		return "", fmt.Errorf("path must start with /api/admin/ (YouTrack administration) or /hub/api/rest/ (Hub: users, groups, roles), got %q — issue, comment and project reads have their own tools", raw)
 	}
-	return "", fmt.Errorf("path must start with /api/admin/ (YouTrack administration) or /hub/api/rest/ (Hub: users, groups, roles), got %q — issue, comment and project reads have their own tools", path)
+	if !hub && ytAdminIssuesPath.MatchString(rel) {
+		return "", fmt.Errorf("path %q addresses issues through the administration API — use the issue tools (create_issue, update_issue, run_command), where the field guards apply", raw)
+	}
+	full := root + rel
+	if u.RawQuery != "" {
+		full += "?" + u.RawQuery
+	}
+	return full, nil
 }
 
 func (y *YouTrackREST) handleAdminGet(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

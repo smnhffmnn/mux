@@ -146,10 +146,20 @@ type ytRawActivity struct {
 		Type       string `json:"$type"`
 		ID         string `json:"id"`
 		IDReadable string `json:"idReadable"`
+		// Comment, attachment and work-item activities target that entity, not
+		// the issue; the issue is one level down.
+		Issue *struct {
+			IDReadable string `json:"idReadable"`
+		} `json:"issue"`
 	} `json:"target"`
 	Field *struct {
 		Presentation string `json:"presentation"`
 		ID           string `json:"id"`
+		CustomField  *struct {
+			FieldType struct {
+				ID string `json:"id"`
+			} `json:"fieldType"`
+		} `json:"customField"`
 	} `json:"field"`
 	Added   json.RawMessage `json:"added"`
 	Removed json.RawMessage `json:"removed"`
@@ -512,9 +522,12 @@ func ytActivityTypeName(t string) string {
 }
 
 // ytActivityValues renders the added/removed side of an activity item. The
-// payload is polymorphic (field values, users, issues, comments, plain text);
-// each element becomes the most telling string it carries.
-func ytActivityValues(raw json.RawMessage) []string {
+// payload is polymorphic (field values, users, issues, comments, plain
+// values); each element becomes the most telling string it carries. kind
+// says how a bare number is to be read: "date", "date and time" and "period"
+// for custom-field changes of those types, "timestamp" for resolution times,
+// anything else leaves the number as written (never in exponent form).
+func ytActivityValues(raw json.RawMessage, kind string, loc *time.Location) []string {
 	s := strings.TrimSpace(string(raw))
 	if s == "" || s == "null" || s == "[]" {
 		return nil
@@ -534,12 +547,18 @@ func ytActivityValues(raw json.RawMessage) []string {
 			continue
 		}
 		if t[0] != '{' {
+			dec := json.NewDecoder(strings.NewReader(t))
+			dec.UseNumber()
 			var v any
-			if json.Unmarshal(it, &v) == nil {
-				out = append(out, fmt.Sprint(v))
-			} else {
+			if err := dec.Decode(&v); err != nil {
 				out = append(out, t)
+				continue
 			}
+			if n, ok := v.(json.Number); ok {
+				out = append(out, ytActivityNumber(n, kind, loc))
+				continue
+			}
+			out = append(out, fmt.Sprint(v))
 			continue
 		}
 		var obj map[string]any
@@ -569,22 +588,52 @@ func ytActivityValues(raw json.RawMessage) []string {
 	return out
 }
 
+// ytActivityNumber renders a numeric activity value according to kind.
+func ytActivityNumber(n json.Number, kind string, loc *time.Location) string {
+	ms, err := n.Int64()
+	if err != nil {
+		return n.String()
+	}
+	switch kind {
+	case "date":
+		return ytDate(ms, loc)
+	case "date and time", "timestamp":
+		return ytTime(ms, loc)
+	case "period":
+		// Period changes arrive as bare minutes (1562 → 26h 2m).
+		return ytPeriodPresentation(int(ms))
+	}
+	return n.String()
+}
+
 func str(v any) string {
 	s, _ := v.(string)
 	return s
 }
 
 func renderActivity(a ytRawActivity, loc *time.Location) ytActivityOut {
+	kind := ""
+	switch {
+	case a.Type == "IssueResolvedActivityItem":
+		kind = "timestamp"
+	case a.Field != nil && a.Field.CustomField != nil:
+		kind = a.Field.CustomField.FieldType.ID
+	}
 	out := ytActivityOut{
 		ID:        a.ID,
 		Type:      ytActivityTypeName(a.Type),
 		Timestamp: ytTime(a.Timestamp, loc),
 		Author:    ytRefName(a.Author),
-		Removed:   ytActivityValues(a.Removed),
-		Added:     ytActivityValues(a.Added),
+		Removed:   ytActivityValues(a.Removed, kind, loc),
+		Added:     ytActivityValues(a.Added, kind, loc),
 	}
-	if a.Target != nil && a.Target.IDReadable != "" {
-		out.Issue = a.Target.IDReadable
+	if a.Target != nil {
+		switch {
+		case a.Target.IDReadable != "":
+			out.Issue = a.Target.IDReadable
+		case a.Target.Issue != nil:
+			out.Issue = a.Target.Issue.IDReadable
+		}
 	}
 	if a.Field != nil {
 		out.Field = a.Field.Presentation
@@ -594,8 +643,11 @@ func renderActivity(a ytRawActivity, loc *time.Location) ytActivityOut {
 
 func renderWorkItem(w ytRawWorkItem, loc *time.Location) ytWorkItemOut {
 	out := ytWorkItemOut{
-		ID:           w.ID,
-		Date:         ytDate(w.Date, loc),
+		ID: w.ID,
+		// Work item dates are stored at 00:00 UTC (see ytParseWorkDate); read
+		// in UTC they name the same day everywhere, read in a zone west of UTC
+		// they would name the day before.
+		Date:         ytDate(w.Date, time.UTC),
 		Minutes:      w.Duration.Minutes,
 		Presentation: w.Duration.Presentation,
 		Text:         w.Text,
@@ -682,6 +734,9 @@ func ytWriteType(fieldType, current string) (string, error) {
 // for a field of the given project field type. nil clears the field.
 func ytEncodeValue(name, fieldType string, v any, loc *time.Location) (any, error) {
 	if v == nil {
+		if strings.HasSuffix(fieldType, "[*]") {
+			return []any{}, nil // a multi-value field is cleared with an empty list
+		}
 		return nil, nil
 	}
 	named := func(key string) (any, error) {
@@ -793,9 +848,23 @@ func ytEncodeValue(name, fieldType string, v any, loc *time.Location) (any, erro
 		if err != nil {
 			return nil, fmt.Errorf("field %q: %w", name, err)
 		}
-		return map[string]any{"minutes": minutes}, nil
+		// PeriodValue carries both; the document marks both read-only, so the
+		// write shape is sent in both forms until the live write test settles it.
+		return map[string]any{"minutes": minutes, "presentation": ytPeriodPresentation(minutes)}, nil
 	}
 	return nil, fmt.Errorf("field %q has type %q, which this connection cannot write", name, fieldType)
+}
+
+// ytPeriodPresentation renders minutes the way YouTrack does ("1h 30m", "45m").
+func ytPeriodPresentation(minutes int) string {
+	h, m := minutes/60, minutes%60
+	switch {
+	case h > 0 && m > 0:
+		return fmt.Sprintf("%dh %dm", h, m)
+	case h > 0:
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dm", m)
 }
 
 // ytFieldNames returns the sorted names of a project's fields — for error

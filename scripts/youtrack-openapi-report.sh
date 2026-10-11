@@ -19,8 +19,9 @@ paths_live="$(jq -r '.paths | keys[]' "$live" | sort)"
 paths_snap="$(jq -r '.paths | keys[]' "$snap" | sort)"
 added="$(comm -13 <(echo "$paths_snap") <(echo "$paths_live"))"
 removed="$(comm -23 <(echo "$paths_snap") <(echo "$paths_live"))"
-echo "paths added (${added:+$(echo "$added" | wc -l | tr -d ' ')}${added:-0}):"; echo "${added:-  none}" | sed 's/^/  /'
-echo "paths removed (${removed:+$(echo "$removed" | wc -l | tr -d ' ')}${removed:-0}):"; echo "${removed:-  none}" | sed 's/^/  /'
+count() { if [[ -n "$1" ]]; then printf '%s\n' "$1" | wc -l | tr -d ' '; else echo 0; fi; }
+echo "paths added ($(count "$added")):"; echo "${added:-  none}" | sed 's/^/  /'
+echo "paths removed ($(count "$removed")):"; echo "${removed:-  none}" | sed 's/^/  /'
 echo
 
 echo "methods changed on common paths:"

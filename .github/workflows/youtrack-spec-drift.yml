@@ -24,17 +24,18 @@ jobs:
           go-version-file: go.mod
 
       - name: Fetch the live OpenAPI document
+        id: fetch
         run: curl -fsSL --max-time 60 https://youtrack.jetbrains.com/api/openapi.json -o /tmp/youtrack-openapi.json
 
       - name: Check the endpoints and selectors mux uses against the live document
         run: YOUTRACK_OPENAPI=/tmp/youtrack-openapi.json go test ./internal/tools -run 'TestYouTrackREST_Spec' -count=1 -v
 
       - name: Report what changed since the vendored snapshot
-        if: always()
+        if: steps.fetch.outcome == 'success'
         run: scripts/youtrack-openapi-report.sh /tmp/youtrack-openapi.json internal/tools/testdata/youtrack-openapi.json
 
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: steps.fetch.outcome == 'success'
         with:
           name: youtrack-openapi-live
           path: /tmp/youtrack-openapi.json

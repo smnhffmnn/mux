@@ -293,9 +293,6 @@ func TestYouTrackREST_SpecEndpoints(t *testing.T) {
 
 	for _, key := range keys {
 		ep := ytEndpoints[key]
-		if ep.Raw {
-			continue
-		}
 		where := fmt.Sprintf("%s (%s %s)", key, ep.Method, ep.Path)
 		pathItem, exists := spec.Paths[ep.Path]
 		if ep.Undocumented {
@@ -379,9 +376,7 @@ func TestYouTrackREST_SpecCoverage(t *testing.T) {
 	spec := loadYouTrackSpec(t)
 	used := map[string]bool{}
 	for _, ep := range ytEndpoints {
-		if !ep.Raw {
-			used[ep.Path] = true
-		}
+		used[ep.Path] = true
 	}
 	var unused, admin []string
 	for p := range spec.Paths {

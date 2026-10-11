@@ -559,8 +559,16 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 			return nil, fmt.Errorf("invalid headers: %w", err)
 		}
 		conn.Headers = headers
-		conn.ProtectedFields = config.ParseLines(fields.ProtectedFields)
-		conn.SetOnceFields = config.ParseLines(fields.SetOnceFields)
+		protected := config.ParseLines(fields.ProtectedFields)
+		if err := config.ValidateFieldGuards(protected); err != nil {
+			return nil, fmt.Errorf("invalid protected_fields: %w", err)
+		}
+		setOnce := config.ParseLines(fields.SetOnceFields)
+		if err := config.ValidateFieldGuards(setOnce); err != nil {
+			return nil, fmt.Errorf("invalid set_once_fields: %w", err)
+		}
+		conn.ProtectedFields = protected
+		conn.SetOnceFields = setOnce
 	}
 
 	if fields.Password != "" {

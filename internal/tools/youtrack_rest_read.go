@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -635,13 +636,16 @@ type ytSprintOut struct {
 	Unresolved *int    `json:"unresolved_issues,omitempty"`
 }
 
-func (y *YouTrackREST) renderSprint(ctx context.Context, s ytRawSprint) ytSprintOut {
-	loc := y.location(ctx)
+// renderSprint renders sprint bounds in UTC: YouTrack stores them as
+// 00:00:00 and 23:59:59.999 UTC of the first and last day (observed on a
+// production board), so UTC names the right days for every reader while a
+// zone west of UTC would shift the start to the previous evening.
+func renderSprint(s ytRawSprint) ytSprintOut {
 	return ytSprintOut{
 		ID:         s.ID,
 		Name:       s.Name,
-		Start:      ytTimePtr(s.Start, loc),
-		Finish:     ytTimePtr(s.Finish, loc),
+		Start:      ytTimePtr(s.Start, time.UTC),
+		Finish:     ytTimePtr(s.Finish, time.UTC),
 		Goal:       s.Goal,
 		Archived:   s.Archived,
 		Default:    s.IsDefault,
@@ -662,7 +666,7 @@ func (y *YouTrackREST) handleGetCurrentSprint(ctx context.Context, req mcp.CallT
 	if err := y.callJSON(ctx, "agile.sprint", map[string]string{"id": id, "sprintId": "current"}, nil, nil, &raw); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return ytResultJSON(y.renderSprint(ctx, raw))
+	return ytResultJSON(renderSprint(raw))
 }
 
 func (y *YouTrackREST) handleListSprints(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -691,7 +695,7 @@ func (y *YouTrackREST) handleListSprints(ctx context.Context, req mcp.CallToolRe
 	}
 	out := make([]ytSprintOut, 0, len(raw))
 	for _, s := range raw {
-		out = append(out, y.renderSprint(ctx, s))
+		out = append(out, renderSprint(s))
 	}
 	return ytResultJSON(out)
 }
