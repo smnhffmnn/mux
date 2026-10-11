@@ -2,6 +2,8 @@
 
 Read-only access to a single YouTrack Agile Board for sprint queries (`get_current_sprint`, `list_sprints`).
 
+> Superseded by the **YouTrack REST** type, whose `list_boards`, `get_current_sprint` and `list_sprints` cover every board of the instance with ISO dates. Existing connections keep working.
+
 ## Prerequisites
 
 - A YouTrack instance and the ID of an Agile Board you want to query.

@@ -160,6 +160,15 @@ type Connection struct {
 	// types), e.g. API version headers like "Notion-Version: 2022-06-28". The
 	// vault-managed token header always wins over an entry of the same name.
 	Headers map[string]string `toml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ProtectedFields and SetOnceFields are write guards for connection types
+	// that edit issue fields (youtrack-rest). Entries read "Project:Field" or
+	// just "Field" (every project). A protected field is never written through
+	// this connection; a set-once field is written only while it is still
+	// empty. Enforced in code so the rule holds for every client and agent,
+	// not only for the ones that read the connection's instructions.
+	ProtectedFields []string `toml:"protected_fields,omitempty" json:"protectedFields,omitempty"`
+	SetOnceFields   []string `toml:"set_once_fields,omitempty" json:"setOnceFields,omitempty"`
 }
 
 // Enabled reports whether the connection has enough config to attempt a connection.
@@ -177,6 +186,8 @@ func (c *Connection) Enabled() bool {
 		return c.Token != ""
 	case c.Type == TypeYouTrackAgile:
 		return c.URL != "" && c.Token != "" && c.Database != ""
+	case c.Type == TypeYouTrackREST:
+		return c.URL != "" && c.Token != ""
 	case c.Type == TypeMeilisearch:
 		return c.Host != "" && c.Database != ""
 	case c.Type == TypeIMAP:

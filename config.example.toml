@@ -82,12 +82,22 @@ read_only = true
 # read_only = false                      # false enables {name}_execute tool
 # Password stored as secret (key: "local-dev-password")
 
-# Proxy: Bearer token (e.g. YouTrack)
+# Proxy: Bearer token (e.g. YouTrack's built-in MCP server)
 # [[connections]]
 # name = "youtrack"
 # type = "proxy"
 # url = "https://instance.myjetbrains.com/mcp"
 # Token stored as secret (key: "youtrack-token")
+
+# YouTrack over its REST API (issues, comments, history, attachments, boards, admin)
+# [[connections]]
+# name = "youtrack-rest"
+# type = "youtrack-rest"
+# url = "https://instance.youtrack.cloud"      # or https://host/youtrack — no /api, no /mcp
+# read_only = false                             # true: reading tools only
+# protected_fields = ["P:Sprint priority"]      # never written through this connection
+# set_once_fields = ["P:Department"]            # written only while still empty
+# Token stored as secret (key: "youtrack-rest-token")
 
 # Proxy: OAuth 2.0 + PKCE (e.g. Sentry — type "sentry" defaults oauth=true)
 # [[connections]]

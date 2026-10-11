@@ -127,6 +127,8 @@ All fields use **camelCase** JSON keys.
 | `tunnel` | string | no | Name of a tunnel to route through |
 | `instructions` | string | no | Instructions for AI agents describing the connection |
 | `monthlyLimit` | integer | no | Monthly request limit (brave only) |
+| `protectedFields` | string[] | no | youtrack-rest: fields never written through the connection, entries `"Project:Field"` or `"Field"` |
+| `setOnceFields` | string[] | no | youtrack-rest: fields written only while still empty, same entry form |
 
 ### Tunnel Object
 

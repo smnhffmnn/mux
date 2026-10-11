@@ -1,4 +1,6 @@
-# YouTrack
+# YouTrack (MCP proxy)
+
+Proxies JetBrains' built-in YouTrack MCP server. For issue work — attachments, change history, full comment threads, time-zone-correct dates, write guards — use the **YouTrack REST** type instead; this type stays for the tools only the MCP server offers.
 
 ## Prerequisites
 

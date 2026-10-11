@@ -701,6 +701,21 @@ export class SaveConnectionRequest {
              */
             this["headers"] = undefined;
         }
+        if (/** @type {any} */(false)) {
+            /**
+             * youtrack-rest write guards, newline-separated "Project:Field" entries.
+             * @member
+             * @type {string | undefined}
+             */
+            this["protectedFields"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["setOnceFields"] = undefined;
+        }
 
         Object.assign(this, $$source);
     }

@@ -28,6 +28,8 @@
     token_header: 'tokenHeader',
     token_scheme: 'tokenScheme',
     basic_suffix: 'basicSuffix',
+    protected_fields: 'protectedFields',
+    set_once_fields: 'setOnceFields',
   }
 
   async function handleSave() {

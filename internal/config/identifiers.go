@@ -20,6 +20,7 @@ const (
 	TypeProxy            = "proxy"
 	TypeYouTrack         = "youtrack"
 	TypeYouTrackAgile    = "youtrack-agile"
+	TypeYouTrackREST     = "youtrack-rest"
 	TypeSentry           = "sentry"
 	TypeNetdata          = "netdata"
 	TypeNotion           = "notion"

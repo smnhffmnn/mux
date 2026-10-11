@@ -259,7 +259,7 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 
 	var summary string
 	switch {
-	case config.IsProxyType(conn.Type), conn.Type == config.TypeHTTP, conn.Type == config.TypeFirecrawl, conn.Type == config.TypeBrave, conn.Type == config.TypeOpenAI, conn.Type == config.TypeElevenLabs, conn.Type == config.TypeRecraft, conn.Type == config.TypeIdeogram, conn.Type == config.TypeGemini, conn.Type == config.TypeHyperbrowser:
+	case config.IsProxyType(conn.Type), conn.Type == config.TypeHTTP, conn.Type == config.TypeFirecrawl, conn.Type == config.TypeBrave, conn.Type == config.TypeOpenAI, conn.Type == config.TypeElevenLabs, conn.Type == config.TypeRecraft, conn.Type == config.TypeIdeogram, conn.Type == config.TypeGemini, conn.Type == config.TypeHyperbrowser, conn.Type == config.TypeYouTrackREST:
 		summary = conn.URL
 	case conn.Type == config.TypeMicrosoftGraph:
 		summary = "Microsoft Graph API"
@@ -308,6 +308,10 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 					fi.Value = conn.BasicSuffix
 				case "headers":
 					fi.Value = config.FormatHeaderLines(conn.Headers)
+				case "protected_fields":
+					fi.Value = config.FormatLines(conn.ProtectedFields)
+				case "set_once_fields":
+					fi.Value = config.FormatLines(conn.SetOnceFields)
 				}
 			}
 			if fd.Secret {
@@ -555,6 +559,16 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 			return nil, fmt.Errorf("invalid headers: %w", err)
 		}
 		conn.Headers = headers
+		protected := config.ParseLines(fields.ProtectedFields)
+		if err := config.ValidateFieldGuards(protected); err != nil {
+			return nil, fmt.Errorf("invalid protected_fields: %w", err)
+		}
+		setOnce := config.ParseLines(fields.SetOnceFields)
+		if err := config.ValidateFieldGuards(setOnce); err != nil {
+			return nil, fmt.Errorf("invalid set_once_fields: %w", err)
+		}
+		conn.ProtectedFields = protected
+		conn.SetOnceFields = setOnce
 	}
 
 	if fields.Password != "" {
@@ -874,6 +888,8 @@ func (a *App) TestConnection(name string) *TestResult {
 		result = a.testMeilisearch(*conn)
 	case config.TypeYouTrackAgile:
 		result = a.testYouTrackAgile(*conn)
+	case config.TypeYouTrackREST:
+		result = a.testYouTrackREST(*conn)
 	case config.TypeAsana:
 		result = a.testAsana(*conn)
 	case config.TypeGemini:
@@ -2176,6 +2192,61 @@ func (a *App) testYouTrackAgile(conn config.Connection) testResponse {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Board %q not found (HTTP 404) — check the board ID", conn.Database)}
 	}
 	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: YouTrack Agile board %s (HTTP %d)", conn.Database, status)}
+}
+
+func (a *App) testYouTrackREST(conn config.Connection) testResponse {
+	if conn.URL == "" || conn.Token == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "Not configured (URL or token missing)"}
+	}
+	baseURL, _, err := tools.YouTrackBaseURL(conn.URL)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: err.Error()}
+	}
+	httpClient, ok := a.testHTTPClient(conn, 10*time.Second, false)
+	if !ok {
+		return tunnelUnavailable(conn)
+	}
+	url := baseURL + "/api/users/me?fields=login,fullName,profiles(general(timezone(id)))"
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("invalid URL: %v", err)}
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+conn.Token)
+	testLog(conn.Name, "GET %s", redactURL(url))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		testLog(conn.Name, "request failed: %v", err)
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
+	}
+	defer resp.Body.Close()
+	testLog(conn.Name, "HTTP %d", resp.StatusCode)
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Authentication failed (HTTP %d) — check your permanent token", resp.StatusCode)}
+	case resp.StatusCode == http.StatusNotFound:
+		return testResponse{Connection: conn.Name, Connected: false, Message: "HTTP 404 — the base URL should point at YouTrack itself (e.g. https://instance.youtrack.cloud or https://host/youtrack), without /api"}
+	case resp.StatusCode != http.StatusOK:
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Unexpected HTTP %d", resp.StatusCode)}
+	}
+	var me struct {
+		Login    string `json:"login"`
+		Profiles struct {
+			General struct {
+				Timezone struct {
+					ID string `json:"id"`
+				} `json:"timezone"`
+			} `json:"general"`
+		} `json:"profiles"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&me); err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Unexpected response (not the YouTrack API?): %v", err)}
+	}
+	msg := fmt.Sprintf("Connected as %s", me.Login)
+	if tz := me.Profiles.General.Timezone.ID; tz != "" {
+		msg += " (time zone " + tz + ")"
+	}
+	return testResponse{Connection: conn.Name, Connected: true, Message: msg}
 }
 
 // testTokenProxy tests a non-OAuth proxy connection by connecting exactly like
