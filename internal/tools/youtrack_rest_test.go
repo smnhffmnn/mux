@@ -86,7 +86,7 @@ const ytFakeProjectFields = `[
   {"id":"78-4","$type":"SimpleProjectCustomField","canBeEmpty":true,"field":{"name":"Due date","fieldType":{"id":"date"}}},
   {"id":"78-5","$type":"PeriodProjectCustomField","canBeEmpty":true,"field":{"name":"Spent time","fieldType":{"id":"period"}}},
   {"id":"78-6","$type":"VersionProjectCustomField","canBeEmpty":true,"field":{"name":"Fix versions","fieldType":{"id":"version[*]"}}},
-  {"id":"78-7","$type":"VersionProjectCustomField","canBeEmpty":true,"field":{"name":"Sprint priority","fieldType":{"id":"version[*]"}}},
+  {"id":"78-7","$type":"VersionProjectCustomField","canBeEmpty":true,"field":{"name":"Sprint priority","localizedName":"Sprint-Priorität","fieldType":{"id":"version[*]"}}},
   {"id":"78-8","$type":"EnumProjectCustomField","canBeEmpty":true,"field":{"name":"Department","fieldType":{"id":"enum[1]"}}},
   {"id":"78-9","$type":"SimpleProjectCustomField","canBeEmpty":true,"field":{"name":"Estimation","fieldType":{"id":"integer"}}},
   {"id":"78-10","$type":"SimpleProjectCustomField","canBeEmpty":true,"field":{"name":"Deadline","fieldType":{"id":"date and time"}}}
@@ -313,6 +313,9 @@ func newYTFake(t *testing.T) *ytFake {
 			cmds = append(cmds, `{"description":"Unknown command: bogus","error":true}`)
 		case q == "high":
 			cmds = append(cmds, `{"description":"Set Sprint priority <span class=\"bold\">High</span>","error":false}`)
+		case q == "hoch":
+			// A localized instance describes the command in its own language.
+			cmds = append(cmds, `{"description":"Setzen Sprint-Priorität <span class=\"bold\">Hoch</span>","error":false}`)
 		default:
 			for _, part := range strings.Split(q, " and ") {
 				switch {
@@ -780,6 +783,10 @@ func TestYouTrackREST_RunCommandGuardsThroughAssist(t *testing.T) {
 	if _, posted := f.last(http.MethodPost, "/api/commands"); posted {
 		t.Fatal("guarded command must not be sent")
 	}
+
+	// Localized instance: the parse names the field in the instance language.
+	res, err = run(map[string]any{"issues": []any{"P-1"}, "command": "Hoch"})
+	mustError(t, res, err, "protected")
 
 	// Set-once: P-1 has a Department, P-2 does not.
 	res, err = run(map[string]any{"issues": []any{"P-2", "P-1"}, "command": "Department Sales"})

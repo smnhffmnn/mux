@@ -499,7 +499,7 @@ instructions = "P = projects, T = tickets. State Review means waiting for feedba
 | `{name}_watch` | Add watchers. Parameters: `issue`, `users` (required). |
 | `{name}_link_issues` | Parameters: `issue`, `relation` (phrase as seen from issue, e.g. `parent for`), `target` (required). |
 | `{name}_log_work` | Parameters: `issue`, `duration` (`90` or `1h 30m`; required), `date` (YYYY-MM-DD), `text`, `type`. |
-| `{name}_run_command` | YouTrack command on one or more issues, the universal write path. Parameters: `issues`, `command` (required), `comment`, `silent`, `dry_run`. YouTrack parses the command first (`/commands/assist`); a command it does not understand, or one whose parsed form touches a guarded field — also as a bare value or alias — is refused. |
+| `{name}_run_command` | YouTrack command on one or more issues, the universal write path. Parameters: `issues`, `command` (required), `comment`, `silent`, `dry_run`. YouTrack parses the command first (`/commands/assist`); a command it does not understand, or one whose parsed form touches a guarded field — also as a bare value, an alias, or under the localized field name of a non-English instance — is refused. |
 | `{name}_admin_get` | Raw GET on `/api/admin/…` or `/hub/api/rest/…`. Parameters: `path` (required), `output_file`. Paths are normalized before the prefix check; the issue subtree `/api/admin/projects/{id}/issues` is refused. |
 | `{name}_admin_request` | Raw POST/PUT/PATCH/DELETE on `/api/admin/…` or `/hub/api/rest/…`. Parameters: `method`, `path` (required), `body`. Same path rules as `admin_get`, so the field guards cannot be bypassed through the administration API. |
 

@@ -193,7 +193,7 @@ const (
 	ytWorkItemTypeFields = "id,name"
 	ytProjectFields      = "id,shortName,name,archived,leader(login)"
 	ytProjectFullFields  = "id,shortName,name,description,archived,leader(login,fullName),createdBy(login)"
-	ytProjectFieldFields = "id,$type,canBeEmpty,emptyFieldText,isPublic,field(id,name,fieldType(id)),bundle(id,$type,values(id,name,isResolved,archived))"
+	ytProjectFieldFields = "id,$type,canBeEmpty,emptyFieldText,isPublic,field(id,name,localizedName,fieldType(id)),bundle(id,$type,values(id,name,isResolved,archived))"
 	ytLinkTypeFields     = "id,name,sourceToTarget,targetToSource,directed,aggregation"
 	ytAgileFields        = "id,name,projects(shortName),currentSprint(id,name),sprintsSettings(disableSprints)"
 	ytSprintFields       = "id,name,start,finish,goal,archived,isDefault,unresolvedIssuesCount"

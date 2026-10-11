@@ -585,21 +585,64 @@ func (y *YouTrackREST) commandTargets(ctx context.Context, issues []string) ([]y
 	return targets, nil
 }
 
+// ytGuardNameLookup lists the names a guarded field can appear under in a
+// project: its canonical name and, on a localized instance, the localized
+// name YouTrack uses in its own command descriptions ("Setzen Priorität
+// Kritisch" for Priority on a German instance).
+type ytGuardNameLookup func(projectID, field string) []string
+
+// guardNames loads the field names of every project the targets belong to
+// (one request per project) and returns the lookup guardCommandText uses.
+// A project whose fields cannot be read falls back to the canonical name.
+func (y *YouTrackREST) guardNames(ctx context.Context, targets []ytRawIssue) ytGuardNameLookup {
+	byProject := map[string]map[string]string{} // project id → lower(name) → localized name
+	for _, t := range targets {
+		if _, done := byProject[t.Project.ID]; done || t.Project.ID == "" {
+			continue
+		}
+		names := map[string]string{}
+		if fields, err := y.projectFields(ctx, t.Project.ID); err == nil {
+			for _, f := range fields {
+				if f.Field.LocalizedName != "" && !strings.EqualFold(f.Field.LocalizedName, f.Field.Name) {
+					names[strings.ToLower(f.Field.Name)] = f.Field.LocalizedName
+				}
+			}
+		}
+		byProject[t.Project.ID] = names
+	}
+	return func(projectID, field string) []string {
+		out := []string{field}
+		if loc := byProject[projectID][strings.ToLower(field)]; loc != "" {
+			out = append(out, loc)
+		}
+		return out
+	}
+}
+
 // guardCommandText runs the field guards over one piece of command text: the
 // command as typed, and each command YouTrack parsed from it. A protected
-// field the text names is refused outright; a set-once field is refused for
-// every target that already carries a value. Only guards whose project
-// matches a target's project are considered.
-func (y *YouTrackREST) guardCommandText(targets []ytRawIssue, text string) error {
+// field the text names — under its canonical or its localized name — is
+// refused outright; a set-once field is refused for every target that
+// already carries a value. Only guards whose project matches a target's
+// project are considered.
+func (y *YouTrackREST) guardCommandText(targets []ytRawIssue, text string, names ytGuardNameLookup) error {
+	mentions := func(projectID, field string) bool {
+		for _, n := range names(projectID, field) {
+			if ytCommandMentions(text, n) {
+				return true
+			}
+		}
+		return false
+	}
 	for _, t := range targets {
 		project := t.Project.ShortName
 		for _, g := range y.protected {
-			if g.MatchesProject(project) && ytCommandMentions(text, g.Field) {
+			if g.MatchesProject(project) && mentions(t.Project.ID, g.Field) {
 				return ytProtectedError(project, g.Field)
 			}
 		}
 		for _, g := range y.setOnce {
-			if !g.MatchesProject(project) || !ytCommandMentions(text, g.Field) {
+			if !g.MatchesProject(project) || !mentions(t.Project.ID, g.Field) {
 				continue
 			}
 			for _, f := range t.CustomFields {
@@ -657,8 +700,14 @@ func (y *YouTrackREST) handleRunCommand(ctx context.Context, req mcp.CallToolReq
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	var names ytGuardNameLookup
+	if len(y.protected)+len(y.setOnce) > 0 {
+		names = y.guardNames(ctx, targets)
+	} else {
+		names = func(_, field string) []string { return []string{field} }
+	}
 	// Cheap pre-check on the text as typed.
-	if err := y.guardCommandText(targets, command); err != nil {
+	if err := y.guardCommandText(targets, command, names); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	issueRefs := make([]map[string]string, 0, len(issues))
@@ -680,7 +729,7 @@ func (y *YouTrackREST) handleRunCommand(ctx context.Context, req mcp.CallToolReq
 			continue
 		}
 		if guardErr == nil {
-			guardErr = y.guardCommandText(targets, c.Description)
+			guardErr = y.guardCommandText(targets, c.Description, names)
 		}
 	}
 	if req.GetBool("dry_run", false) {

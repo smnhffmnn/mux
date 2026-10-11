@@ -186,9 +186,10 @@ type ytRawProjectField struct {
 	EmptyFieldText string `json:"emptyFieldText"`
 	IsPublic       bool   `json:"isPublic"`
 	Field          struct {
-		ID        string `json:"id"`
-		Name      string `json:"name"`
-		FieldType struct {
+		ID            string `json:"id"`
+		Name          string `json:"name"`
+		LocalizedName string `json:"localizedName"`
+		FieldType     struct {
 			ID string `json:"id"`
 		} `json:"fieldType"`
 	} `json:"field"`
