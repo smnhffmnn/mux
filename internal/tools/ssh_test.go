@@ -577,8 +577,10 @@ func TestSSH_ExecOutputFileAndErrors(t *testing.T) {
 		t.Errorf("stderr truncation not announced:\n%s", text(res)[:min(len(text(res)), 300)])
 	}
 
-	// Killed by a signal from the host side is reported as such.
-	res = call(t, s, "exec", map[string]any{"args": []any{"sh", "-c", "kill -TERM $$"}})
+	// Killed by a signal from the host side is reported as such. KILL, not
+	// TERM: dash (Linux /bin/sh) handles TERM itself and exits 143, bash on
+	// macOS dies by the signal — KILL ends the shell the same way everywhere.
+	res = call(t, s, "exec", map[string]any{"args": []any{"sh", "-c", "kill -KILL $$"}})
 	if !res.IsError || !strings.Contains(text(res), "killed by signal") {
 		t.Errorf("signal death: %s", text(res))
 	}
