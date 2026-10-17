@@ -64,6 +64,8 @@ itself, so a file that lives on the host is invisible unless its directory is
 mounted; the tool then answers `file_path not found: … (resolved on the machine
 running mux)`. Mount the directory the agent writes its files to.
 
+**SSH connections** in the container authenticate with a stored key only — there is no ssh-agent, so `auth = "agent"` fails at registration and the connection reports as unregistered in `/health`. Host keys come from `hostKey` on the provisioned connection or from `/config/mux/known_hosts` on the mount (`~/.ssh/known_hosts` of the `nonroot` user does not exist). `GET /audit/ssh` lists what the connections ran; it is on the loopback listener like `/health`.
+
 There is no vault in the container. The vault unlocks interactively
 (passphrase or WebAuthn) and nothing in a headless container can answer that
 prompt; in exclusive mode a sealed vault refuses every secret read. Leave

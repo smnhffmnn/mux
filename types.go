@@ -58,11 +58,13 @@ type TunnelInfo struct {
 	Host            string `json:"host,omitempty"`            // SSH
 	Port            int    `json:"port,omitempty"`            // SSH
 	User            string `json:"user,omitempty"`            // SSH
+	Auth            string `json:"auth,omitempty"`            // SSH: "key" or "agent"
 	KeyFile         string `json:"keyFile,omitempty"`         // SSH
 	InsecureHostKey bool   `json:"insecureHostKey,omitempty"` // SSH
 	Source          string `json:"source"`
 	Connected       bool   `json:"connected"`
 	PrivateKeySet   bool   `json:"privateKeySet"`             // whether a private key is stored
+	PassphraseSet   bool   `json:"passphraseSet,omitempty"`   // SSH: whether a key passphrase is stored
 	PresharedKeySet bool   `json:"presharedKeySet,omitempty"` // WireGuard: whether a preshared key is stored
 }
 
@@ -158,7 +160,9 @@ type SaveTunnelRequest struct {
 	Host            string `json:"host,omitempty"`
 	Port            string `json:"port,omitempty"`
 	User            string `json:"user,omitempty"`
+	Auth            string `json:"auth,omitempty"` // "key" or "agent"
 	KeyFile         string `json:"keyFile,omitempty"`
+	Passphrase      string `json:"passphrase,omitempty"`      // of the private key; a secret
 	InsecureHostKey *bool  `json:"insecureHostKey,omitempty"` // pointer to distinguish unset from false
 }
 
@@ -183,4 +187,14 @@ type SaveConnectionRequest struct {
 	// youtrack-rest write guards, newline-separated "Project:Field" entries.
 	ProtectedFields string `json:"protectedFields,omitempty"`
 	SetOnceFields   string `json:"setOnceFields,omitempty"`
+
+	// ssh connection type. PrivateKey and Passphrase are secrets (stored, never
+	// echoed back); AllowCommands and DenyCommands are newline-separated.
+	Auth          string `json:"auth,omitempty"`
+	KeyFile       string `json:"keyFile,omitempty"`
+	HostKey       string `json:"hostKey,omitempty"`
+	AllowCommands string `json:"allowCommands,omitempty"`
+	DenyCommands  string `json:"denyCommands,omitempty"`
+	PrivateKey    string `json:"privateKey,omitempty"`
+	Passphrase    string `json:"passphrase,omitempty"`
 }

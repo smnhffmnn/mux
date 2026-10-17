@@ -35,6 +35,7 @@ import (
 	"github.com/smnhffmnn/mux/internal/logging"
 	"github.com/smnhffmnn/mux/internal/provisioning"
 	"github.com/smnhffmnn/mux/internal/proxy"
+	"github.com/smnhffmnn/mux/internal/sshclient"
 	"github.com/smnhffmnn/mux/internal/tools"
 )
 
@@ -265,6 +266,10 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 		summary = "Microsoft Graph API"
 	case conn.Type == config.TypeGoogleTagManager:
 		summary = "Google Tag Manager"
+	case conn.Type == config.TypeSSH:
+		if conn.Host != "" {
+			summary = fmt.Sprintf("%s@%s:%d", conn.User, conn.Host, conn.Port)
+		}
 	default:
 		if conn.Host != "" {
 			summary = fmt.Sprintf("%s:%d/%s", conn.Host, conn.Port, conn.Database)
@@ -312,6 +317,16 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 					fi.Value = config.FormatLines(conn.ProtectedFields)
 				case "set_once_fields":
 					fi.Value = config.FormatLines(conn.SetOnceFields)
+				case "auth":
+					fi.Value = conn.Auth
+				case "key_file":
+					fi.Value = conn.KeyFile
+				case "host_key":
+					fi.Value = conn.HostKey
+				case "allow_commands":
+					fi.Value = config.FormatLines(conn.AllowCommands)
+				case "deny_commands":
+					fi.Value = config.FormatLines(conn.DenyCommands)
 				}
 			}
 			if fd.Secret {
@@ -320,6 +335,10 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 					fi.SecretStored = conn.Password != ""
 				case "token":
 					fi.SecretStored = conn.Token != ""
+				case "private_key":
+					fi.SecretStored = conn.PrivateKey != ""
+				case "passphrase":
+					fi.SecretStored = conn.Passphrase != ""
 				}
 			}
 			fields = append(fields, fi)
@@ -481,6 +500,9 @@ func (a *App) AddConnection(name, typ string) (*ConnInfo, error) {
 		Source: config.SourceLocal,
 	}
 	config.ApplyConnectionDefaults(&conn)
+	// Secrets stored under this name before the connection existed
+	// (secret_set first, add second) are picked up now, not at the next start.
+	config.LoadConnectionSecrets(&conn)
 	a.cfg.Connections = append(a.cfg.Connections, conn)
 
 	if err := a.cfg.Save(); err != nil {
@@ -569,6 +591,47 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 		}
 		conn.ProtectedFields = protected
 		conn.SetOnceFields = setOnce
+
+		if fields.Auth != "" && !sshclient.ValidAuth(fields.Auth) {
+			return nil, fmt.Errorf("invalid auth %q: must be %q or %q", fields.Auth, sshclient.AuthKey, sshclient.AuthAgent)
+		}
+		if conn.Type == config.TypeSSH {
+			// Plain text fields are written as sent, so a cleared field clears
+			// the value (same as instructions and tunnel above).
+			conn.Auth = fields.Auth
+			conn.KeyFile = fields.KeyFile
+			if hk := strings.TrimSpace(fields.HostKey); hk != "" {
+				if _, err := sshclient.ParsePublicKey(hk); err != nil {
+					return nil, fmt.Errorf("invalid host_key: %w", err)
+				}
+				conn.HostKey = hk
+			} else {
+				conn.HostKey = ""
+			}
+			allow := config.ParseLines(fields.AllowCommands)
+			if err := config.ValidateCommandPatterns(allow); err != nil {
+				return nil, fmt.Errorf("invalid allow_commands: %w", err)
+			}
+			deny := config.ParseLines(fields.DenyCommands)
+			if err := config.ValidateCommandPatterns(deny); err != nil {
+				return nil, fmt.Errorf("invalid deny_commands: %w", err)
+			}
+			conn.AllowCommands = allow
+			conn.DenyCommands = deny
+		}
+	}
+
+	if fields.PrivateKey != "" {
+		conn.PrivateKey = fields.PrivateKey
+		if err := config.SaveSecret(conn.Name+"-private-key", fields.PrivateKey); err != nil {
+			log.Printf("[app] Warning: could not save to keychain: %v", err)
+		}
+	}
+	if fields.Passphrase != "" {
+		conn.Passphrase = fields.Passphrase
+		if err := config.SaveSecret(conn.Name+"-private-key-passphrase", fields.Passphrase); err != nil {
+			log.Printf("[app] Warning: could not save to keychain: %v", err)
+		}
 	}
 
 	if fields.Password != "" {
@@ -602,6 +665,7 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 // DeleteConnection removes a local connection.
 func (a *App) DeleteConnection(name string) error {
 	found := false
+	var deleted config.Connection
 	var newConns []config.Connection
 	for _, c := range a.cfg.Connections {
 		if c.Name == name {
@@ -609,6 +673,7 @@ func (a *App) DeleteConnection(name string) error {
 				return fmt.Errorf("provisioned connections cannot be deleted")
 			}
 			found = true
+			deleted = c
 			continue
 		}
 		newConns = append(newConns, c)
@@ -622,6 +687,12 @@ func (a *App) DeleteConnection(name string) error {
 	a.cfg.Connections = newConns
 	if err := a.cfg.Save(); err != nil {
 		log.Printf("[app] Warning: could not save config file: %v", err)
+	}
+	if deleted.Type == config.TypeSSH {
+		// A private key must not outlive the connection it was stored for.
+		// Other types keep their secrets on delete (see connection_delete).
+		config.DeleteSecret(name + "-private-key")
+		config.DeleteSecret(name + "-private-key-passphrase")
 	}
 	return nil
 }
@@ -707,6 +778,12 @@ func (a *App) SaveTunnel(name string, fields SaveTunnelRequest) (*TunnelInfo, er
 		if fields.KeyFile != "" {
 			t.KeyFile = fields.KeyFile
 		}
+		if fields.Auth != "" {
+			if !sshclient.ValidAuth(fields.Auth) {
+				return nil, fmt.Errorf("invalid auth %q: must be %q or %q", fields.Auth, sshclient.AuthKey, sshclient.AuthAgent)
+			}
+			t.Auth = fields.Auth
+		}
 		if fields.InsecureHostKey != nil {
 			t.InsecureHostKey = *fields.InsecureHostKey
 		}
@@ -717,6 +794,12 @@ func (a *App) SaveTunnel(name string, fields SaveTunnelRequest) (*TunnelInfo, er
 		t.PrivateKey = fields.PrivateKey
 		if err := config.SaveSecret("tunnel-"+name+"-private-key", fields.PrivateKey); err != nil {
 			log.Printf("[app] Warning: could not save tunnel private key: %v", err)
+		}
+	}
+	if fields.Passphrase != "" {
+		t.Passphrase = fields.Passphrase
+		if err := config.SaveSecret("tunnel-"+name+"-private-key-passphrase", fields.Passphrase); err != nil {
+			log.Printf("[app] Warning: could not save tunnel key passphrase: %v", err)
 		}
 	}
 	if fields.PresharedKey != "" {
@@ -766,6 +849,7 @@ func (a *App) DeleteTunnel(name string) error {
 
 	// Best-effort cleanup of orphaned secrets
 	config.DeleteSecret("tunnel-" + name + "-private-key")
+	config.DeleteSecret("tunnel-" + name + "-private-key-passphrase")
 	config.DeleteSecret("tunnel-" + name + "-preshared-key")
 
 	return nil
@@ -790,11 +874,13 @@ func buildTunnelInfo(t config.TunnelConfig, connected bool) TunnelInfo {
 		Host:            t.Host,
 		Port:            t.Port,
 		User:            t.User,
+		Auth:            t.Auth,
 		KeyFile:         t.KeyFile,
 		InsecureHostKey: t.InsecureHostKey,
 		Source:          t.Source,
 		Connected:       connected,
 		PrivateKeySet:   t.PrivateKey != "",
+		PassphraseSet:   t.Passphrase != "",
 		PresharedKeySet: t.PresharedKey != "",
 	}
 }
@@ -856,10 +942,24 @@ func (a *App) TestConnection(name string) *TestResult {
 		}
 	}
 
+	if conn.Type == config.TypeSSH && conn.Auth != sshclient.AuthAgent && conn.PrivateKey == "" && conn.KeyFile == "" {
+		if key, err := config.GetSecret(conn.Name + "-private-key"); err == nil && key != "" {
+			testLog(name, "private key resolved from secret store")
+			c := *conn
+			c.PrivateKey = key
+			if pp, err := config.GetSecret(conn.Name + "-private-key-passphrase"); err == nil {
+				c.Passphrase = pp
+			}
+			conn = &c
+		}
+	}
+
 	start := time.Now()
 	var result testResponse
 
 	switch conn.Type {
+	case config.TypeSSH:
+		result = a.testSSH(*conn)
 	case config.TypeMariaDB:
 		result = a.testMariaDB(*conn)
 	case config.TypeClickHouse:
@@ -2247,6 +2347,53 @@ func (a *App) testYouTrackREST(conn config.Connection) testResponse {
 		msg += " (time zone " + tz + ")"
 	}
 	return testResponse{Connection: conn.Name, Connected: true, Message: msg}
+}
+
+// testSSH connects the way the live tools do — same key source, same host
+// key policy, same tunnel routing — and reports the server's version string.
+// No command is run: a restricted account that may only run a few programs
+// still gets a truthful "connected".
+func (a *App) testSSH(conn config.Connection) testResponse {
+	if conn.Host == "" || conn.User == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "Not configured (host or user missing)"}
+	}
+	var dialer sshclient.Dialer
+	if conn.Tunnel != "" {
+		t := a.tm.Get(conn.Tunnel)
+		if t == nil {
+			return tunnelUnavailable(conn)
+		}
+		testLog(conn.Name, "routing through tunnel %q", conn.Tunnel)
+		dialer = t
+	}
+	client, err := sshclient.New(sshclient.Config{
+		Name: conn.Name, Host: conn.Host, Port: conn.Port, User: conn.User,
+		Key: sshclient.KeySource{
+			Auth: conn.Auth, PrivateKey: conn.PrivateKey, Passphrase: conn.Passphrase,
+			KeyFile: config.ExpandHome(conn.KeyFile), SecretName: conn.Name + "-private-key",
+		},
+		HostKey: sshclient.HostKeyPolicy{Pinned: conn.HostKey, KnownHosts: sshclient.DefaultKnownHostsFiles(config.Dir())},
+		Dialer:  dialer,
+		Timeout: 10 * time.Second,
+		Logf:    func(format string, args ...any) { testLog(conn.Name, format, args...) },
+	})
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: err.Error()}
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	sshConn, err := client.Get(ctx)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Connection failed: %v", err)}
+	}
+	policy := "any command"
+	if conn.ReadOnly {
+		policy = "read-only"
+	}
+	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected to %s (%s; %s; %s; %s)",
+		client.Target(), string(sshConn.ServerVersion()), client.AuthDescription(), client.HostKeyDescription(), policy)}
 }
 
 // testTokenProxy tests a non-OAuth proxy connection by connecting exactly like

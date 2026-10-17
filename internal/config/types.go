@@ -159,6 +159,18 @@ var AllTypes = []TypeDef{
 	{Type: TypeHiggsfield, Label: "Higgsfield", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "https://mcp.higgsfield.ai/mcp (default)"},
 	}},
+	{Type: TypeSSH, Label: "SSH (commands & files)", Fields: []TypeField{
+		{Key: "host", Label: "Host", Placeholder: "server.example.com"},
+		{Key: "port", Label: "Port", Placeholder: "22", Small: true},
+		{Key: "user", Label: "User", Placeholder: "deploy"},
+		{Key: "auth", Label: "Auth", Placeholder: "key (default) | agent — agent uses the ssh-agent of the logged-in user, no key in mux"},
+		{Key: "private_key", Label: "Private Key (PEM, optional)", Placeholder: "Paste the private key — may be passphrase-protected; not needed with Key File or auth = agent", Secret: true, Multiline: true},
+		{Key: "passphrase", Label: "Key Passphrase (optional)", Placeholder: "Passphrase of the private key, if it has one", Secret: true},
+		{Key: "key_file", Label: "Key File (optional)", Placeholder: "~/.ssh/id_ed25519 — read instead of the stored key"},
+		{Key: "host_key", Label: "Host Key (optional)", Placeholder: "ssh-ed25519 AAAA… — pins the server's key; empty: known_hosts decides"},
+		{Key: "allow_commands", Label: "Allowed commands (optional)", Placeholder: "One per line, e.g. systemctl status — read-only connections use the built-in list when empty", Multiline: true},
+		{Key: "deny_commands", Label: "Denied commands (optional)", Placeholder: "One per line, e.g. journalctl --vacuum* — always wins", Multiline: true},
+	}},
 }
 
 // typeIndex is a lazily-built lookup map from type string to TypeDef.

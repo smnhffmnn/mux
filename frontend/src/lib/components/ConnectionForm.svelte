@@ -30,6 +30,11 @@
     basic_suffix: 'basicSuffix',
     protected_fields: 'protectedFields',
     set_once_fields: 'setOnceFields',
+    key_file: 'keyFile',
+    host_key: 'hostKey',
+    allow_commands: 'allowCommands',
+    deny_commands: 'denyCommands',
+    private_key: 'privateKey',
   }
 
   async function handleSave() {
@@ -42,8 +47,9 @@
         if (val) {
           const jsonKey = fieldKeyMap[f.key] ?? f.key
           ;(req as any)[jsonKey] = val
-        } else if (f.multiline) {
-          // Multiline fields (headers) are always sent so they can be cleared
+        } else if (f.multiline && !f.secret) {
+          // Multiline fields (headers) are always sent so they can be cleared;
+          // a secret is only sent when the user typed one
           const jsonKey = fieldKeyMap[f.key] ?? f.key
           ;(req as any)[jsonKey] = ''
         }
@@ -65,13 +71,25 @@
     {#each conn.fields as field (field.key)}
       <div class="form-field" class:small={field.small} class:full={field.multiline}>
         <label for={field.key}>{field.label}</label>
-        {#if field.secret}
+        {#if field.secret && field.multiline}
+          <!-- A PEM key spans many lines; a single-line password input would
+               drop the newlines on paste and hand mux an unparsable key. -->
+          <textarea
+            id={field.key}
+            class="secret"
+            rows="3"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder={field.secretStored ? '••••• (stored — paste to replace)' : field.placeholder}
+            bind:value={formValues[field.key]}
+          ></textarea>
+        {:else if field.secret}
           <input
             id={field.key}
             type="password"
             placeholder={field.secretStored ? '••••• (stored)' : field.placeholder}
             bind:value={formValues[field.key]}
-            disabled={conn.readOnly && !field.secret}
+            disabled={conn.isProvisioned && !field.secret}
           />
         {:else if field.multiline}
           <textarea
@@ -79,7 +97,7 @@
             rows="2"
             placeholder={field.placeholder}
             bind:value={formValues[field.key]}
-            disabled={conn.readOnly}
+            disabled={conn.isProvisioned}
           ></textarea>
         {:else}
           <input
@@ -87,7 +105,7 @@
             type="text"
             placeholder={field.placeholder}
             bind:value={formValues[field.key]}
-            disabled={conn.readOnly}
+            disabled={conn.isProvisioned}
           />
         {/if}
       </div>
@@ -99,7 +117,7 @@
         <select
           id="tunnel"
           bind:value={formValues['tunnel']}
-          disabled={conn.readOnly}
+          disabled={conn.isProvisioned}
         >
           <option value="">None</option>
           {#each tunnelNames as name}
@@ -119,7 +137,7 @@
         rows="2"
         placeholder="Custom instructions for AI agents..."
         bind:value={formValues['instructions']}
-        disabled={conn.readOnly}
+        disabled={conn.isProvisioned}
       ></textarea>
     </div>
   </div>
@@ -173,6 +191,12 @@
   textarea {
     resize: vertical;
     min-height: 40px;
+  }
+
+  textarea.secret {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    -webkit-text-security: disc;
   }
 
   .form-error {

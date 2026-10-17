@@ -201,6 +201,48 @@ export class Connection {
              */
             this["setOnceFields"] = undefined;
         }
+        if (/** @type {any} */(false)) {
+            /**
+             * SSH connection type (TypeSSH). Auth selects the key source: "key"
+             * (default — the secret {name}-private-key or key_file) or "agent" (the
+             * user's ssh-agent, no key in mux). HostKey pins the server's public key;
+             * without it the known_hosts files decide. AllowCommands and DenyCommands
+             * are command patterns ("systemctl status", "journalctl --vacuum*"); a
+             * read-only connection without AllowCommands runs the built-in list of
+             * reading commands. Enforced in code, like the field guards above.
+             * @member
+             * @type {string | undefined}
+             */
+            this["auth"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["keyFile"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["hostKey"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string[] | undefined}
+             */
+            this["allowCommands"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string[] | undefined}
+             */
+            this["denyCommands"] = undefined;
+        }
 
         Object.assign(this, $$source);
     }
@@ -214,6 +256,8 @@ export class Connection {
         const $$createField21_0 = $$createType0;
         const $$createField22_0 = $$createType1;
         const $$createField23_0 = $$createType1;
+        const $$createField27_0 = $$createType1;
+        const $$createField28_0 = $$createType1;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("headers" in $$parsedSource) {
             $$parsedSource["headers"] = $$createField21_0($$parsedSource["headers"]);
@@ -223,6 +267,12 @@ export class Connection {
         }
         if ("setOnceFields" in $$parsedSource) {
             $$parsedSource["setOnceFields"] = $$createField23_0($$parsedSource["setOnceFields"]);
+        }
+        if ("allowCommands" in $$parsedSource) {
+            $$parsedSource["allowCommands"] = $$createField27_0($$parsedSource["allowCommands"]);
+        }
+        if ("denyCommands" in $$parsedSource) {
+            $$parsedSource["denyCommands"] = $$createField28_0($$parsedSource["denyCommands"]);
         }
         return new Connection(/** @type {Partial<Connection>} */($$parsedSource));
     }

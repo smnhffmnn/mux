@@ -741,6 +741,56 @@ type = "fal-ai"
 
 Status and response URLs are validated against the configured host — unexpected hosts are rejected to prevent SSRF via manipulated API responses.
 
+## Host Connections
+
+### SSH
+
+Commands and file copies on a remote host, with the credential held by mux. The agent gets exit codes, output and copied files; it never sees the private key — the same arrangement as a database connection, where the agent sees query results and not the password. Every operation is logged.
+
+**Required fields**: `name`, `type`, `host`, `user`
+
+**Optional fields**: `port` (default 22), `auth` (`key` default, or `agent`), `key_file`, `host_key`, `read_only`, `allow_commands`, `deny_commands`, `tunnel`, `instructions`
+
+**Secrets**: `{name}-private-key` (the private key in PEM form, may be passphrase-protected), `{name}-private-key-passphrase` (when it is)
+
+```toml
+[[connections]]
+name = "web01"
+type = "ssh"
+host = "web01.internal.example.com"
+user = "deploy"
+read_only = true
+host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI… web01"
+deny_commands = ["journalctl --vacuum*"]
+instructions = "Production web server. Logs live in /var/log/nginx; the app runs as the 'app' systemd unit."
+# Private key stored as secret (key: "web01-private-key"), its passphrase as "web01-private-key-passphrase"
+```
+
+**Key sources** (`auth`):
+
+- `key` (default) — mux holds the private key: the secret `{name}-private-key`, or the file named by `key_file`. An encrypted key stays encrypted at rest; mux decrypts it in memory with `{name}-private-key-passphrase`. Where the key and the passphrase sit in the same file store (a container without keychain or vault), the encryption buys little; it buys something when the passphrase sits in the keychain or vault and the key in a file.
+- `agent` — mux signs through the ssh-agent of the user it runs as (`SSH_AUTH_SOCK`, a Unix socket). No key material enters mux; on a desktop this is the unlocked agent of the logged-in user. Not available in a container, and not on Windows, where the agent is a named pipe.
+
+**Host keys** are verified on every connection; there is no insecure switch on this type. `host_key` pins one public key (authorized_keys or known_hosts line form) — the form a provisioning server uses when it knows its hosts. Without it, mux consults `known_hosts` in its config directory (`~/.config/mux/known_hosts`) and then `~/.ssh/known_hosts`, re-reading them at every connection attempt; lines the parser cannot read are skipped with a log line, as OpenSSH does. An unknown host fails with the exact line to add, and the next attempt sees it; a changed key fails as a mismatch. The key types a file already knows for the host are offered first in the handshake, as OpenSSH does — otherwise a host known by its Ed25519 key would present its ECDSA key and fail as a mismatch.
+
+**Command policy.** `allow_commands` and `deny_commands` are lists of leading tokens: `cat` covers `cat /etc/hosts`; `systemctl status` covers `systemctl status nginx` and not `systemctl restart nginx`. Tokens take the wildcards `*` and `?` (`journalctl --vacuum*`). The program is matched as written — `cat` does not cover `/bin/cat`, and not `/tmp/x/cat` either; a connection that may run a full path lists it. Deny entries always win, and `shell=true` is refused as soon as either list exists. A read-only connection without `allow_commands` runs the built-in list — `ls cat head tail grep stat wc file df du free uptime ps uname id whoami date`, `systemctl status|is-active|list-units`, `journalctl`, `docker ps|logs|inspect`, `podman ps|logs|inspect` — minus `journalctl --vacuum*`, `--rotate`, `--flush`, `--relinquish-var` and `date -s*`, `date --set*`. Programs that run other programs (`env`, `nice`, `timeout`, `xargs`) are deliberately not on it. Setting `allow_commands` replaces the built-in list. A connection that is neither read-only nor has lists runs anything. The lists express the operator's intent and hold for every client; they are not a sandbox — `cat` as root reads every file, `tail -f` runs until the timeout, and on a connection that also has `upload`, an allow list is a convenience, not a confinement.
+
+**MCP tools exposed**:
+
+| Tool | Description |
+|------|-------------|
+| `{name}_exec` | Run one program. Parameters: `args` (required, the argument vector — program first), `cwd`, `stdin`, `timeout` (seconds; default 60, at most 1800), `output_file` (stdout to a local file), `shell` (pass `args[0]` to the remote shell verbatim; only on a connection without `allow_commands`, without `deny_commands` and not read-only), `dry_run` (show the command line and the policy verdict, run nothing). Returns exit code, duration and sizes, then stdout and stderr — inline up to 64 KB / 16 KB with an explicit truncation note, or stdout in the file. A non-zero exit is a result, not an error. On a timeout mux sends SIGKILL, closes the session and reports the partial output; OpenSSH 7.9+ without a forced command kills the program on that signal, older servers and forced-command sessions ignore it and may leave the program running. |
+| `{name}_download` | Copy a remote file to this machine over SFTP. Parameters: `remote_path`, `output_file` (both required). Streamed to disk; an existing local file is never overwritten. |
+| `{name}_upload` | Copy a local file to the host over SFTP. Parameters: `file_path`, `remote_path` (required), `mode` (octal, default `0644`), `overwrite` (default false — an existing remote file is an error). Streamed from disk; a failed copy removes what it created, and says so when it could not (connection gone). Absent when `read_only = true`. |
+
+Transfers run under the same 30-minute budget as HTTP uploads. The connection is probed with a keepalive every 30 seconds while idle; a probe that goes unanswered while no data arrived for that long marks the connection dead, so a transfer slower than about 1 KB/s can be cut by it.
+
+Arguments are sent as literals: an SSH exec request carries one string, so mux quotes every element of `args` for a POSIX shell and the remote shell splits it back into exactly that list. `cwd` becomes a `cd` in front of the command. `stdin` is written to the program and closed.
+
+**Audit.** Each command and copy — and each refusal — produces one line in the mux log (`[ssh] <connection> exec "<command>" exit=0 dur=120ms bytes=512`) and an entry in `GET /audit/ssh` on the loopback listener, which answers the newest entries first (default 100, `?limit=` up to the ring's 500; `?connection=` filters). The endpoint is not on the TLS listener. The command line is logged as sent — a secret passed as an argument lands in the audit trail.
+
+**Through a tunnel.** `tunnel = "bastion"` routes the SSH connection over a WireGuard or SSH tunnel like any other connection type.
+
 ## Passive Connections
 
 Passive connections don't expose MCP tools. They provide credentials for external processes that communicate with the mux daemon through internal channels (not MCP).

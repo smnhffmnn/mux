@@ -53,3 +53,29 @@ func TestFetchCarriesTunnelPrivateKey(t *testing.T) {
 		t.Errorf("connections not marked as provisioning-sourced: %+v", resp.Connections)
 	}
 }
+
+func TestFetch_CarriesSSHSecrets(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"tunnels": [{"name": "bastion", "type": "ssh", "host": "b", "user": "u", "privateKey": "TPEM", "passphrase": "tpp", "insecureHostKey": true}],
+			"connections": [{"name": "web01", "type": "ssh", "host": "h", "user": "u", "hostKey": "ssh-ed25519 AAAA", "allowCommands": ["systemctl status"], "privateKey": "PEM", "passphrase": "pp"}]
+		}`))
+	}))
+	defer srv.Close()
+
+	resp, err := Fetch(context.Background(), srv.URL, "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Connections) != 1 || resp.Connections[0].PrivateKey != "PEM" || resp.Connections[0].Passphrase != "pp" {
+		t.Fatalf("connection secrets not carried: %+v", resp.Connections)
+	}
+	c := resp.Connections[0]
+	if c.HostKey != "ssh-ed25519 AAAA" || len(c.AllowCommands) != 1 || c.Source != config.SourceProvisioning {
+		t.Errorf("connection fields: %+v", c)
+	}
+	if len(resp.Tunnels) != 1 || resp.Tunnels[0].PrivateKey != "TPEM" || resp.Tunnels[0].Passphrase != "tpp" {
+		t.Fatalf("tunnel secrets not carried: %+v", resp.Tunnels)
+	}
+}

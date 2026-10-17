@@ -11,6 +11,7 @@ import (
 
 	"github.com/smnhffmnn/mux/internal/config"
 	"github.com/smnhffmnn/mux/internal/proxy"
+	"github.com/smnhffmnn/mux/internal/sshclient"
 )
 
 // ToolReloader triggers hot-reload of MCP tools when connections change.
@@ -89,13 +90,13 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("URL for the connection (required for proxy/http/api types, optional for types with defaults like firecrawl/brave)."),
 			),
 			mcp.WithString("host",
-				mcp.Description("Database host (for mariadb, postgresql, clickhouse)."),
+				mcp.Description("Host (for mariadb, postgresql, clickhouse, imap, meilisearch, ssh)."),
 			),
 			mcp.WithNumber("port",
-				mcp.Description("Database port (defaults applied per type if omitted)."),
+				mcp.Description("Port (defaults applied per type if omitted; ssh: 22)."),
 			),
 			mcp.WithString("user",
-				mcp.Description("Database user (for mariadb, postgresql, clickhouse)."),
+				mcp.Description("User (for mariadb, postgresql, clickhouse, imap, git, ssh)."),
 			),
 			mcp.WithString("database",
 				mcp.Description("Database name (for mariadb, postgresql, clickhouse)."),
@@ -119,13 +120,28 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("Extra HTTP headers sent with every request (http and proxy types), one 'Name: Value' per line (e.g. 'Notion-Version: 2022-06-28')."),
 			),
 			mcp.WithBoolean("read_only",
-				mcp.Description("Expose reading tools only (databases: no execute; http: no request; youtrack-rest: no write and no admin tools). Default false."),
+				mcp.Description("Expose reading tools only (databases: no execute; http: no request; youtrack-rest: no write and no admin tools; ssh: no upload, exec limited to allow_commands or the built-in list of reading commands). Default false."),
 			),
 			mcp.WithString("protected_fields",
 				mcp.Description("youtrack-rest: fields this connection never writes, one per line as 'Project:Field' or 'Field' (e.g. 'P:Sprint priority')."),
 			),
 			mcp.WithString("set_once_fields",
 				mcp.Description("youtrack-rest: fields this connection writes only while they are still empty, one per line as 'Project:Field' or 'Field'."),
+			),
+			mcp.WithString("auth",
+				mcp.Description("ssh: 'key' (default — the secret {name}-private-key, or key_file) or 'agent' (the ssh-agent of the user running mux; no key stored in mux)."),
+			),
+			mcp.WithString("key_file",
+				mcp.Description("ssh: path of the private key file to use instead of the stored secret (supports ~)."),
+			),
+			mcp.WithString("host_key",
+				mcp.Description("ssh: the server's public host key ('ssh-ed25519 AAAA…') to pin. Without it the known_hosts files in the mux config directory and ~/.ssh decide."),
+			),
+			mcp.WithString("allow_commands",
+				mcp.Description("ssh: commands the connection may run, one per line as leading tokens ('systemctl status'). A read-only ssh connection without this list runs the built-in list of reading commands."),
+			),
+			mcp.WithString("deny_commands",
+				mcp.Description("ssh: commands the connection never runs, one per line ('journalctl --vacuum*'); applies on top of allow_commands and the read-only list."),
 			),
 		),
 		Handler: ct.handleConnectionAdd,
@@ -183,6 +199,9 @@ func (ct *ConfigTools) tunnelAddTool() ToolDef {
 			mcp.WithString("key_file",
 				mcp.Description("Path to SSH private key file (optional, alternative to keychain)."),
 			),
+			mcp.WithString("auth",
+				mcp.Description("SSH key source: 'key' (default — stored key or key_file) or 'agent' (the ssh-agent of the user running mux)."),
+			),
 		),
 		Handler: ct.handleTunnelAdd,
 	}
@@ -203,9 +222,9 @@ func (ct *ConfigTools) tunnelDeleteTool() ToolDef {
 func (ct *ConfigTools) secretSetTool() ToolDef {
 	return ToolDef{
 		Tool: mcp.NewTool("secret_set",
-			mcp.WithDescription("Store a secret securely (OS keychain with file fallback). Write-only — the value can never be read back. Use '{connection-name}-token' for API keys or '{connection-name}-password' for database passwords."),
+			mcp.WithDescription("Store a secret securely (OS keychain with file fallback). Write-only — the value can never be read back. Use '{connection-name}-token' for API keys, '{connection-name}-password' for database passwords, '{connection-name}-private-key' (and '-private-key-passphrase') for ssh connections, 'tunnel-{name}-private-key' (and '-private-key-passphrase') for tunnels."),
 			mcp.WithString("key", mcp.Required(),
-				mcp.Description("Keychain key, e.g. 'my-firecrawl-token', 'production-password', 'provisioning-token'."),
+				mcp.Description("Keychain key, e.g. 'my-firecrawl-token', 'production-password', 'web01-private-key', 'provisioning-token'."),
 			),
 			mcp.WithString("value", mcp.Required(),
 				mcp.Description("Secret value to store."),
@@ -301,10 +320,30 @@ func (ct *ConfigTools) handleConnectionList(_ context.Context, _ mcp.CallToolReq
 		if len(c.SetOnceFields) > 0 {
 			entry["set_once_fields"] = c.SetOnceFields
 		}
-		entry["secrets_set"] = map[string]bool{
+		secrets := map[string]bool{
 			"password": c.Password != "",
 			"token":    c.Token != "",
 		}
+		if c.Type == config.TypeSSH {
+			if c.Auth != "" {
+				entry["auth"] = c.Auth
+			}
+			if c.KeyFile != "" {
+				entry["key_file"] = c.KeyFile
+			}
+			if c.HostKey != "" {
+				entry["host_key"] = c.HostKey
+			}
+			if len(c.AllowCommands) > 0 {
+				entry["allow_commands"] = c.AllowCommands
+			}
+			if len(c.DenyCommands) > 0 {
+				entry["deny_commands"] = c.DenyCommands
+			}
+			secrets["private_key"] = c.PrivateKey != ""
+			secrets["private_key_passphrase"] = c.Passphrase != ""
+		}
+		entry["secrets_set"] = secrets
 		conns = append(conns, entry)
 	}
 	if conns == nil {
@@ -324,10 +363,14 @@ func (ct *ConfigTools) handleConnectionList(_ context.Context, _ mcp.CallToolReq
 			entry["host"] = t.Host
 			entry["port"] = t.Port
 			entry["user"] = t.User
+			if t.Auth != "" {
+				entry["auth"] = t.Auth
+			}
 			if t.KeyFile != "" {
 				entry["key_file"] = t.KeyFile
 			}
 			entry["private_key_set"] = t.PrivateKey != ""
+			entry["private_key_passphrase_set"] = t.Passphrase != ""
 		} else {
 			entry["type"] = config.TunnelTypeWireGuard
 			entry["peer_endpoint"] = t.PeerEndpoint
@@ -370,8 +413,9 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 		return mcp.NewToolResultError("name cannot be empty"), nil
 	}
 
-	// Check duplicate
-	if ct.cfg.FindConnection(name) != nil {
+	// Check duplicate — against provisioned connections too, so a local
+	// entry cannot shadow one the server delivers.
+	if ct.cfg.FindAnyConnection(name) != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("connection %q already exists", name)), nil
 	}
 
@@ -443,8 +487,45 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 			return mcp.NewToolResultError(fmt.Sprintf("invalid set_once_fields: %v", err)), nil
 		}
 	}
+	// ssh-only fields: on another type they would be written to config.toml
+	// and never read, which hides a typo in the type.
+	for _, key := range []string{"auth", "key_file", "host_key", "allow_commands", "deny_commands"} {
+		if v := req.GetString(key, ""); v != "" && typ != config.TypeSSH {
+			return mcp.NewToolResultError(fmt.Sprintf("%s applies to type %q only, not %q", key, config.TypeSSH, typ)), nil
+		}
+	}
+	if v := req.GetString("auth", ""); v != "" {
+		if !sshclient.ValidAuth(v) {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid auth %q: must be %q or %q", v, sshclient.AuthKey, sshclient.AuthAgent)), nil
+		}
+		conn.Auth = v
+	}
+	if v := req.GetString("key_file", ""); v != "" {
+		conn.KeyFile = v
+	}
+	if v := req.GetString("host_key", ""); v != "" {
+		if _, err := sshclient.ParsePublicKey(v); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid host_key: %v", err)), nil
+		}
+		conn.HostKey = strings.TrimSpace(v)
+	}
+	if v := req.GetString("allow_commands", ""); v != "" {
+		conn.AllowCommands = config.ParseLines(v)
+		if err := config.ValidateCommandPatterns(conn.AllowCommands); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid allow_commands: %v", err)), nil
+		}
+	}
+	if v := req.GetString("deny_commands", ""); v != "" {
+		conn.DenyCommands = config.ParseLines(v)
+		if err := config.ValidateCommandPatterns(conn.DenyCommands); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid deny_commands: %v", err)), nil
+		}
+	}
 
 	config.ApplyConnectionDefaults(&conn)
+	// A key stored before the connection was added (secret_set first,
+	// connection_add second) must be found now, not at the next restart.
+	config.LoadConnectionSecrets(&conn)
 	ct.cfg.Connections = append(ct.cfg.Connections, conn)
 
 	if err := ct.cfg.Save(); err != nil {
@@ -455,7 +536,16 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 		ct.reloader.ReloadConnection(conn)
 	}
 
-	return mcp.NewToolResultText(fmt.Sprintf("connection %q (%s) created", name, typ)), nil
+	msg := fmt.Sprintf("connection %q (%s) created", name, typ)
+	if typ == config.TypeSSH && conn.Auth != sshclient.AuthAgent && conn.KeyFile == "" {
+		if conn.PrivateKey != "" {
+			msg += fmt.Sprintf(" with the stored key %q", name+"-private-key")
+		} else {
+			msg += fmt.Sprintf(". Next: store the private key with secret_set %q (and its passphrase as %q if it has one); the connection registers once the key is there.",
+				name+"-private-key", name+"-private-key-passphrase")
+		}
+	}
+	return mcp.NewToolResultText(msg), nil
 }
 
 func (ct *ConfigTools) handleConnectionDelete(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -465,6 +555,7 @@ func (ct *ConfigTools) handleConnectionDelete(_ context.Context, req mcp.CallToo
 	}
 
 	found := false
+	var deleted config.Connection
 	var newConns []config.Connection
 	for _, c := range ct.cfg.Connections {
 		if c.Name == name {
@@ -472,6 +563,7 @@ func (ct *ConfigTools) handleConnectionDelete(_ context.Context, req mcp.CallToo
 				return mcp.NewToolResultError(fmt.Sprintf("connection %q is provisioned and cannot be deleted", name)), nil
 			}
 			found = true
+			deleted = c
 			continue
 		}
 		newConns = append(newConns, c)
@@ -491,7 +583,15 @@ func (ct *ConfigTools) handleConnectionDelete(_ context.Context, req mcp.CallToo
 		ct.reloader.UnloadConnection(name)
 	}
 
-	return mcp.NewToolResultText(fmt.Sprintf("connection %q deleted", name)), nil
+	msg := fmt.Sprintf("connection %q deleted", name)
+	if deleted.Type == config.TypeSSH {
+		// A private key is not a token: it must not outlive the connection
+		// it was stored for. Other types keep their secrets on delete.
+		config.DeleteSecret(name + "-private-key")
+		config.DeleteSecret(name + "-private-key-passphrase")
+		msg += " together with its private key and passphrase secrets"
+	}
+	return mcp.NewToolResultText(msg), nil
 }
 
 func (ct *ConfigTools) handleTunnelAdd(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -530,6 +630,12 @@ func (ct *ConfigTools) handleTunnelAdd(_ context.Context, req mcp.CallToolReques
 		}
 		t.User = req.GetString("user", "")
 		t.KeyFile = req.GetString("key_file", "")
+		if v := req.GetString("auth", ""); v != "" {
+			if !sshclient.ValidAuth(v) {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid auth %q: must be %q or %q", v, sshclient.AuthKey, sshclient.AuthAgent)), nil
+			}
+			t.Auth = v
+		}
 	} else {
 		t.PeerPublicKey = req.GetString("peer_public_key", "")
 		t.PeerEndpoint = req.GetString("peer_endpoint", "")
@@ -548,7 +654,7 @@ func (ct *ConfigTools) handleTunnelAdd(_ context.Context, req mcp.CallToolReques
 
 	hint := fmt.Sprintf("tunnel %q (%s) created", name, typ)
 	if typ == config.TunnelTypeSSH {
-		hint += ". Use secret_set with key 'tunnel-" + name + "-private-key' to store the SSH private key (or set key_file)."
+		hint += ". Use secret_set with key 'tunnel-" + name + "-private-key' to store the SSH private key (or set key_file); a passphrase-protected key needs 'tunnel-" + name + "-private-key-passphrase' as well."
 	} else {
 		hint += ". Use secret_set with key 'tunnel-" + name + "-private-key' to store the WireGuard private key."
 	}
@@ -586,6 +692,7 @@ func (ct *ConfigTools) handleTunnelDelete(_ context.Context, req mcp.CallToolReq
 
 	// Best-effort cleanup of orphaned secrets
 	config.DeleteSecret("tunnel-" + name + "-private-key")
+	config.DeleteSecret("tunnel-" + name + "-private-key-passphrase")
 	config.DeleteSecret("tunnel-" + name + "-preshared-key")
 
 	// Warn about connections that still reference this tunnel
@@ -614,7 +721,7 @@ func (ct *ConfigTools) handleSecretSet(_ context.Context, req mcp.CallToolReques
 	}
 
 	if !config.ValidSecretKey(key) {
-		return mcp.NewToolResultError("invalid key: must match '{name}-password', '{name}-token', 'provisioning-token', 'tunnel-{name}-private-key', or 'tunnel-{name}-preshared-key'"), nil
+		return mcp.NewToolResultError("invalid key: must match '{name}-password', '{name}-token', '{name}-private-key', '{name}-private-key-passphrase', 'provisioning-token', 'tunnel-{name}-private-key', 'tunnel-{name}-private-key-passphrase', or 'tunnel-{name}-preshared-key'"), nil
 	}
 
 	if err := config.SaveSecret(key, value); err != nil {
@@ -628,6 +735,28 @@ func (ct *ConfigTools) handleSecretSet(_ context.Context, req mcp.CallToolReques
 }
 
 func (ct *ConfigTools) updateInMemorySecret(key, value string) {
+	// SSH keys: a connection's {name}-private-key[-passphrase] reloads the
+	// connection; a tunnel's tunnel-{name}-… is picked up at the next start
+	// (tunnels do not hot-reload). Checked first because "-private-key" would
+	// otherwise fall through to no branch.
+	if strings.HasSuffix(key, "-private-key-passphrase") || strings.HasSuffix(key, "-private-key") {
+		if strings.HasPrefix(key, "tunnel-") {
+			return
+		}
+		passphrase := strings.HasSuffix(key, "-private-key-passphrase")
+		name := strings.TrimSuffix(strings.TrimSuffix(key, "-passphrase"), "-private-key")
+		if c := ct.cfg.FindAnyConnection(name); c != nil && c.Type == config.TypeSSH {
+			if passphrase {
+				c.Passphrase = value
+			} else {
+				c.PrivateKey = value
+			}
+			if ct.reloader != nil {
+				ct.reloader.ReloadConnection(*c)
+			}
+		}
+		return
+	}
 	if strings.HasSuffix(key, "-password") {
 		name := strings.TrimSuffix(key, "-password")
 		if c := ct.cfg.FindAnyConnection(name); c != nil {
@@ -708,6 +837,12 @@ func (ct *ConfigTools) handleSecretCheck(_ context.Context, req mcp.CallToolRequ
 			_, err = config.GetSecret(c.Name + "-oauth-refresh-token")
 			secrets[c.Name+"-oauth-refresh-token"] = err == nil
 		}
+		if c.Type == config.TypeSSH {
+			_, err = config.GetSecret(c.Name + "-private-key")
+			secrets[c.Name+"-private-key"] = err == nil
+			_, err = config.GetSecret(c.Name + "-private-key-passphrase")
+			secrets[c.Name+"-private-key-passphrase"] = err == nil
+		}
 	}
 
 	if connFilter == "" {
@@ -715,8 +850,13 @@ func (ct *ConfigTools) handleSecretCheck(_ context.Context, req mcp.CallToolRequ
 			_, err := config.GetSecret("tunnel-" + t.Name + "-private-key")
 			secrets["tunnel-"+t.Name+"-private-key"] = err == nil
 
-			_, err = config.GetSecret("tunnel-" + t.Name + "-preshared-key")
-			secrets["tunnel-"+t.Name+"-preshared-key"] = err == nil
+			if t.IsSSH() {
+				_, err = config.GetSecret("tunnel-" + t.Name + "-private-key-passphrase")
+				secrets["tunnel-"+t.Name+"-private-key-passphrase"] = err == nil
+			} else {
+				_, err = config.GetSecret("tunnel-" + t.Name + "-preshared-key")
+				secrets["tunnel-"+t.Name+"-preshared-key"] = err == nil
+			}
 		}
 	}
 

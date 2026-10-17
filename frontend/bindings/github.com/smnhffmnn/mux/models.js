@@ -716,6 +716,57 @@ export class SaveConnectionRequest {
              */
             this["setOnceFields"] = undefined;
         }
+        if (/** @type {any} */(false)) {
+            /**
+             * ssh connection type. PrivateKey and Passphrase are secrets (stored, never
+             * echoed back); AllowCommands and DenyCommands are newline-separated.
+             * @member
+             * @type {string | undefined}
+             */
+            this["auth"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["keyFile"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["hostKey"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["allowCommands"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["denyCommands"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["privateKey"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["passphrase"] = undefined;
+        }
 
         Object.assign(this, $$source);
     }
@@ -828,10 +879,26 @@ export class SaveTunnelRequest {
         }
         if (/** @type {any} */(false)) {
             /**
+             * "key" or "agent"
+             * @member
+             * @type {string | undefined}
+             */
+            this["auth"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
              * @member
              * @type {string | undefined}
              */
             this["keyFile"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * of the private key; a secret
+             * @member
+             * @type {string | undefined}
+             */
+            this["passphrase"] = undefined;
         }
         if (/** @type {any} */(false)) {
             /**
@@ -1081,6 +1148,14 @@ export class TunnelInfo {
         }
         if (/** @type {any} */(false)) {
             /**
+             * SSH: "key" or "agent"
+             * @member
+             * @type {string | undefined}
+             */
+            this["auth"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
              * SSH
              * @member
              * @type {string | undefined}
@@ -1116,6 +1191,14 @@ export class TunnelInfo {
              * @type {boolean}
              */
             this["privateKeySet"] = false;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * SSH: whether a key passphrase is stored
+             * @member
+             * @type {boolean | undefined}
+             */
+            this["passphraseSet"] = undefined;
         }
         if (/** @type {any} */(false)) {
             /**

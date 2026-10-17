@@ -133,8 +133,23 @@ read_only = true
 # [connections.headers]
 # "Notion-Version" = "2022-06-28"
 
-# --- WireGuard Tunnels ---
-# Connections can reference tunnels by name to route traffic through WireGuard.
+# SSH host: commands and file copies, key held by mux (or the user's ssh-agent)
+# [[connections]]
+# name = "web01"
+# type = "ssh"
+# host = "web01.internal.example.com"
+# port = 22
+# user = "deploy"
+# auth = "key"                                  # default; "agent" = the ssh-agent of the user running mux
+# key_file = "~/.ssh/id_ed25519"                # optional: read the key from a file instead of the secret
+# host_key = "ssh-ed25519 AAAAC3… web01"        # optional: pin the server key; empty = known_hosts decides
+# read_only = true                              # no upload; exec limited to allow_commands or the built-in reading list
+# allow_commands = ["systemctl status", "journalctl"]   # optional, leading tokens; replaces the built-in list
+# deny_commands = ["journalctl --vacuum*"]              # optional, always wins
+# Private key stored as secret (key: "web01-private-key"), passphrase as "web01-private-key-passphrase"
+
+# --- Tunnels ---
+# Connections can reference tunnels by name to route traffic through WireGuard or SSH.
 
 # [[tunnels]]
 # name = "office-vpn"
@@ -147,6 +162,17 @@ read_only = true
 # keepalive = 25                         # optional, default: 25 seconds
 # Private key stored as secret (key: "tunnel-office-vpn-private-key")
 # Preshared key stored as secret (key: "tunnel-office-vpn-preshared-key")
+
+# [[tunnels]]
+# name = "bastion"
+# type = "ssh"
+# host = "bastion.example.com"
+# port = 22
+# user = "deploy"
+# auth = "key"                           # default; "agent" uses the ssh-agent of the user running mux
+# key_file = "~/.ssh/id_ed25519"         # optional, instead of the stored key
+# Private key stored as secret (key: "tunnel-bastion-private-key"); passphrase, if encrypted,
+# as "tunnel-bastion-private-key-passphrase". Host key: known_hosts in the mux config dir or ~/.ssh.
 
 # --- Legacy Format ---
 # The old single-section format is still supported and auto-migrated:

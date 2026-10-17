@@ -487,6 +487,7 @@ More info: https://github.com/smnhffmnn/mux
 			localRoutes = func(mux *http.ServeMux) {
 				vh.Mount(mux)
 				vh.MountSSH(mux)
+				tools.MountSSHAudit(mux)
 				if oauthRoutes != nil {
 					oauthRoutes(mux)
 				}
@@ -502,9 +503,14 @@ More info: https://github.com/smnhffmnn/mux
 				}
 			}()
 			defer credSock.Close()
-		} else if oauthRoutes != nil {
+		} else {
 			// OAuth routes on local HTTP only — redirect_uri is always localhost.
-			localRoutes = oauthRoutes
+			localRoutes = func(mux *http.ServeMux) {
+				tools.MountSSHAudit(mux)
+				if oauthRoutes != nil {
+					oauthRoutes(mux)
+				}
+			}
 		}
 		servers := startHTTPServer(s, cfg, hc, localRoutes, tlsRoutes)
 
