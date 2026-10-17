@@ -600,3 +600,20 @@ func TestSSH_SubsystemRefusedKeepsConnection(t *testing.T) {
 		t.Fatal(text(res))
 	}
 }
+
+// TestCapturedStream_WriteContract: the writer keeps only limit bytes but
+// must report every byte as written — io.Copy treats anything less as a
+// short write and aborts the copy (the first CI run on Linux, whose chunks
+// are 32 KB, hit exactly that).
+func TestCapturedStream_WriteContract(t *testing.T) {
+	c := &capturedStream{limit: 10}
+	for _, chunk := range [][]byte{[]byte("0123456789abcdef"), []byte("more"), {}} {
+		n, err := c.Write(chunk)
+		if err != nil || n != len(chunk) {
+			t.Fatalf("Write(%d bytes) = %d, %v", len(chunk), n, err)
+		}
+	}
+	if c.total != 20 || c.buf.String() != "0123456789" || !c.truncated() {
+		t.Errorf("total=%d buf=%q truncated=%v", c.total, c.buf.String(), c.truncated())
+	}
+}

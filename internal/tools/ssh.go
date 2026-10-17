@@ -383,17 +383,22 @@ type capturedStream struct {
 }
 
 func (c *capturedStream) Write(p []byte) (int, error) {
-	if c.touch != nil && len(p) > 0 {
+	n := len(p)
+	if c.touch != nil && n > 0 {
 		c.touch()
 	}
-	c.total += int64(len(p))
+	c.total += int64(n)
 	if room := c.limit - c.buf.Len(); room > 0 {
 		if len(p) > room {
 			p = p[:room]
 		}
 		c.buf.Write(p)
 	}
-	return len(p), nil
+	// Always the full length: a writer that keeps less than it was given
+	// must still report it all consumed, or io.Copy stops with ErrShortWrite
+	// — which is exactly what happened on the first chunk that crossed the
+	// limit.
+	return n, nil
 }
 
 func (c *capturedStream) truncated() bool { return c.total > int64(c.buf.Len()) }
