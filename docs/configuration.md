@@ -142,7 +142,10 @@ The vault is the recommended replacement for this plaintext fallback.
 | `{name}-oauth-client-id` | OAuth client ID |
 | `{name}-oauth-client-secret` | OAuth client secret |
 | `{name}-oauth-refresh-token` | OAuth refresh token (microsoft-graph) |
-| `tunnel-{name}-private-key` | WireGuard private key (base64) |
+| `{name}-private-key` | SSH connection: private key (PEM, may be encrypted) |
+| `{name}-private-key-passphrase` | SSH connection: passphrase of the private key |
+| `tunnel-{name}-private-key` | Tunnel private key: WireGuard (base64) or SSH (PEM, may be encrypted) |
+| `tunnel-{name}-private-key-passphrase` | SSH tunnel: passphrase of the private key |
 | `tunnel-{name}-preshared-key` | WireGuard preshared key (base64) |
 | `provisioning-token` | Remote provisioning bearer token |
 

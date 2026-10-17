@@ -129,12 +129,22 @@ All fields use **camelCase** JSON keys.
 | `monthlyLimit` | integer | no | Monthly request limit (brave only) |
 | `protectedFields` | string[] | no | youtrack-rest: fields never written through the connection, entries `"Project:Field"` or `"Field"` |
 | `setOnceFields` | string[] | no | youtrack-rest: fields written only while still empty, same entry form |
+| `auth` | string | no | ssh: `"key"` (default) or `"agent"` |
+| `keyFile` | string | no | ssh: path of a private key file on the client, instead of the stored key |
+| `hostKey` | string | no | ssh: the server's public key to pin (`"ssh-ed25519 AAAA…"`). Recommended for provisioned hosts — the server knows its machines, and no `known_hosts` has to be managed on the client. |
+| `allowCommands` | string[] | no | ssh: commands the connection may run, entries as leading tokens (`"systemctl status"`) |
+| `denyCommands` | string[] | no | ssh: commands it never runs, same form, wildcards `*`/`?` |
+| `privateKey` | string | no | ssh: the private key (PEM). If omitted, mux checks the secret store for `{name}-private-key`. |
+| `passphrase` | string | no | ssh: passphrase of an encrypted `privateKey`. If omitted, mux checks the secret store for `{name}-private-key-passphrase`. |
 
 ### Tunnel Object
+
+WireGuard (the default when `type` is omitted):
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | yes | Unique tunnel identifier |
+| `type` | string | no | `"wireguard"` (default) or `"ssh"` |
 | `peerPublicKey` | string | yes | WireGuard peer public key (base64) |
 | `peerEndpoint` | string | yes | Peer endpoint (`host:port`) |
 | `allowedIPs` | string | yes | Allowed IP ranges (CIDR, comma-separated) |
@@ -145,11 +155,26 @@ All fields use **camelCase** JSON keys.
 | `mtu` | integer | no | MTU (default: 1420) |
 | `keepalive` | integer | no | Persistent keepalive in seconds (default: 25) |
 
+SSH (`"type": "ssh"`):
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Unique tunnel identifier |
+| `host` | string | yes | SSH server hostname or IP |
+| `port` | integer | no | SSH port (default: 22) |
+| `user` | string | yes | SSH username |
+| `auth` | string | no | `"key"` (default) or `"agent"` |
+| `keyFile` | string | no | Path of a private key file on the client |
+| `privateKey` | string | no | SSH private key (PEM). If omitted, mux checks the secret store for `tunnel-{name}-private-key`. |
+| `passphrase` | string | no | Passphrase of an encrypted `privateKey`. If omitted, mux checks the secret store for `tunnel-{name}-private-key-passphrase`. |
+
+`insecureHostKey` is not honoured from provisioning: mux clears it on provisioned SSH tunnels (with a log line) and verifies the host against the client's `known_hosts` files. For a provisioned ssh *connection*, deliver the host's key in `hostKey` instead.
+
 ## How Secrets Are Handled
 
 Passwords and keys can be provided in the JSON response or stored locally on the client. mux applies this precedence:
 
-1. **JSON response** -- if the provisioning server includes `password`, `token`, or `privateKey`, those values are used
+1. **JSON response** -- if the provisioning server includes `password`, `token`, `privateKey` or `passphrase`, those values are used
 2. **Local secret store** -- if a field is empty in the JSON, mux checks the local secret store (Vault → OS Keychain → File fallback, see [configuration.md](configuration.md#secrets))
 3. **Neither** -- the connection/tunnel is skipped as incomplete
 

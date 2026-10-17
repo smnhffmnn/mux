@@ -28,7 +28,9 @@ var buildTime = ""
 
 // tunnelManager wraps WireGuard and SSH tunnels behind a common Dialer interface.
 type tunnelManager struct {
-	wg  *wireguard.Manager
+	wg *wireguard.Manager
+
+	mu  sync.RWMutex // guards ssh: StartMissing runs from the provisioning sync while Get/IsUp serve registrations and /health
 	ssh map[string]*tunnel.SSHTunnel
 }
 
@@ -47,10 +49,11 @@ func (tm *tunnelManager) StartSSH(tunnels []config.TunnelConfig) map[string]erro
 		t, err := tunnel.NewSSH(cfg)
 		if err != nil {
 			errs[cfg.Name] = err
-			log.Printf("[ssh] Tunnel %q failed: %v", cfg.Name, err)
 			continue
 		}
+		tm.mu.Lock()
 		tm.ssh[cfg.Name] = t
+		tm.mu.Unlock()
 		log.Printf("[ssh] Tunnel %q started (%s@%s:%d)", cfg.Name, cfg.User, cfg.Host, cfg.Port)
 	}
 	return errs
@@ -61,7 +64,10 @@ func (tm *tunnelManager) Get(name string) tools.Dialer {
 	if t := tm.wg.Get(name); t != nil {
 		return t
 	}
-	if t, ok := tm.ssh[name]; ok {
+	tm.mu.RLock()
+	t, ok := tm.ssh[name]
+	tm.mu.RUnlock()
+	if ok {
 		return t
 	}
 	return nil
@@ -101,7 +107,10 @@ func (tm *tunnelManager) IsUp(name string) bool {
 	if tm.wg.IsUp(name) {
 		return true
 	}
-	if t, ok := tm.ssh[name]; ok {
+	tm.mu.RLock()
+	t, ok := tm.ssh[name]
+	tm.mu.RUnlock()
+	if ok {
 		return t.IsUp()
 	}
 	return false
@@ -109,6 +118,8 @@ func (tm *tunnelManager) IsUp(name string) bool {
 
 // Close shuts down all SSH tunnels. WireGuard tunnels are closed via wg.Manager.
 func (tm *tunnelManager) Close() {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
 	for name, t := range tm.ssh {
 		log.Printf("[ssh] Closing tunnel %q", name)
 		t.Close()
@@ -356,21 +367,32 @@ func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config
 		mountCancel()
 	}
 
-	// Retry database connections that need a password from the vault
+	// Retry connections that need a secret from the vault: database passwords,
+	// and the ssh key (its absence is what made Enabled() false at startup, so
+	// the secrets are resolved into the local copy before that check).
 	for _, conn := range cfg.AllConnections() {
-		if config.IsProxyType(conn.Type) || !conn.Enabled() {
+		if config.IsProxyType(conn.Type) || registered[conn.Name] {
 			continue
 		}
-		if registered[conn.Name] {
-			continue
-		}
-
-		// Resolve password from vault into a local copy
 		if conn.Password == "" {
-			pw, _ := config.GetSecret(conn.Name + "-password")
-			if pw != "" {
+			if pw, _ := config.GetSecret(conn.Name + "-password"); pw != "" {
 				conn.Password = pw
 			}
+		}
+		if conn.Type == config.TypeSSH {
+			if conn.PrivateKey == "" {
+				if v, _ := config.GetSecret(conn.Name + "-private-key"); v != "" {
+					conn.PrivateKey = v
+				}
+			}
+			if conn.Passphrase == "" {
+				if v, _ := config.GetSecret(conn.Name + "-private-key-passphrase"); v != "" {
+					conn.Passphrase = v
+				}
+			}
+		}
+		if !conn.Enabled() {
+			continue
 		}
 
 		var dialer tools.Dialer

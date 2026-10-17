@@ -172,6 +172,13 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		if err == nil {
 			toolDefs = hb.Tools()
 		}
+	case config.TypeSSH:
+		var sh *SSH
+		sh, err = NewSSH(conn, dialer)
+		if err == nil {
+			toolDefs = sh.Tools()
+			closer = sh
+		}
 	case config.TypeGit:
 		// Passive connection type — no MCP tools.
 		// Used by the git credential helper (mux git-credential) to look up
@@ -241,6 +248,8 @@ func DefaultInstructions(connType string) string {
 		return DefaultHyperbrowserInstructions
 	case config.TypeYouTrackREST:
 		return DefaultYouTrackRESTInstructions
+	case config.TypeSSH:
+		return DefaultSSHInstructions
 	default:
 		return ""
 	}

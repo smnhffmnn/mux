@@ -28,12 +28,21 @@ type ProvisionResponse struct {
 type wireTunnel struct {
 	config.TunnelConfig
 	PrivateKey string `json:"privateKey,omitempty"`
+	Passphrase string `json:"passphrase,omitempty"`
+}
+
+// wireConnection does the same for ssh connections: privateKey and
+// passphrase are `json:"-"` on Connection and only this path may carry them.
+type wireConnection struct {
+	config.Connection
+	PrivateKey string `json:"privateKey,omitempty"`
+	Passphrase string `json:"passphrase,omitempty"`
 }
 
 // wireResponse is the raw JSON shape of the provisioning endpoint.
 type wireResponse struct {
-	Tunnels     []wireTunnel        `json:"tunnels,omitempty"`
-	Connections []config.Connection `json:"connections"`
+	Tunnels     []wireTunnel     `json:"tunnels,omitempty"`
+	Connections []wireConnection `json:"connections"`
 }
 
 // Fetch retrieves the provisioning config from the provisioning endpoint.
@@ -97,15 +106,20 @@ func Fetch(ctx context.Context, endpoint, token string) (*ProvisionResponse, err
 
 	// Mark all entries as provisioning-sourced and carry over the inbound-only
 	// secret fields (see wireTunnel).
-	result := ProvisionResponse{Connections: wire.Connections}
+	var result ProvisionResponse
 	for _, wt := range wire.Tunnels {
 		t := wt.TunnelConfig
 		t.PrivateKey = wt.PrivateKey
+		t.Passphrase = wt.Passphrase
 		t.Source = config.SourceProvisioning
 		result.Tunnels = append(result.Tunnels, t)
 	}
-	for i := range result.Connections {
-		result.Connections[i].Source = config.SourceProvisioning
+	for _, wc := range wire.Connections {
+		c := wc.Connection
+		c.PrivateKey = wc.PrivateKey
+		c.Passphrase = wc.Passphrase
+		c.Source = config.SourceProvisioning
+		result.Connections = append(result.Connections, c)
 	}
 
 	return &result, nil

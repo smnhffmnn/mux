@@ -63,11 +63,13 @@ export interface TunnelInfo {
   host?: string
   port?: number
   user?: string
+  auth?: string                 // SSH: "key" or "agent"
   keyFile?: string
   insecureHostKey?: boolean
   source: string                // "local" or "provisioning"
   connected: boolean
   privateKeySet: boolean
+  passphraseSet?: boolean
   presharedKeySet?: boolean
 }
 
@@ -84,7 +86,9 @@ export interface SaveTunnelRequest {
   host?: string
   port?: string
   user?: string
+  auth?: string
   keyFile?: string
+  passphrase?: string
   insecureHostKey?: boolean
 }
 
@@ -170,11 +174,24 @@ export interface SaveConnectionRequest {
   database?: string
   url?: string
   token?: string
+  clientId?: string
   scopes?: string
   tunnel?: string
   instructions?: string
   tokenHeader?: string
+  tokenScheme?: string
+  basicSuffix?: string
   headers?: string
+  protectedFields?: string
+  setOnceFields?: string
+  // ssh
+  auth?: string
+  keyFile?: string
+  hostKey?: string
+  allowCommands?: string
+  denyCommands?: string
+  privateKey?: string
+  passphrase?: string
 }
 
 // API functions

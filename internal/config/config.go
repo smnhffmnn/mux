@@ -15,6 +15,8 @@ import (
 	"sync"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/smnhffmnn/mux/internal/sshclient"
 )
 
 // legacyProvisioningHeader matches a standalone `[provisioning]` header on its
@@ -169,6 +171,24 @@ type Connection struct {
 	// not only for the ones that read the connection's instructions.
 	ProtectedFields []string `toml:"protected_fields,omitempty" json:"protectedFields,omitempty"`
 	SetOnceFields   []string `toml:"set_once_fields,omitempty" json:"setOnceFields,omitempty"`
+
+	// SSH connection type (TypeSSH). Auth selects the key source: "key"
+	// (default — the secret {name}-private-key or key_file) or "agent" (the
+	// user's ssh-agent, no key in mux). HostKey pins the server's public key;
+	// without it the known_hosts files decide. AllowCommands and DenyCommands
+	// are command patterns ("systemctl status", "journalctl --vacuum*"); a
+	// read-only connection without AllowCommands runs the built-in list of
+	// reading commands. Enforced in code, like the field guards above.
+	Auth          string   `toml:"auth,omitempty" json:"auth,omitempty"`
+	KeyFile       string   `toml:"key_file,omitempty" json:"keyFile,omitempty"`
+	HostKey       string   `toml:"host_key,omitempty" json:"hostKey,omitempty"`
+	AllowCommands []string `toml:"allow_commands,omitempty" json:"allowCommands,omitempty"`
+	DenyCommands  []string `toml:"deny_commands,omitempty" json:"denyCommands,omitempty"`
+	// PrivateKey (PEM, may be encrypted) and Passphrase come from the secret
+	// store ({name}-private-key, {name}-private-key-passphrase) or inbound
+	// from provisioning; never serialized.
+	PrivateKey string `toml:"-" json:"-"`
+	Passphrase string `toml:"-" json:"-"`
 }
 
 // Enabled reports whether the connection has enough config to attempt a connection.
@@ -196,6 +216,10 @@ func (c *Connection) Enabled() bool {
 		// Token is fetched from vault at request time, not at startup.
 		// Only require host and user for the connection to be considered enabled.
 		return c.Host != "" && c.User != ""
+	case c.Type == TypeSSH:
+		// With auth = "agent" the key lives in the user's ssh-agent, so no
+		// stored key is needed for the connection to count as configured.
+		return c.Host != "" && c.User != "" && (c.Auth == sshclient.AuthAgent || c.PrivateKey != "" || c.KeyFile != "")
 	default:
 		return c.Host != "" && c.User != ""
 	}
@@ -229,11 +253,13 @@ type TunnelConfig struct {
 	Host            string `toml:"host,omitempty" json:"host,omitempty"`
 	Port            int    `toml:"port,omitzero" json:"port,omitempty"`
 	User            string `toml:"user,omitempty" json:"user,omitempty"`
+	Auth            string `toml:"auth,omitempty" json:"auth,omitempty"`                         // "key" (default: stored key or key_file) or "agent" (user's ssh-agent)
 	KeyFile         string `toml:"key_file,omitempty" json:"keyFile,omitempty"`                  // path to SSH private key file
 	InsecureHostKey bool   `toml:"insecure_host_key,omitempty" json:"insecureHostKey,omitempty"` // skip host key verification (default: false)
 
 	// Shared
-	PrivateKey string `toml:"-" json:"-"`                // WG: base64 key; SSH: PEM key content — never serialize
+	PrivateKey string `toml:"-" json:"-"`                // WG: base64 key; SSH: PEM key content (may be encrypted) — never serialize
+	Passphrase string `toml:"-" json:"-"`                // SSH: decrypts an encrypted PrivateKey (secret tunnel-{name}-private-key-passphrase) — never serialize
 	Source     string `toml:"-" json:"source,omitempty"` // see Source* constants in identifiers.go
 }
 
@@ -245,7 +271,7 @@ func (t *TunnelConfig) IsSSH() bool {
 // Enabled reports whether the tunnel has enough config to be started.
 func (t *TunnelConfig) Enabled() bool {
 	if t.IsSSH() {
-		return t.Host != "" && t.User != "" && (t.PrivateKey != "" || t.KeyFile != "")
+		return t.Host != "" && t.User != "" && (t.Auth == sshclient.AuthAgent || t.PrivateKey != "" || t.KeyFile != "")
 	}
 	// WireGuard
 	return t.PrivateKey != "" && t.PeerPublicKey != "" && t.PeerEndpoint != ""
@@ -452,6 +478,22 @@ func (cfg *Config) SetProvisioned(endpointName string, tunnels []TunnelConfig, c
 				connections[i].Token = v
 			}
 		}
+		// An ssh connection provisioned without key material is the common
+		// shape: the server knows host, user and host key, the key stays with
+		// the user. Without this lookup such a connection never counts as
+		// enabled and silently registers nothing.
+		if connections[i].Type == TypeSSH {
+			if connections[i].PrivateKey == "" {
+				if v, err := getSecret(connections[i].Name + "-private-key"); err == nil {
+					connections[i].PrivateKey = v
+				}
+			}
+			if connections[i].Passphrase == "" {
+				if v, err := getSecret(connections[i].Name + "-private-key-passphrase"); err == nil {
+					connections[i].Passphrase = v
+				}
+			}
+		}
 		ApplyConnectionDefaults(&connections[i])
 	}
 	for i := range tunnels {
@@ -461,6 +503,12 @@ func (cfg *Config) SetProvisioned(endpointName string, tunnels []TunnelConfig, c
 		if tunnels[i].IsSSH() {
 			if tunnels[i].Port == 0 {
 				tunnels[i].Port = 22
+			}
+			// Host key verification is not something a provisioning server
+			// switches off for its clients: the flag stays a local decision.
+			if tunnels[i].InsecureHostKey {
+				log.Printf("[config] provisioned tunnel %q asks for insecure_host_key — ignored, host keys are verified against known_hosts", tunnels[i].Name)
+				tunnels[i].InsecureHostKey = false
 			}
 		} else {
 			if tunnels[i].MTU == 0 {
@@ -479,6 +527,11 @@ func (cfg *Config) SetProvisioned(endpointName string, tunnels []TunnelConfig, c
 		if tunnels[i].PresharedKey == "" {
 			if v, err := getSecret("tunnel-" + tunnels[i].Name + "-preshared-key"); err == nil {
 				tunnels[i].PresharedKey = v
+			}
+		}
+		if tunnels[i].IsSSH() && tunnels[i].Passphrase == "" {
+			if v, err := getSecret("tunnel-" + tunnels[i].Name + "-private-key-passphrase"); err == nil {
+				tunnels[i].Passphrase = v
 			}
 		}
 	}
@@ -804,6 +857,10 @@ func ApplyConnectionDefaults(c *Connection) {
 		if c.Port == 0 {
 			c.Port = 7700
 		}
+	case TypeSSH:
+		if c.Port == 0 {
+			c.Port = 22
+		}
 	}
 }
 
@@ -853,6 +910,34 @@ func (cfg *Config) Save() error {
 
 // --- Keychain ---
 
+// LoadConnectionSecrets fills a connection's secrets from the secret store
+// where they are still empty — the same lookups loadKeychain does at startup,
+// for a connection created at runtime after its secrets were stored.
+func LoadConnectionSecrets(c *Connection) {
+	if c.Password == "" {
+		if v, err := getSecret(c.Name + "-password"); err == nil {
+			c.Password = v
+		}
+	}
+	if c.Token == "" {
+		if v, err := getSecret(c.Name + "-token"); err == nil {
+			c.Token = v
+		}
+	}
+	if c.Type == TypeSSH {
+		if c.PrivateKey == "" {
+			if v, err := getSecret(c.Name + "-private-key"); err == nil {
+				c.PrivateKey = v
+			}
+		}
+		if c.Passphrase == "" {
+			if v, err := getSecret(c.Name + "-private-key-passphrase"); err == nil {
+				c.Passphrase = v
+			}
+		}
+	}
+}
+
 func loadKeychain(cfg *Config) {
 	secretsLoaded := 0
 
@@ -877,13 +962,27 @@ func loadKeychain(cfg *Config) {
 			cfg.Connections[i].Token = v
 			secretsLoaded++
 		}
+		if cfg.Connections[i].Type == TypeSSH {
+			if v, err := getSecret(name + "-private-key"); err == nil {
+				cfg.Connections[i].PrivateKey = v
+				secretsLoaded++
+			}
+			if v, err := getSecret(name + "-private-key-passphrase"); err == nil {
+				cfg.Connections[i].Passphrase = v
+				secretsLoaded++
+			}
+		}
 	}
 
-	// Tunnel secrets (private key, preshared key)
+	// Tunnel secrets (private key, its passphrase, preshared key)
 	for i := range cfg.Tunnels {
 		name := cfg.Tunnels[i].Name
 		if v, err := getSecret("tunnel-" + name + "-private-key"); err == nil {
 			cfg.Tunnels[i].PrivateKey = v
+			secretsLoaded++
+		}
+		if v, err := getSecret("tunnel-" + name + "-private-key-passphrase"); err == nil {
+			cfg.Tunnels[i].Passphrase = v
 			secretsLoaded++
 		}
 		if v, err := getSecret("tunnel-" + name + "-preshared-key"); err == nil {
@@ -1182,17 +1281,19 @@ func ValidSecretKey(key string) bool {
 	if strings.HasPrefix(key, "vault-") {
 		return true
 	}
-	if strings.HasSuffix(key, "-password") ||
-		strings.HasSuffix(key, "-token") ||
-		strings.HasSuffix(key, "-oauth-token") ||
-		strings.HasSuffix(key, "-oauth-refresh-token") ||
-		strings.HasSuffix(key, "-oauth-client-id") ||
-		strings.HasSuffix(key, "-oauth-client-secret") {
-		return len(key) > len("-password") // must have a prefix
+	for _, suffix := range []string{
+		"-password", "-token", "-oauth-token", "-oauth-refresh-token",
+		"-oauth-client-id", "-oauth-client-secret",
+		// SSH connections: {name}-private-key, {name}-private-key-passphrase.
+		// Tunnels use the same suffixes under the tunnel- prefix.
+		"-private-key", "-private-key-passphrase",
+	} {
+		if strings.HasSuffix(key, suffix) {
+			return len(key) > len(suffix) // must have a prefix
+		}
 	}
-	if strings.HasPrefix(key, "tunnel-") &&
-		(strings.HasSuffix(key, "-private-key") || strings.HasSuffix(key, "-preshared-key")) {
-		return true
+	if strings.HasPrefix(key, "tunnel-") && strings.HasSuffix(key, "-preshared-key") {
+		return len(key) > len("tunnel--preshared-key")
 	}
 	return false
 }

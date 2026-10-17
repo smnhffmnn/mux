@@ -17,7 +17,9 @@
         port: tunnel.port ? String(tunnel.port) : '22',
         user: tunnel.user ?? '',
         keyFile: tunnel.keyFile ?? '',
+        auth: tunnel.auth || 'key',
         privateKey: '',
+        passphrase: '',
       }
       insecureHostKey = tunnel.insecureHostKey ?? false
     } else {
@@ -47,7 +49,9 @@
         if (formValues.port) req.port = formValues.port
         if (formValues.user) req.user = formValues.user
         if (formValues.keyFile) req.keyFile = formValues.keyFile
+        if (formValues.auth) req.auth = formValues.auth
         if (formValues.privateKey) req.privateKey = formValues.privateKey
+        if (formValues.passphrase) req.passphrase = formValues.passphrase
         req.insecureHostKey = insecureHostKey
       } else {
         if (formValues.peerPublicKey) req.peerPublicKey = formValues.peerPublicKey
@@ -86,12 +90,23 @@
         <input id="user" type="text" placeholder="ubuntu" bind:value={formValues.user} disabled={isProvisioned} />
       </div>
       <div class="form-field">
+        <label for="auth">Auth</label>
+        <select id="auth" bind:value={formValues.auth} disabled={isProvisioned}>
+          <option value="key">key — stored key or key file</option>
+          <option value="agent">agent — the user's ssh-agent</option>
+        </select>
+      </div>
+      <div class="form-field">
         <label for="keyFile">Key File</label>
         <input id="keyFile" type="text" placeholder="~/.ssh/id_rsa" bind:value={formValues.keyFile} disabled={isProvisioned} />
       </div>
-      <div class="form-field">
+      <div class="form-field full">
         <label for="privateKey">Private Key (PEM)</label>
-        <input id="privateKey" type="password" placeholder={tunnel.privateKeySet ? '••••• (stored)' : 'Paste PEM key...'} bind:value={formValues.privateKey} />
+        <textarea id="privateKey" class="secret" rows="3" autocomplete="off" spellcheck="false" placeholder={tunnel.privateKeySet ? '••••• (stored — paste to replace)' : 'Paste the private key — may be passphrase-protected'} bind:value={formValues.privateKey}></textarea>
+      </div>
+      <div class="form-field">
+        <label for="passphrase">Key Passphrase</label>
+        <input id="passphrase" type="password" placeholder={tunnel.passphraseSet ? '••••• (stored)' : 'optional'} bind:value={formValues.passphrase} />
       </div>
       <div class="form-field checkbox-field">
         <label>
@@ -169,6 +184,18 @@
 
   .form-field.small {
     max-width: 120px;
+  }
+
+  .form-field.full {
+    grid-column: 1 / -1;
+  }
+
+  textarea.secret {
+    width: 100%;
+    resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    -webkit-text-security: disc;
   }
 
   .checkbox-field {

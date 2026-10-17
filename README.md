@@ -12,8 +12,9 @@ mux is a [Model Context Protocol](https://modelcontextprotocol.io) gateway that 
 - **MCP Proxy** -- forward tool calls to upstream MCP servers with Bearer, HTTP Basic, custom-header, or OAuth auth, optionally routed through a tunnel (YouTrack, Sentry, Notion, Asana MCP, Netdata, or any MCP endpoint)
 - **API Integrations** -- Microsoft Graph (mail, calendar, SharePoint), Google Workspace (Drive, Docs, Sheets, Gmail, Calendar, Tasks), Google Tag Manager, Google Gemini, OpenAI, ElevenLabs, Brave Search, Firecrawl, Hyperbrowser (stealth browser), fal.ai (async inference queue), Higgsfield (image/video generation via its hosted MCP), Recraft + Ideogram (image generation), Asana, YouTrack (REST: issues, comments, change history, attachments, agile boards, administration), IMAP mail
 - **Generic HTTP** -- connect any REST API with token auth (Bearer or Basic), custom headers, file output and multipart file upload
+- **SSH Hosts** -- run commands and copy files on remote hosts with the key held by mux (or the user's ssh-agent): arguments as a list, allow/deny lists per host, read-only mode, pinned host keys, every operation logged and served on `/audit/ssh`
 - **Git Credentials** -- serve PATs from the secret store to git via `mux git-credential`
-- **WireGuard Tunnels** -- reach databases on private networks through userspace WireGuard (no root, no VPN client)
+- **WireGuard and SSH Tunnels** -- reach databases on private networks through userspace WireGuard (no root, no VPN client) or port forwarding over SSH (passphrase-protected keys and ssh-agent supported)
 - **Remote Provisioning** -- centrally manage connections and tunnels for your team from one or more HTTP endpoints (configure multiple `[[provisioning]]` blocks to combine sources)
 - **Two Transports, Three Modes** -- stdio (Claude Desktop) and Streamable HTTP (`/mcp`), with auto-detection of desktop, headless, and stdio modes
 - **Desktop App** -- Wails v3 + Svelte 5 with system tray, web UI, OAuth flows, and connection testing
@@ -176,6 +177,15 @@ type = "proxy"
 url = "https://instance.myjetbrains.com/mcp"
 # Token stored as secret (key: "youtrack-token")
 
+[[connections]]
+name = "web01"
+type = "ssh"
+host = "web01.internal.example.com"
+user = "deploy"
+read_only = true                      # built-in list of reading commands, no upload
+host_key = "ssh-ed25519 AAAAC3…"      # pinned; otherwise known_hosts decides
+# Private key stored as secret (key: "web01-private-key")
+
 [[tunnels]]
 name = "office-vpn"
 peer_public_key = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg="
@@ -277,7 +287,7 @@ A PreToolUse hook script for Claude Code is included at `scripts/approval-hook.s
 |----------|-------------|
 | [Configuration](docs/configuration.md) | Complete TOML reference, environment variables, keychain conventions |
 | [Connections](docs/connections.md) | Every connection type with fields, examples, and exposed MCP tools |
-| [Tunnels](docs/tunnels.md) | WireGuard tunnel architecture, configuration, fail-closed logic |
+| [Tunnels](docs/tunnels.md) | WireGuard and SSH tunnel architecture, configuration, fail-closed logic |
 | [Provisioning](docs/provisioning.md) | Remote provisioning API contract, JSON schema, server examples |
 | [Deployment](docs/deployment.md) | Building, cross-compilation, systemd, Docker, CI/CD |
 

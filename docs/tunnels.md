@@ -1,6 +1,6 @@
 # Tunnels
 
-mux supports two tunnel types: **WireGuard** (userspace, built-in) and **SSH** (via OpenSSH). Both allow connections to reach servers on private networks without a system-wide VPN.
+mux supports two tunnel types: **WireGuard** (userspace, built-in) and **SSH** (built-in client, port forwarding over an SSH connection). Both allow connections to reach servers on private networks without a system-wide VPN.
 
 ## WireGuard Tunnels
 
@@ -157,14 +157,14 @@ All drivers receive the tunnel's `DialContext` method, which routes TCP connecti
 ## Limitations
 
 - **TCP only**: The netstack approach only supports TCP connections. DNS resolution through the tunnel works via the `dns` field, but arbitrary UDP is not supported.
-- **No runtime changes**: Tunnel configuration changes require a mux restart. The provisioning sync re-fetches connections but does not restart tunnels.
-- **No active health checks**: `IsUp()` reports whether the tunnel started successfully, not whether the peer is currently reachable. Failing traffic triggers endpoint failover (see above) but is not reflected in `IsUp()`.
+- **No runtime changes to existing tunnels**: changing a tunnel's configuration requires a mux restart. The provisioning sync starts tunnels that are new since startup but does not restart existing ones.
+- **No active health checks for WireGuard**: `IsUp()` reports whether the tunnel started successfully, not whether the peer is currently reachable. Failing traffic triggers endpoint failover (see above) but is not reflected in `IsUp()`. SSH tunnels differ: a keepalive every 30 seconds marks a silent connection dead (`IsUp()` false, `/health` degraded) until the next use reconnects.
 - **Single peer per tunnel**: Each tunnel connects to exactly one WireGuard peer (standard client pattern).
 - **One owner per machine**: Provisioned credentials are issued per user, so two mux instances present the *same* WireGuard key. The server keeps one endpoint per peer, so whichever instance sent traffic last owns the return path — and with a persistent keepalive they take it from each other continuously. The symptom is calls that fail intermittently and succeed on retry. Only one instance should own the tunnels; stdio invocations bridge to it by default, see [Running more than one instance](configuration.md#running-more-than-one-instance). Two instances on two different machines hit this too and bridging cannot help there — that needs per-instance credentials from the provisioning side.
 
 ## SSH Tunnels
 
-SSH tunnels provide TCP forwarding through an SSH connection. Unlike WireGuard, SSH tunnels use the system's OpenSSH client and support standard key-based authentication.
+SSH tunnels provide TCP forwarding through an SSH connection (`direct-tcpip` channels). The SSH client is built in (`golang.org/x/crypto/ssh`, shared with the [ssh connection type](connections.md#ssh)); no OpenSSH client is involved.
 
 ### Configuration
 
@@ -175,9 +175,11 @@ type = "ssh"
 host = "bastion.example.com"
 port = 22
 user = "deploy"
-key_file = "~/.ssh/id_ed25519"       # path to SSH private key
+# auth = "key"                        # default; "agent" uses the user's ssh-agent instead of a stored key
+# key_file = "~/.ssh/id_ed25519"      # read the key from a file instead of the secret store
 # insecure_host_key = false           # default: false (fail-closed, verify known_hosts)
-# Private key can also be stored in vault (key: "tunnel-bastion-private-key")
+# Private key stored as secret (key: "tunnel-bastion-private-key"); if it is encrypted,
+# its passphrase as "tunnel-bastion-private-key-passphrase"
 ```
 
 ### SSH Tunnel Fields
@@ -189,15 +191,17 @@ key_file = "~/.ssh/id_ed25519"       # path to SSH private key
 | `host` | string | yes | SSH server hostname or IP |
 | `port` | integer | no | SSH server port (default: 22) |
 | `user` | string | yes | SSH username |
-| `key_file` | string | no | Path to SSH private key file (alternative to vault-stored key) |
+| `auth` | string | no | `key` (default): a private key mux holds — the secret or `key_file`. `agent`: the ssh-agent of the user running mux (`SSH_AUTH_SOCK`); no key in mux, not available in containers. |
+| `key_file` | string | no | Path to SSH private key file (alternative to the stored key) |
 | `insecure_host_key` | boolean | no | Skip host key verification (default: false). **Not recommended for production.** |
 
 **Secrets**:
-- `tunnel-{name}-private-key` -- SSH private key (PEM format, stored in vault). Used when `key_file` is not set.
+- `tunnel-{name}-private-key` -- SSH private key (PEM, OpenSSH or PKCS format; may be passphrase-protected). Used when `key_file` is not set.
+- `tunnel-{name}-private-key-passphrase` -- passphrase of an encrypted private key. mux decrypts the key in memory only; the key can stay as its owner has it. Ignored for an unencrypted key.
 
 ### Host Key Verification
 
-SSH tunnels use **fail-closed** host key verification by default. The target host must be in `~/.ssh/known_hosts`. If not, the connection fails with a clear error. Set `insecure_host_key = true` only for development or when known_hosts management is not feasible.
+SSH tunnels use **fail-closed** host key verification by default: the host must be in `known_hosts` in the mux config directory (`~/.config/mux/known_hosts`, the file provisioning and containers can manage) or in `~/.ssh/known_hosts`. The files are re-read at every connection attempt; lines the parser cannot read are skipped with a log line, as OpenSSH does — one stray line must not take every SSH connection down. An unknown host fails with the exact `known_hosts` line to add; a host whose key changed fails as a mismatch. The key types a file knows for the host are offered first in the handshake, as OpenSSH does. Set `insecure_host_key = true` only for development or when known_hosts management is not feasible; a provisioned tunnel ignores the flag.
 
 ### Auto-Reconnect and Keepalive
 

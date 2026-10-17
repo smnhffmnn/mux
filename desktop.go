@@ -49,6 +49,7 @@ func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx 
 
 	localRoutes := func(mux *http.ServeMux) {
 		mux.HandleFunc("/oauth/callback", app.oauthCallbackHandler())
+		tools.MountSSHAudit(mux)
 		if vh != nil {
 			vh.Mount(mux)
 		}
