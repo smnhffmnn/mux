@@ -1088,7 +1088,7 @@ func (a *App) SyncProvisioning() (*PageData, error) {
 		if label == "" {
 			label = "default"
 		}
-		resp, err := provisioning.Fetch(ctx, p.Endpoint, p.Token)
+		resp, err := provisioning.Fetch(ctx, p.Endpoint, p.Token, config.InstanceIdentity())
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", label, err))
 			continue

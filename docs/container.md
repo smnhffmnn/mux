@@ -29,7 +29,17 @@ provisioning token, and pulls the rest itself:
 ```
 MUX_PROVISIONING_ENDPOINT=https://example.com/api/mux/provision
 MUX_PROVISIONING_TOKEN=...
+MUX_INSTANCE_ID=office-pc-container
 ```
+
+`MUX_INSTANCE_ID` names this installation towards the provisioning server
+(see [Instance identity](provisioning.md#instance-identity)). Set it in a
+container: the generated `instance` file lives in the config directory, which
+only survives a rebuild when `/config/mux` is mounted — and a mounted host
+directory would hand the container the host's identity instead of its own.
+Without it a provisioning server that hands out per-instance tunnel
+credentials sees a new installation after every rebuild, named after the
+container ID. Pick a stable, lowercase name per container.
 
 **Mount** — for anything not delivered by provisioning, mount a config
 directory at **`/config/mux`**. mux resolves its config directory as

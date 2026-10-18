@@ -232,6 +232,7 @@ docker run -p 7700:7700 \
   -e POSTGRESQL_DB_PASSWORD=secret \
   -e MUX_PROVISIONING_ENDPOINT=https://provisioning.example.com/api/mux/config \
   -e MUX_PROVISIONING_TOKEN=my-token \
+  -e MUX_INSTANCE_ID=office-pc-container \
   mux
 ```
 

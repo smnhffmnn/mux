@@ -45,10 +45,21 @@ type wireResponse struct {
 	Connections []wireConnection `json:"connections"`
 }
 
+// Request headers that carry the installation's identity (config.Instance).
+// A server that keys tunnel credentials per instance reads them; one that
+// does not simply ignores them.
+const (
+	HeaderInstance = "X-Mux-Instance"
+	HeaderHostname = "X-Mux-Hostname"
+)
+
 // Fetch retrieves the provisioning config from the provisioning endpoint.
 // It sends a GET request with the bearer token and parses the JSON response.
 // All returned tunnels and connections are marked with Source = "provisioning".
-func Fetch(ctx context.Context, endpoint, token string) (*ProvisionResponse, error) {
+//
+// instance identifies this installation; with an empty ID no identity headers
+// are sent and the server serves the user's shared configuration.
+func Fetch(ctx context.Context, endpoint, token string, instance config.Instance) (*ProvisionResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
@@ -58,6 +69,12 @@ func Fetch(ctx context.Context, endpoint, token string) (*ProvisionResponse, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
+	if instance.ID != "" {
+		req.Header.Set(HeaderInstance, instance.ID)
+		if instance.Hostname != "" {
+			req.Header.Set(HeaderHostname, instance.Hostname)
+		}
+	}
 
 	// Don't follow redirects — a redirect to a login page means the token is invalid.
 	client := &http.Client{

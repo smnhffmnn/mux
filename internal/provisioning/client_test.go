@@ -31,7 +31,7 @@ func TestFetchCarriesTunnelPrivateKey(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := Fetch(context.Background(), srv.URL, "token")
+	resp, err := Fetch(context.Background(), srv.URL, "token", config.Instance{})
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestFetch_CarriesSSHSecrets(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := Fetch(context.Background(), srv.URL, "tok")
+	resp, err := Fetch(context.Background(), srv.URL, "tok", config.Instance{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,5 +77,33 @@ func TestFetch_CarriesSSHSecrets(t *testing.T) {
 	}
 	if len(resp.Tunnels) != 1 || resp.Tunnels[0].PrivateKey != "TPEM" || resp.Tunnels[0].Passphrase != "tpp" {
 		t.Fatalf("tunnel secrets not carried: %+v", resp.Tunnels)
+	}
+}
+
+// An installation with an identity announces it on every fetch; one without
+// sends nothing extra, so servers that key credentials per user keep working.
+func TestFetch_SendsInstanceHeadersOnlyWithAnID(t *testing.T) {
+	var gotInstance, gotHost string
+	var sawInstance, sawHost bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotInstance, sawInstance = r.Header.Get(HeaderInstance), r.Header.Get(HeaderInstance) != ""
+		gotHost, sawHost = r.Header.Get(HeaderHostname), r.Header.Get(HeaderHostname) != ""
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"connections": []}`))
+	}))
+	defer srv.Close()
+
+	if _, err := Fetch(context.Background(), srv.URL, "t", config.Instance{ID: "macbook-pro-1a2b3c", Hostname: "Simons-MacBook-Pro"}); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if gotInstance != "macbook-pro-1a2b3c" || gotHost != "Simons-MacBook-Pro" {
+		t.Errorf("headers = %q / %q, want the instance id and hostname", gotInstance, gotHost)
+	}
+
+	if _, err := Fetch(context.Background(), srv.URL, "t", config.Instance{Hostname: "host-without-id"}); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if sawInstance || sawHost {
+		t.Errorf("without an ID no identity header may be sent, got %q / %q", gotInstance, gotHost)
 	}
 }
