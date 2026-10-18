@@ -33,6 +33,7 @@ endpoint = "https://provisioning.example.com/api/mux/config"
 ```bash
 export MUX_PROVISIONING_ENDPOINT="https://provisioning.example.com/api/mux/config"
 export MUX_PROVISIONING_TOKEN="your-provisioning-token"
+export MUX_INSTANCE_ID="office-pc-container"   # optional, see "Instance identity" below
 ```
 
 ### Via Web UI
@@ -47,9 +48,23 @@ Open the mux web UI, navigate to the Provisioning section, enter the endpoint UR
 GET {endpoint}
 Authorization: Bearer {token}
 Accept: application/json
+X-Mux-Instance: {instance id}      (only when the installation has an identity, see below)
+X-Mux-Hostname: {host name}        (with X-Mux-Instance, when the host name is known; informational)
 ```
 
 mux sends this exact request. The endpoint must respond within 15 seconds.
+
+### Instance identity
+
+The bearer token identifies the *user*. When one user runs mux on two machines (a laptop and an office container, say), a server that keys tunnel credentials on the user hands both the same WireGuard private key — and a WireGuard server keeps one endpoint per key, so the two installations steal each other's return path for as long as both are up. The instance identity is the missing dimension: a stable name per installation that the server can key its own tunnel credentials on, one peer per instance.
+
+- On first use mux generates the ID — the machine's host name as a slug plus a random suffix, e.g. `macbook-pro-3f9a1c` — and persists it in the file `instance` inside the config directory (`~/.config/mux/instance`). It is only a name, never key material, and it never changes afterwards.
+- `MUX_INSTANCE_ID` overrides it — for containers, whose config directory only survives a rebuild when it is mounted, and for several instances on one machine that are meant to stay separate (see below). The value is alphanumeric segments joined by single `-` or `_`, at most 64 characters; upper case is folded to lower case.
+- An ID that cannot be persisted (unwritable config directory, invalid value) is not sent at all: a fresh ID per start would register a new instance per start. mux logs why, fetches without identity and tries again on the next fetch.
+
+What the server does with it is the server's business. A server that keys credentials per user ignores the headers; nothing changes. A server that supports per-instance credentials registers the installation on its first fetch and from then on delivers tunnel credentials that belong to this installation only — the response has the same shape as before, so mux needs no further configuration. Token-based connections stay user-scoped either way; mux still generates no key material locally.
+
+Two standalone instances on the *same* machine read the same `instance` file and therefore present the same identity — for client-spawned processes that case is what [bridging](configuration.md#running-more-than-one-instance) is for. Instances that are meant to stay separate on one machine (own port, own `--config`) share the config directory and with it the identity: give all but one a distinct `MUX_INSTANCE_ID`.
 
 Redirects are **not followed** -- a 3xx response is treated as an authentication error (common when an auth gateway intercepts expired tokens).
 
@@ -358,7 +373,7 @@ app.listen(8080);
 ## Security Considerations
 
 - Always use HTTPS for the provisioning endpoint
-- The Bearer token authenticates the mux instance; treat it like a password
+- The Bearer token authenticates the user; treat it like a password
 - If the provisioning server sends database passwords in the response, those passwords travel over the network -- HTTPS is essential
 - Consider per-user tokens so you can revoke access for individual users
 - mux does not follow redirects, which prevents token leakage to SSO login pages

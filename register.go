@@ -303,7 +303,7 @@ func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config
 		}
 		log.Printf("[vault] Retry: fetching provisioning %q from %s", label, p.Endpoint)
 		provCtx, provCancel := context.WithTimeout(ctx, 20*time.Second)
-		provResp, provErr := provisioning.Fetch(provCtx, p.Endpoint, token)
+		provResp, provErr := provisioning.Fetch(provCtx, p.Endpoint, token, config.InstanceIdentity())
 		provCancel()
 		if provErr != nil {
 			log.Printf("[vault] Retry: provisioning %q failed: %v", label, provErr)

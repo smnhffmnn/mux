@@ -55,7 +55,7 @@ Clients that spawn mux themselves (Claude Desktop, Cursor) start one process eac
 
 With `stdio_proxy = "auto"`, a stdio invocation that finds an instance serving on `port` becomes a thin relay instead: it fetches no provisioning, starts no tunnels, opens no vault, registers no connections and never writes config. (It still reads the config file and the plain keychain/`secrets.toml` entries while loading config — it just does not act on them.) Tool names and the owning instance's MCP instructions pass through unchanged, so clients see an identical surface either way.
 
-**What bridging does and does not cover.** Only an instance that serves HTTP can be bridged to, and a stdio instance does not open a listener. So bridging takes effect when a desktop or headless instance is running — which is the normal setup, since that is what serves `/mcp` for HTTP clients. If the *only* mux processes on the machine are stdio ones spawned by clients, they cannot find each other and each runs standalone, with the collisions above. Two instances on two different machines share the same provisioned credentials and collide the same way; that needs per-instance credentials on the provisioning side and is out of scope here.
+**What bridging does and does not cover.** Only an instance that serves HTTP can be bridged to, and a stdio instance does not open a listener. So bridging takes effect when a desktop or headless instance is running — which is the normal setup, since that is what serves `/mcp` for HTTP clients. If the *only* mux processes on the machine are stdio ones spawned by clients, they cannot find each other and each runs standalone, with the collisions above. Two instances on two *different* machines are a different case: bridging cannot reach across machines, so each installation announces its own identity to the provisioning server instead (`X-Mux-Instance`, see [Instance identity](provisioning.md#instance-identity)), and a server that keys tunnel credentials per instance hands each machine its own peer. Whether it does is up to the server; mux only ever sends the name.
 
 Use `never` when an instance on the same port should deliberately keep its own tunnels, config view and vault instead of relaying. Note that an instance on a *different* port never bridges anyway — only the instance's own configured port is probed.
 
@@ -163,6 +163,7 @@ Supported variables follow a legacy naming convention tied to fixed connection n
 |----------|-----------|-------|
 | `MUX_PROVISIONING_TOKEN` | — | Provisioning bearer token |
 | `MUX_PROVISIONING_ENDPOINT` | — | Provisioning endpoint URL |
+| `MUX_INSTANCE_ID` | — | Identity of this installation towards the provisioning server, instead of the generated `instance` file (see [Instance identity](provisioning.md#instance-identity)) |
 | `MARIADB_DB_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_NAME` | `mariadb` | Connection fields |
 | `POSTGRESQL_DB_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_NAME` | `postgresql` | Connection fields |
 | `CLICKHOUSE_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_SECURE` | `clickhouse` | Connection fields |

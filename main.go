@@ -280,7 +280,7 @@ More info: https://github.com/smnhffmnn/mux
 		}
 		log.Printf("[mux] Fetching config from provisioning endpoint %q: %s", label, p.Endpoint)
 		provCtx, provCancel := context.WithTimeout(context.Background(), 20*time.Second)
-		provResp, provErr := provisioning.Fetch(provCtx, p.Endpoint, p.Token)
+		provResp, provErr := provisioning.Fetch(provCtx, p.Endpoint, p.Token, config.InstanceIdentity())
 		provCancel()
 		if provErr != nil {
 			log.Printf("[mux] Provisioning from %q failed: %v (continuing)", label, provErr)
