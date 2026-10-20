@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -521,7 +522,9 @@ More info: https://github.com/smnhffmnn/mux
 		log.Println("[mux] Shutting down...")
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
-		servers.Shutdown(shutdownCtx)
+		if err := servers.Shutdown(shutdownCtx); err != nil {
+			log.Printf("[mux] shutdown error: %v", err)
+		}
 		cancel()
 		return
 	}
@@ -607,29 +610,33 @@ type httpServers struct {
 	https *http.Server // nil when TLS is not configured
 }
 
-// Shutdown gracefully shuts down all servers in parallel.
-func (s *httpServers) Shutdown(ctx context.Context) {
+// Shutdown gracefully shuts down all servers in parallel. It returns once
+// every server is down, or ctx expires; the error then names the server
+// that did not finish in time. Cancelling the base context (see
+// startHTTPServer) means a healthy instance is down well inside the
+// callers' deadline, so an error here is a real signal: something held a
+// connection open and ignored its context.
+func (s *httpServers) Shutdown(ctx context.Context) error {
 	var wg sync.WaitGroup
-	n := 1
-	if s.https != nil {
-		n = 2
-	}
-	wg.Add(n)
+	var httpErr, httpsErr error
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		if err := s.http.Shutdown(ctx); err != nil {
-			log.Printf("[mux] HTTP shutdown error: %v", err)
+			httpErr = fmt.Errorf("HTTP: %w", err)
 		}
 	}()
 	if s.https != nil {
+		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			if err := s.https.Shutdown(ctx); err != nil {
-				log.Printf("[mux] HTTPS shutdown error: %v", err)
+				httpsErr = fmt.Errorf("HTTPS: %w", err)
 			}
 		}()
 	}
 	wg.Wait()
+	return errors.Join(httpErr, httpsErr)
 }
 
 // startHTTPServer creates and starts the MCP HTTP server(s).
@@ -663,6 +670,20 @@ func startHTTPServer(s *server.MCPServer, cfg *config.Config, hc *health.Checker
 		return 10 * time.Second, 30 * time.Second, 60 * time.Second
 	}
 
+	// Every request on either listener inherits baseCtx, and the first
+	// Shutdown cancels it. http.Server.Shutdown closes the listeners and the
+	// idle connections and then waits for the active ones — but it never
+	// cancels a running handler's context. The MCP notification stream
+	// (GET /mcp) is such a handler: mcp-go blocks on r.Context().Done() for
+	// the life of the session, so that connection never went idle and every
+	// Ctrl-C sat out the full shutdown deadline before exiting with
+	// "HTTP shutdown error: context deadline exceeded". Cancelling the base
+	// context returns every in-flight handler at once: the stream ends, a
+	// tool call still running is abandoned (the process is going away), and
+	// the connections go idle for Shutdown to close.
+	baseCtx, cancelBase := context.WithCancel(context.Background())
+	baseContext := func(net.Listener) context.Context { return baseCtx }
+
 	// Plain HTTP: always localhost-only (MCP + local routes).
 	//
 	// Read and write deadlines are deliberately off here, unlike on the TLS
@@ -679,7 +700,9 @@ func startHTTPServer(s *server.MCPServer, cfg *config.Config, hc *health.Checker
 		Handler:           httpMux,
 		ReadHeaderTimeout: rht,
 		MaxHeaderBytes:    1 << 20,
+		BaseContext:       baseContext,
 	}
+	httpSrv.RegisterOnShutdown(cancelBase)
 	go func() {
 		log.Printf("[mux] Starting HTTP server on %s", httpAddr)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -711,10 +734,12 @@ func startHTTPServer(s *server.MCPServer, cfg *config.Config, hc *health.Checker
 			ReadTimeout:       rt,
 			WriteTimeout:      wt,
 			MaxHeaderBytes:    1 << 20,
+			BaseContext:       baseContext,
 			TLSConfig: &tls.Config{
 				MinVersion: tls.VersionTLS12,
 			},
 		}
+		httpsSrv.RegisterOnShutdown(cancelBase)
 		go func() {
 			certPath := config.ExpandHome(cfg.Server.TLSCert)
 			keyPath := config.ExpandHome(cfg.Server.TLSKey)
