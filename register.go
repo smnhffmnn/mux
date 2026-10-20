@@ -194,6 +194,25 @@ func oauthProxyMount(name, url string, port int, tokenStore *config.KeychainToke
 	}
 }
 
+// oauthAuthorizedReload returns the oauth.Manager callback: after a
+// successful authorization it reloads the connection through the reloader,
+// which mounts the proxy with the fresh token and records its tools the way
+// every other mount is recorded — so a later connection_delete or
+// UnloadConnection removes them again instead of leaving them until a
+// restart. The reload runs in a goroutine: the callback is invoked
+// synchronously from the OAuth callback handler while the provider's browser
+// redirect waits on the response.
+func oauthAuthorizedReload(cfg *config.Config, r tools.ToolReloader) func(string) {
+	return func(service string) {
+		conn := cfg.FindAnyConnection(service)
+		if conn == nil {
+			return
+		}
+		c := *conn
+		go r.ReloadConnection(c)
+	}
+}
+
 // newProxyTokenMount builds a non-OAuth proxy mount for a connection, honouring
 // a custom token header and extra static headers, and routing through the
 // connection's tunnel when one is set. It is fail-closed on tunnels: if the
@@ -417,12 +436,24 @@ func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config
 
 // simpleReloader implements tools.ToolReloader for stdio and headless modes (no App/Wails).
 type simpleReloader struct {
-	mcpServer       *server.MCPServer
-	cfg             *config.Config
-	tm              *tunnelManager
+	mcpServer *server.MCPServer
+	cfg       *config.Config
+	tm        *tunnelManager
+
+	// toolsMu protects registeredTools and closers.
 	toolsMu         sync.Mutex
 	registeredTools map[string][]string
 	closers         map[string][]io.Closer
+}
+
+func newSimpleReloader(s *server.MCPServer, cfg *config.Config, tm *tunnelManager) *simpleReloader {
+	return &simpleReloader{
+		mcpServer:       s,
+		cfg:             cfg,
+		tm:              tm,
+		registeredTools: make(map[string][]string),
+		closers:         make(map[string][]io.Closer),
+	}
 }
 
 func (r *simpleReloader) ReloadConnection(conn config.Connection) {
@@ -486,20 +517,7 @@ func (r *simpleReloader) registerProxy(conn config.Connection) {
 		if !tokenStore.HasToken() {
 			return
 		}
-		adapter := proxy.NewKeychainTokenAdapter(tokenStore)
-		clientID, clientSecret := config.LoadOAuthClientID(conn.Name)
-		mount := proxy.Mount{
-			Name:       conn.Name,
-			URL:        conn.URL,
-			TokenStore: tokenStore,
-			OAuth: &transport.OAuthConfig{
-				ClientID:     clientID,
-				ClientSecret: clientSecret,
-				RedirectURI:  fmt.Sprintf("http://localhost:%d/oauth/callback", r.cfg.Server.Port),
-				TokenStore:   adapter,
-				PKCEEnabled:  true,
-			},
-		}
+		mount := oauthProxyMount(conn.Name, conn.URL, r.cfg.Server.Port, tokenStore)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := proxy.RegisterMount(ctx, r.mcpServer, mount); err != nil {

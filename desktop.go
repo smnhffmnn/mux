@@ -48,10 +48,14 @@ func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx 
 	}
 
 	localRoutes := func(mux *http.ServeMux) {
-		mux.HandleFunc("/oauth/callback", app.oauthCallbackHandler())
+		app.oauth.Routes(mux)
 		tools.MountSSHAudit(mux)
 		if vh != nil {
 			vh.Mount(mux)
+			// The vault's SSH key endpoints are loopback-only (import reads
+			// files, load injects keys into the agent) — this listener is
+			// loopback, the same as in headless mode. They stay off tlsRoutes.
+			vh.MountSSH(mux)
 		}
 	}
 	var tlsRoutes func(*http.ServeMux)

@@ -29,8 +29,12 @@ go test -tags notray ./...
 internal/
 ├── bridge/     # stdio↔HTTP relay to an already-running instance
 ├── config/     # Configuration loading, secret management, keychain
+├── health/     # /health report: provisioning, tunnels, registered connections
+├── logging/    # Log file setup and rotation
+├── oauth/      # Browser-based OAuth 2.0 flow for proxy connections (discovery, PKCE, /oauth/* routes)
 ├── provisioning/ # Remote provisioning client
 ├── proxy/      # MCP proxy mounts (OAuth, bearer token)
+├── sshclient/  # SSH client for the ssh connection type (auth, host keys)
 ├── tools/      # MCP tool implementations (DB, API, config management)
 ├── tunnel/     # SSH tunnel transport
 ├── vault/      # Encrypted secret store, WebAuthn, approval flow
