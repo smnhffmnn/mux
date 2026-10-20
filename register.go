@@ -194,26 +194,22 @@ func oauthProxyMount(name, url string, port int, tokenStore *config.KeychainToke
 	}
 }
 
-// oauthAuthorizedMount returns the oauth.Manager callback for instances
-// without an App (headless mode): after a successful authorization it mounts
-// the freshly authorized proxy so its tools appear without a restart. The
-// mount runs in a goroutine — the callback is invoked synchronously from the
-// OAuth callback handler while the provider's browser redirect waits.
-func oauthAuthorizedMount(cfg *config.Config, s *server.MCPServer) func(string) {
+// oauthAuthorizedReload returns the oauth.Manager callback: after a
+// successful authorization it reloads the connection through the reloader,
+// which mounts the proxy with the fresh token and records its tools the way
+// every other mount is recorded — so a later connection_delete or
+// UnloadConnection removes them again instead of leaving them until a
+// restart. The reload runs in a goroutine: the callback is invoked
+// synchronously from the OAuth callback handler while the provider's browser
+// redirect waits on the response.
+func oauthAuthorizedReload(cfg *config.Config, r tools.ToolReloader) func(string) {
 	return func(service string) {
 		conn := cfg.FindAnyConnection(service)
-		if conn == nil || conn.URL == "" {
+		if conn == nil {
 			return
 		}
-		url := conn.URL
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			mount := oauthProxyMount(service, url, cfg.Server.Port, config.NewKeychainTokenStore(service))
-			if err := proxy.RegisterMount(ctx, s, mount); err != nil {
-				log.Printf("[oauth] Failed to mount %s after authorization: %v", service, err)
-			}
-		}()
+		c := *conn
+		go r.ReloadConnection(c)
 	}
 }
 
@@ -440,12 +436,24 @@ func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config
 
 // simpleReloader implements tools.ToolReloader for stdio and headless modes (no App/Wails).
 type simpleReloader struct {
-	mcpServer       *server.MCPServer
-	cfg             *config.Config
-	tm              *tunnelManager
+	mcpServer *server.MCPServer
+	cfg       *config.Config
+	tm        *tunnelManager
+
+	// toolsMu protects registeredTools and closers.
 	toolsMu         sync.Mutex
 	registeredTools map[string][]string
 	closers         map[string][]io.Closer
+}
+
+func newSimpleReloader(s *server.MCPServer, cfg *config.Config, tm *tunnelManager) *simpleReloader {
+	return &simpleReloader{
+		mcpServer:       s,
+		cfg:             cfg,
+		tm:              tm,
+		registeredTools: make(map[string][]string),
+		closers:         make(map[string][]io.Closer),
+	}
 }
 
 func (r *simpleReloader) ReloadConnection(conn config.Connection) {

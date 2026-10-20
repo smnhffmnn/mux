@@ -97,14 +97,13 @@ func NewApp(cfg *config.Config, version, buildTime string, port int, mcpServer *
 	return a
 }
 
-// onOAuthAuthorized runs after a successful token exchange: mount the proxy
-// in the background so its tools appear without a restart, and notify the
-// frontend. Called synchronously from the OAuth callback handler — keep it
-// fast, the provider's browser redirect is waiting on the response.
+// onOAuthAuthorized runs after a successful token exchange: reload the
+// connection in the background, which mounts the proxy with the fresh token
+// and tracks its tools like every other mount, and notify the frontend.
+// Called synchronously from the OAuth callback handler — keep it fast, the
+// provider's browser redirect is waiting on the response.
 func (a *App) onOAuthAuthorized(service string) {
-	if a.mcpServer != nil {
-		go a.mountOAuthProxy(service, config.NewKeychainTokenStore(service))
-	}
+	oauthAuthorizedReload(a.cfg, a)(service)
 	if a.emitEvent != nil {
 		a.emitEvent("oauth:complete", service)
 	}
@@ -187,9 +186,9 @@ func (a *App) registerConnectionTools(conn config.Connection) {
 
 // oauthMount builds the OAuth proxy mount for a connection. Thin wrapper
 // around the shared oauthProxyMount builder (register.go) that supplies the
-// app's port — shared by hot-reload, post-authorization mounting and the test
-// button so their transport construction cannot drift apart (the test button
-// once omitted the client credentials).
+// app's port — shared by hot-reload (which also serves the post-authorization
+// mount) and the test button so their transport construction cannot drift
+// apart (the test button once omitted the client credentials).
 func (a *App) oauthMount(name, url string, tokenStore *config.KeychainTokenStore) proxy.Mount {
 	return oauthProxyMount(name, url, a.port, tokenStore)
 }
@@ -1406,20 +1405,6 @@ func (a *App) GetDeviceAuthStatus(name string) *DeviceAuthStatus {
 		delete(a.pendingDevice, name)
 		a.deviceMu.Unlock()
 		return &DeviceAuthStatus{Message: fmt.Sprintf("Auth error: %s", tokenResp.Error)}
-	}
-}
-
-func (a *App) mountOAuthProxy(connName string, tokenStore *config.KeychainTokenStore) {
-	conn := a.cfg.FindAnyConnection(connName)
-	if conn == nil || conn.URL == "" {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := proxy.RegisterMount(ctx, a.mcpServer, a.oauthMount(connName, conn.URL, tokenStore)); err != nil {
-		log.Printf("[oauth] Failed to mount %s after authorization: %v", connName, err)
 	}
 }
 

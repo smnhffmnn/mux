@@ -475,7 +475,7 @@ More info: https://github.com/smnhffmnn/mux
 	if !hasDisplay {
 		log.Println("[mux] Starting in headless HTTP mode")
 
-		registerConfigTools(s, cfg, tm)
+		reloader := registerConfigTools(s, cfg, tm)
 		hc := health.NewChecker(cfg, mcpToolRegistry{s}, tm, version, processStart)
 
 		var vh *vault.VaultHandlers
@@ -495,7 +495,7 @@ More info: https://github.com/smnhffmnn/mux
 			}()
 			defer credSock.Close()
 		}
-		servers := startHTTPServer(s, cfg, hc, headlessLocalRoutes(cfg, s, vh), tlsRoutes)
+		servers := startHTTPServer(s, cfg, hc, headlessLocalRoutes(cfg, reloader, vh), tlsRoutes)
 
 		// Block until SIGINT/SIGTERM
 		sigCh := make(chan os.Signal, 1)
@@ -517,7 +517,8 @@ More info: https://github.com/smnhffmnn/mux
 
 // headlessLocalRoutes assembles the routes of the loopback HTTP server in
 // headless mode: the OAuth endpoints, the SSH audit page and, with a vault,
-// its handlers and SSH endpoints. vh is nil without a vault.
+// its handlers and SSH endpoints. vh is nil without a vault. r is the
+// reloader that mounts a proxy once its OAuth flow has completed.
 //
 // The OAuth flow lives in internal/oauth and is part of every build, notray
 // builds included: without a UI, GET /oauth/start?connection=<name> is the
@@ -527,8 +528,8 @@ More info: https://github.com/smnhffmnn/mux
 //
 // A function of its own so a test can build the route set of a notray binary
 // without starting headless mode.
-func headlessLocalRoutes(cfg *config.Config, s *server.MCPServer, vh *vault.VaultHandlers) func(*http.ServeMux) {
-	oauthMgr := oauth.NewManager(cfg, cfg.Server.Port, oauthAuthorizedMount(cfg, s))
+func headlessLocalRoutes(cfg *config.Config, r tools.ToolReloader, vh *vault.VaultHandlers) func(*http.ServeMux) {
+	oauthMgr := oauth.NewManager(cfg, cfg.Server.Port, oauthAuthorizedReload(cfg, r))
 	return func(mux *http.ServeMux) {
 		if vh != nil {
 			vh.Mount(mux)
@@ -554,14 +555,17 @@ func gitHostsFromConfig(cfg *config.Config) []vault.GitHost {
 	return hosts
 }
 
-// registerConfigTools creates a simpleReloader and registers config management tools on the MCP server.
-func registerConfigTools(s *server.MCPServer, cfg *config.Config, tm *tunnelManager) {
-	reloader := &simpleReloader{mcpServer: s, cfg: cfg, tm: tm, registeredTools: make(map[string][]string), closers: make(map[string][]io.Closer)}
+// registerConfigTools creates a simpleReloader, registers the config
+// management tools on the MCP server and returns the reloader, so other
+// paths that mount or unmount connections at runtime share its bookkeeping.
+func registerConfigTools(s *server.MCPServer, cfg *config.Config, tm *tunnelManager) *simpleReloader {
+	reloader := newSimpleReloader(s, cfg, tm)
 	configTools := tools.NewConfigTools(cfg, reloader)
 	for _, t := range configTools.Tools() {
 		s.AddTool(t.Tool, t.Handler)
 		log.Printf("[mux] Registered: %s", t.Tool.Name)
 	}
+	return reloader
 }
 
 // runHealthProbe queries a running instance's /health and returns the process
