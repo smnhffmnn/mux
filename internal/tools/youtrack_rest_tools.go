@@ -189,6 +189,28 @@ func (y *YouTrackREST) Tools() []ToolDef {
 			Handler: y.handleAddComment,
 		},
 		ToolDef{
+			Tool: mcp.NewTool("update_comment",
+				mcp.WithDescription("Edit an existing comment: replace its text and/or change its visibility (at least one of the two). A visibility list given replaces that list, a list left out keeps its current entries, and both lists empty make the comment visible to everyone who sees the issue. "+
+					"Whether the account may edit a comment is YouTrack's decision — a refused edit comes back as the API's error."),
+				mcp.WithString("issue", mcp.Required(), mcp.Description("Readable issue ID")),
+				mcp.WithString("comment", mcp.Required(), mcp.Description("Comment id as listed by get_comments or get_issue (e.g. 4-123)")),
+				mcp.WithString("text", mcp.Description("New text (YouTrack Markdown; replaces the whole comment)")),
+				mcp.WithArray("visibility_groups", mcp.Description("Group names allowed to see the comment"), mcp.WithStringItems()),
+				mcp.WithArray("visibility_users", mcp.Description("User logins allowed to see the comment"), mcp.WithStringItems()),
+			),
+			Handler: y.handleUpdateComment,
+		},
+		ToolDef{
+			Tool: mcp.NewTool("delete_comment",
+				mcp.WithDescription("Delete a comment. The result confirms the deletion by re-reading the comment: once YouTrack no longer returns it, the result carries its id with deleted = true. "+
+					"Whether the account may delete a comment is YouTrack's decision — a refused deletion comes back as the API's error."),
+				mcp.WithString("issue", mcp.Required(), mcp.Description("Readable issue ID")),
+				mcp.WithString("comment", mcp.Required(), mcp.Description("Comment id as listed by get_comments or get_issue (e.g. 4-123)")),
+				mcp.WithDestructiveHintAnnotation(true),
+			),
+			Handler: y.handleDeleteComment,
+		},
+		ToolDef{
 			Tool: mcp.NewTool("attach",
 				mcp.WithDescription("Upload one or more local files as attachments of an issue, streamed from disk. Returns the issue's complete attachment list afterwards with the uploaded ones marked. "+
 					"Reference an attachment in a description or comment as ![](file name). File names must be unique within an issue — list existing attachments with get_issue first."),
