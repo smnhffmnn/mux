@@ -189,6 +189,28 @@ func (y *YouTrackREST) Tools() []ToolDef {
 			Handler: y.handleAddComment,
 		},
 		ToolDef{
+			Tool: mcp.NewTool("update_comment",
+				mcp.WithDescription("Edit an existing comment: replace its text and/or change its visibility (at least one of the two). Visibility given as empty lists makes the comment visible to everyone who sees the issue; visibility left out stays as it is. "+
+					"Whether the account may edit a comment is YouTrack's decision (its own comments, or any comment with the matching permission) — a refused edit comes back as the API's error."),
+				mcp.WithString("issue", mcp.Required(), mcp.Description("Readable issue ID")),
+				mcp.WithString("comment", mcp.Required(), mcp.Description("Comment id as listed by get_comments or get_issue (e.g. 4-123)")),
+				mcp.WithString("text", mcp.Description("New text (YouTrack Markdown; replaces the whole comment)")),
+				mcp.WithArray("visibility_groups", mcp.Description("Group names allowed to see the comment"), mcp.WithStringItems()),
+				mcp.WithArray("visibility_users", mcp.Description("User logins allowed to see the comment"), mcp.WithStringItems()),
+			),
+			Handler: y.handleUpdateComment,
+		},
+		ToolDef{
+			Tool: mcp.NewTool("delete_comment",
+				mcp.WithDescription("Delete a comment. YouTrack marks it deleted rather than dropping it — the thread keeps it with deleted = true — and the result shows the comment as it reads afterwards. "+
+					"Whether the account may delete a comment is YouTrack's decision (its own comments, or any comment with the matching permission) — a refused deletion comes back as the API's error."),
+				mcp.WithString("issue", mcp.Required(), mcp.Description("Readable issue ID")),
+				mcp.WithString("comment", mcp.Required(), mcp.Description("Comment id as listed by get_comments or get_issue (e.g. 4-123)")),
+				mcp.WithDestructiveHintAnnotation(true),
+			),
+			Handler: y.handleDeleteComment,
+		},
+		ToolDef{
 			Tool: mcp.NewTool("attach",
 				mcp.WithDescription("Upload one or more local files as attachments of an issue, streamed from disk. Returns the issue's complete attachment list afterwards with the uploaded ones marked. "+
 					"Reference an attachment in a description or comment as ![](file name). File names must be unique within an issue — list existing attachments with get_issue first."),

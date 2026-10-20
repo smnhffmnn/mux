@@ -495,6 +495,8 @@ instructions = "P = projects, T = tickets. State Review means waiting for feedba
 | `{name}_create_issue` | Parameters: `project`, `summary` (required), `description`, `fields` (name → value). |
 | `{name}_update_issue` | Parameters: `issue` (required), `summary`, `description`, `fields` (name → value; `null` clears). |
 | `{name}_add_comment` | Parameters: `issue`, `text` (required), `visibility_groups`, `visibility_users`. |
+| `{name}_update_comment` | Edit a comment's text and/or visibility. Parameters: `issue`, `comment` (comment id; required), `text`, `visibility_groups`, `visibility_users` (at least one of the three; empty lists make the comment visible to everyone). Whether the account may edit a given comment is decided by YouTrack. |
+| `{name}_delete_comment` | Delete a comment. Parameters: `issue`, `comment` (required). YouTrack marks the comment deleted and keeps it in the thread (`deleted = true`); the result shows the comment as it reads afterwards. Whether the account may delete a given comment is decided by YouTrack. |
 | `{name}_attach` | Upload files streamed from disk, several per call. Parameters: `issue`, `file_paths` (required). Returns the full attachment list. |
 | `{name}_watch` | Add watchers. Parameters: `issue`, `users` (required). |
 | `{name}_link_issues` | Parameters: `issue`, `relation` (phrase as seen from issue, e.g. `parent for`), `target` (required). |

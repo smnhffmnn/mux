@@ -201,33 +201,128 @@ func (y *YouTrackREST) handleAddComment(ctx context.Context, req mcp.CallToolReq
 	}
 	body := map[string]any{"text": text}
 	if len(groups)+len(users) > 0 {
-		vis := map[string]any{"$type": "LimitedVisibility"}
-		var gids, uids []map[string]string
-		for _, g := range groups {
-			id, err := y.resolveGroup(ctx, g)
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			gids = append(gids, map[string]string{"id": id})
-		}
-		for _, u := range users {
-			id, err := y.resolveUser(ctx, u)
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			uids = append(uids, map[string]string{"id": id})
-		}
-		if gids != nil {
-			vis["permittedGroups"] = gids
-		}
-		if uids != nil {
-			vis["permittedUsers"] = uids
+		vis, err := y.visibilityBody(ctx, groups, users)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 		body["visibility"] = vis
 	}
 	var raw ytRawComment
 	if err := y.callJSON(ctx, "issue.comment.add", map[string]string{"id": issue}, nil, body, &raw); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return ytResultJSON(map[string]any{"issue": issue, "comment": renderComment(raw, y.location(ctx))})
+}
+
+// visibilityBody resolves group names and user logins to the visibility
+// object of a comment body: LimitedVisibility with the resolved ids, or
+// UnlimitedVisibility when both lists are empty — the comment is then
+// visible to everyone who sees the issue.
+func (y *YouTrackREST) visibilityBody(ctx context.Context, groups, users []string) (map[string]any, error) {
+	if len(groups)+len(users) == 0 {
+		return map[string]any{"$type": "UnlimitedVisibility"}, nil
+	}
+	vis := map[string]any{"$type": "LimitedVisibility"}
+	var gids, uids []map[string]string
+	for _, g := range groups {
+		id, err := y.resolveGroup(ctx, g)
+		if err != nil {
+			return nil, err
+		}
+		gids = append(gids, map[string]string{"id": id})
+	}
+	for _, u := range users {
+		id, err := y.resolveUser(ctx, u)
+		if err != nil {
+			return nil, err
+		}
+		uids = append(uids, map[string]string{"id": id})
+	}
+	if gids != nil {
+		vis["permittedGroups"] = gids
+	}
+	if uids != nil {
+		vis["permittedUsers"] = uids
+	}
+	return vis, nil
+}
+
+// argGiven reports whether an optional argument was sent with a value. A
+// missing key and an explicit null both count as "not given", so a client
+// that nulls its unused parameters does not change a comment's visibility
+// by accident.
+func argGiven(req mcp.CallToolRequest, key string) bool {
+	v, ok := req.GetArguments()[key]
+	return ok && v != nil
+}
+
+func (y *YouTrackREST) handleUpdateComment(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	issue, _ := req.RequireString("issue")
+	comment, _ := req.RequireString("comment")
+	if issue == "" || comment == "" {
+		return mcp.NewToolResultError("issue and comment are required"), nil
+	}
+	text, hasText := req.GetArguments()["text"].(string)
+	hasVisibility := argGiven(req, "visibility_groups") || argGiven(req, "visibility_users")
+	if !hasText && !hasVisibility {
+		return mcp.NewToolResultError("nothing to update: give text, visibility_groups or visibility_users"), nil
+	}
+	body := map[string]any{}
+	if hasText {
+		if strings.TrimSpace(text) == "" {
+			return mcp.NewToolResultError("text must not be empty — delete_comment removes a comment"), nil
+		}
+		body["text"] = text
+	}
+	if hasVisibility {
+		groups, err := stringListArg(req, "visibility_groups")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		users, err := stringListArg(req, "visibility_users")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		vis, err := y.visibilityBody(ctx, groups, users)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		body["visibility"] = vis
+	}
+	params := map[string]string{"id": issue, "issueCommentId": comment}
+	var raw ytRawComment
+	if err := y.callJSON(ctx, "issue.comment.update", params, nil, body, &raw); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return ytResultJSON(map[string]any{"issue": issue, "comment": renderComment(raw, y.location(ctx))})
+}
+
+func (y *YouTrackREST) handleDeleteComment(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	issue, _ := req.RequireString("issue")
+	comment, _ := req.RequireString("comment")
+	if issue == "" || comment == "" {
+		return mcp.NewToolResultError("issue and comment are required"), nil
+	}
+	params := map[string]string{"id": issue, "issueCommentId": comment}
+	if err := y.callJSON(ctx, "issue.comment.delete", params, nil, nil, nil); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	// YouTrack keeps a deleted comment readable with deleted = true (the UI
+	// offers to restore it), so the re-read shows what the thread carries
+	// now. A comment the API no longer returns is reported as gone.
+	data, status, err := y.call(ctx, "issue.comment.get", params, nil, nil)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("comment %s deleted, but re-reading it failed: %v", comment, err)), nil
+	}
+	if status == http.StatusNotFound {
+		return ytResultJSON(map[string]any{"issue": issue, "comment": map[string]any{"id": comment, "deleted": true}, "note": "YouTrack no longer returns the comment"})
+	}
+	if status < 200 || status >= 300 {
+		return mcp.NewToolResultError(fmt.Sprintf("comment %s deleted, but re-reading it failed: %v", comment, ytAPIError(status, data))), nil
+	}
+	var raw ytRawComment
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("comment %s deleted, but the re-read did not decode: %v", comment, err)), nil
 	}
 	return ytResultJSON(map[string]any{"issue": issue, "comment": renderComment(raw, y.location(ctx))})
 }

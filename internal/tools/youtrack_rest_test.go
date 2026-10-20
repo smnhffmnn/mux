@@ -214,6 +214,52 @@ func newYTFake(t *testing.T) *ytFake {
 		fmt.Sscanf(rec.Query["$skip"], "%d", &skip)
 		jsonOK(w, ytFakeComments(skip))
 	})
+	// One comment of P-1 with state, kept the way YouTrack keeps it: POST
+	// changes text and visibility, DELETE marks it deleted and leaves it
+	// readable, GET reads it back. Ids sent in a visibility come back as the
+	// names a real instance would resolve them to.
+	comment := struct {
+		text, visibility string
+		deleted          bool
+	}{text: "posted", visibility: `{"$type":"UnlimitedVisibility"}`}
+	visibilityNames := strings.NewReplacer(`{"id":"25-1"}`, `{"name":"IT"}`, `{"id":"26-5"}`, `{"login":"john.roe"}`)
+	mux.HandleFunc("/api/issues/P-1/comments/4-9", func(w http.ResponseWriter, r *http.Request) {
+		rec := record(r)
+		switch r.Method {
+		case http.MethodPost:
+			var body struct {
+				Text       *string         `json:"text"`
+				Visibility json.RawMessage `json:"visibility"`
+			}
+			json.Unmarshal([]byte(rec.Body), &body)
+			if body.Text != nil {
+				comment.text = *body.Text
+			}
+			if body.Visibility != nil {
+				comment.visibility = visibilityNames.Replace(string(body.Visibility))
+			}
+		case http.MethodDelete:
+			comment.deleted = true
+			return
+		}
+		jsonOK(w, fmt.Sprintf(`{"id":"4-9","text":%q,"created":%d,"updated":%d,"author":{"login":"jane.doe"},"deleted":%t,"visibility":%s}`,
+			comment.text, ytFakeCreated, ytFakeCreated+60000, comment.deleted, comment.visibility))
+	})
+	// A comment the API no longer returns once it is deleted.
+	mux.HandleFunc("/api/issues/P-1/comments/4-8", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		if r.Method == http.MethodDelete {
+			return
+		}
+		w.WriteHeader(404)
+		io.WriteString(w, `{"error":"Not Found","error_description":"Entity with id 4-8 not found"}`)
+	})
+	// Someone else's comment the account may not change.
+	mux.HandleFunc("/api/issues/P-1/comments/4-7", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		w.WriteHeader(403)
+		io.WriteString(w, `{"error":"Forbidden","error_description":"You have no permission to update the comment"}`)
+	})
 	mux.HandleFunc("/api/issues/P-1/attachments", func(w http.ResponseWriter, r *http.Request) {
 		rec := record(r)
 		if r.Method == http.MethodPost {
@@ -975,6 +1021,123 @@ func TestYouTrackREST_AddCommentWithVisibility(t *testing.T) {
 	}
 }
 
+func TestYouTrackREST_UpdateComment(t *testing.T) {
+	f := newYTFake(t)
+	y := newTestYouTrack(t, f, nil)
+	run := func(args map[string]any) (*mcp.CallToolResult, error) {
+		return y.handleUpdateComment(context.Background(), toolRequest(args))
+	}
+
+	// Text only: the body carries the text and nothing else; the result is
+	// the comment as the API returns it afterwards.
+	res, err := run(map[string]any{"issue": "P-1", "comment": "4-9", "text": "edited"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := resultJSON(t, res)
+	r, ok := f.last(http.MethodPost, "/api/issues/P-1/comments/4-9")
+	if !ok || r.Body != `{"text":"edited"}` {
+		t.Errorf("text-only body = %q", r.Body)
+	}
+	if c := out["comment"].(map[string]any); c["id"] != "4-9" || c["text"] != "edited" || c["updated"] == nil || c["deleted"] != nil {
+		t.Errorf("comment rendering = %v", c)
+	}
+
+	// Visibility only: the text is left alone, names and logins resolve to ids.
+	res, _ = run(map[string]any{"issue": "P-1", "comment": "4-9", "visibility_groups": []any{"it"}, "visibility_users": []any{"john.roe"}})
+	out = resultJSON(t, res)
+	r, _ = f.last(http.MethodPost, "/api/issues/P-1/comments/4-9")
+	if strings.Contains(r.Body, `"text"`) || !strings.Contains(r.Body, `"$type":"LimitedVisibility"`) || !strings.Contains(r.Body, `"permittedGroups":[{"id":"25-1"}]`) || !strings.Contains(r.Body, `"permittedUsers":[{"id":"26-5"}]`) {
+		t.Errorf("visibility-only body = %s", r.Body)
+	}
+	if c := out["comment"].(map[string]any); c["text"] != "edited" || c["visibility"] != "limited to group IT, user john.roe" {
+		t.Errorf("comment rendering = %v", c)
+	}
+
+	// Empty lists lift the restriction; an explicit null is not a change.
+	res, _ = run(map[string]any{"issue": "P-1", "comment": "4-9", "visibility_groups": []any{}, "visibility_users": nil})
+	out = resultJSON(t, res)
+	r, _ = f.last(http.MethodPost, "/api/issues/P-1/comments/4-9")
+	if r.Body != `{"visibility":{"$type":"UnlimitedVisibility"}}` {
+		t.Errorf("unlimited body = %s", r.Body)
+	}
+	if c := out["comment"].(map[string]any); c["visibility"] != nil {
+		t.Errorf("visibility after lifting = %v", c["visibility"])
+	}
+
+	// Text and visibility together.
+	res, _ = run(map[string]any{"issue": "P-1", "comment": "4-9", "text": "both", "visibility_users": []any{"john.roe"}})
+	resultJSON(t, res)
+	r, _ = f.last(http.MethodPost, "/api/issues/P-1/comments/4-9")
+	if !strings.Contains(r.Body, `"text":"both"`) || !strings.Contains(r.Body, `"permittedUsers":[{"id":"26-5"}]`) || strings.Contains(r.Body, "permittedGroups") {
+		t.Errorf("combined body = %s", r.Body)
+	}
+
+	// Refused before anything is sent.
+	sent := f.count(http.MethodPost, "/api/issues/P-1/comments/4-9")
+	for _, c := range []struct {
+		args map[string]any
+		want string
+	}{
+		{map[string]any{"issue": "P-1", "text": "x"}, "issue and comment are required"},
+		{map[string]any{"issue": "P-1", "comment": "4-9"}, "nothing to update"},
+		{map[string]any{"issue": "P-1", "comment": "4-9", "visibility_groups": nil}, "nothing to update"},
+		{map[string]any{"issue": "P-1", "comment": "4-9", "text": "   "}, "text must not be empty"},
+		{map[string]any{"issue": "P-1", "comment": "4-9", "visibility_groups": []any{"nope"}}, `group "nope" not found`},
+	} {
+		res, err := run(c.args)
+		mustError(t, res, err, c.want)
+	}
+	if n := f.count(http.MethodPost, "/api/issues/P-1/comments/4-9"); n != sent {
+		t.Errorf("a refused update reached the API (%d calls, had %d)", n, sent)
+	}
+
+	// YouTrack's own refusal (someone else's comment) is passed through.
+	res, err = run(map[string]any{"issue": "P-1", "comment": "4-7", "text": "x"})
+	mustError(t, res, err, "HTTP 403")
+}
+
+func TestYouTrackREST_DeleteComment(t *testing.T) {
+	f := newYTFake(t)
+	y := newTestYouTrack(t, f, nil)
+	run := func(args map[string]any) (*mcp.CallToolResult, error) {
+		return y.handleDeleteComment(context.Background(), toolRequest(args))
+	}
+
+	// The DELETE goes out without a body; the re-read shows the comment the
+	// way YouTrack keeps it: deleted, text still readable.
+	res, err := run(map[string]any{"issue": "P-1", "comment": "4-9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := resultJSON(t, res)
+	if r, ok := f.last(http.MethodDelete, "/api/issues/P-1/comments/4-9"); !ok || r.Body != "" || r.Query["fields"] != "" {
+		t.Errorf("DELETE request = %+v", r)
+	}
+	if r, ok := f.last(http.MethodGet, "/api/issues/P-1/comments/4-9"); !ok || !strings.Contains(r.Query["fields"], "deleted") {
+		t.Errorf("deleted comment was not re-read with its deleted flag: %+v", r)
+	}
+	if c := out["comment"].(map[string]any); c["id"] != "4-9" || c["deleted"] != true || c["text"] != "posted" {
+		t.Errorf("comment rendering = %v", c)
+	}
+
+	// A comment the API no longer returns is reported as gone.
+	res, _ = run(map[string]any{"issue": "P-1", "comment": "4-8"})
+	out = resultJSON(t, res)
+	if c := out["comment"].(map[string]any); c["id"] != "4-8" || c["deleted"] != true || out["note"] == nil {
+		t.Errorf("gone comment = %v", out)
+	}
+
+	// Missing parameters send nothing; YouTrack's refusal is passed through.
+	res, err = run(map[string]any{"issue": "P-1"})
+	mustError(t, res, err, "issue and comment are required")
+	res, err = run(map[string]any{"issue": "P-1", "comment": "4-7"})
+	mustError(t, res, err, "HTTP 403")
+	if n := f.count(http.MethodDelete, "/api/issues/P-1/comments/4-7"); n != 1 {
+		t.Errorf("refused delete sent %d times", n)
+	}
+}
+
 func TestYouTrackREST_GetAttachmentContentPaths(t *testing.T) {
 	f := newYTFake(t)
 	y := newTestYouTrack(t, f, nil)
@@ -1129,7 +1292,7 @@ func TestYouTrackREST_ReadOnlyHidesWritesAndAdmin(t *testing.T) {
 		return m
 	}
 	rwNames, roNames := names(rw), names(ro)
-	for _, w := range []string{"create_issue", "update_issue", "add_comment", "attach", "watch", "link_issues", "log_work", "run_command", "admin_get", "admin_request"} {
+	for _, w := range []string{"create_issue", "update_issue", "add_comment", "update_comment", "delete_comment", "attach", "watch", "link_issues", "log_work", "run_command", "admin_get", "admin_request"} {
 		if !rwNames[w] {
 			t.Errorf("read-write connection lacks %s", w)
 		}
