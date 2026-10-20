@@ -35,7 +35,7 @@ tidy:
 	go mod tidy
 
 test:
-	go test ./...
+	go test -tags notray ./...
 
 clean:
 	rm -f $(BINARY) $(BINARY).exe

@@ -6,9 +6,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/smnhffmnn/mux/internal/config"
@@ -27,20 +29,55 @@ func freePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-// waitListening blocks until addr accepts TCP connections. startHTTPServer
-// starts its listener in a goroutine, so the test has to wait for it.
-func waitListening(t *testing.T, addr string) {
+// startTestServer runs startHTTPServer for s on a free port, waits until the
+// listener accepts connections and makes sure it is gone when the test ends,
+// whichever way the test ends. Returns the servers and the /mcp URL.
+func startTestServer(t *testing.T, s *server.MCPServer) (*httpServers, string) {
 	t.Helper()
+	port := freePort(t)
+	cfg := &config.Config{}
+	cfg.Server.Port = port
+
+	servers := startHTTPServer(s, cfg, nil, nil, nil)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = servers.Shutdown(ctx)
+	})
+
+	// startHTTPServer starts its listener in a goroutine.
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		c, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
 		if err == nil {
 			c.Close()
-			return
+			return servers, "http://" + addr + "/mcp"
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("server on %s did not start listening", addr)
+	return nil, ""
+}
+
+// mcpPost sends one JSON-RPC message the way an MCP client does over the
+// streamable HTTP transport. The caller closes the body.
+func mcpPost(t *testing.T, client *http.Client, url, sessionID, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	if sessionID != "" {
+		req.Header.Set(server.HeaderKeySessionID, sessionID)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST /mcp: %v", err)
+	}
+	return resp
 }
 
 // TestShutdownEndsOpenNotificationStream reproduces how an MCP client holds a
@@ -48,23 +85,17 @@ func waitListening(t *testing.T, addr string) {
 // done. http.Server.Shutdown alone never cancels that context, so the
 // connection never went idle and Shutdown used to wait out its whole deadline
 // on every Ctrl-C ("HTTP shutdown error: context deadline exceeded"). With the
-// base context cancelled on Shutdown, the stream ends at once and Shutdown
+// stream context cancelled on Shutdown, the stream ends at once and Shutdown
 // returns in milliseconds, without an error.
 func TestShutdownEndsOpenNotificationStream(t *testing.T) {
-	port := freePort(t)
-	cfg := &config.Config{}
-	cfg.Server.Port = port
-
-	servers := startHTTPServer(server.NewMCPServer("mux-test", "0.0.0"), cfg, nil, nil, nil)
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	waitListening(t, addr)
+	servers, url := startTestServer(t, server.NewMCPServer("mux-test", "0.0.0"))
 
 	// Open the notification stream the way an MCP client does. Without a
 	// session header mcp-go creates a session of its own, which is all the
 	// handler needs to park on r.Context().Done().
 	client := &http.Client{Transport: &http.Transport{}}
 	defer client.CloseIdleConnections()
-	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/mcp", nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -110,15 +141,112 @@ func TestShutdownEndsOpenNotificationStream(t *testing.T) {
 	}
 }
 
+// TestShutdownLetsRunningToolCallFinish is the other half of the contract: a
+// tool call that is still running when the stop begins is not cut off. It
+// keeps its connection context, Shutdown waits for it, and the client gets
+// the result — the deadline is for calls that take longer than that.
+func TestShutdownLetsRunningToolCallFinish(t *testing.T) {
+	const work = 200 * time.Millisecond
+
+	s := server.NewMCPServer("mux-test", "0.0.0")
+	started := make(chan struct{})
+	s.AddTool(mcp.NewTool("slow"), func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		close(started)
+		select {
+		case <-time.After(work):
+			return mcp.NewToolResultText("done"), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+	servers, url := startTestServer(t, s)
+
+	client := &http.Client{Transport: &http.Transport{}}
+	defer client.CloseIdleConnections()
+
+	// initialize → session id, then the initialized notification, as a
+	// client does before its first tool call.
+	resp := mcpPost(t, client, url, "",
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"mux-test","version":"0"}}}`)
+	initBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	sessionID := resp.Header.Get(server.HeaderKeySessionID)
+	if resp.StatusCode != http.StatusOK || sessionID == "" {
+		t.Fatalf("initialize: status %d, session %q, body %s", resp.StatusCode, sessionID, initBody)
+	}
+	resp = mcpPost(t, client, url, sessionID, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("notifications/initialized: status %d, want 202", resp.StatusCode)
+	}
+
+	// The tool call runs in the background so the test can shut down while
+	// it is still working.
+	type outcome struct {
+		status int
+		body   string
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(
+			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow","arguments":{}}}`))
+		if err != nil {
+			done <- outcome{err: err}
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set(server.HeaderKeySessionID, sessionID)
+		resp, err := client.Do(req)
+		if err != nil {
+			done <- outcome{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		done <- outcome{status: resp.StatusCode, body: string(b), err: err}
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tool call did not start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := servers.Shutdown(ctx)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Shutdown returned %v after %v", err, elapsed)
+	}
+	if elapsed < work/2 {
+		t.Fatalf("Shutdown returned after %v, before the running tool call could finish (%v)", elapsed, work)
+	}
+	if elapsed >= time.Second {
+		t.Fatalf("Shutdown took %v, want well under 1s", elapsed)
+	}
+
+	var got outcome
+	select {
+	case got = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tool call did not return after Shutdown")
+	}
+	if got.err != nil {
+		t.Fatalf("tool call cut off by Shutdown: %v", got.err)
+	}
+	if got.status != http.StatusOK || !strings.Contains(got.body, `"done"`) || strings.Contains(got.body, `"isError":true`) {
+		t.Fatalf("tool call result: status %d, body %s", got.status, got.body)
+	}
+}
+
 // TestShutdownWithoutConnections is the baseline: nothing in flight, Shutdown
 // returns immediately and without an error.
 func TestShutdownWithoutConnections(t *testing.T) {
-	port := freePort(t)
-	cfg := &config.Config{}
-	cfg.Server.Port = port
-
-	servers := startHTTPServer(server.NewMCPServer("mux-test", "0.0.0"), cfg, nil, nil, nil)
-	waitListening(t, fmt.Sprintf("127.0.0.1:%d", port))
+	servers, _ := startTestServer(t, server.NewMCPServer("mux-test", "0.0.0"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
