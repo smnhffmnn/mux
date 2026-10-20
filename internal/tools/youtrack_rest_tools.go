@@ -190,8 +190,8 @@ func (y *YouTrackREST) Tools() []ToolDef {
 		},
 		ToolDef{
 			Tool: mcp.NewTool("update_comment",
-				mcp.WithDescription("Edit an existing comment: replace its text and/or change its visibility (at least one of the two). Visibility given as empty lists makes the comment visible to everyone who sees the issue; visibility left out stays as it is. "+
-					"Whether the account may edit a comment is YouTrack's decision (its own comments, or any comment with the matching permission) — a refused edit comes back as the API's error."),
+				mcp.WithDescription("Edit an existing comment: replace its text and/or change its visibility (at least one of the two). A visibility list given replaces that list, a list left out keeps its current entries, and both lists empty make the comment visible to everyone who sees the issue. "+
+					"Whether the account may edit a comment is YouTrack's decision — a refused edit comes back as the API's error."),
 				mcp.WithString("issue", mcp.Required(), mcp.Description("Readable issue ID")),
 				mcp.WithString("comment", mcp.Required(), mcp.Description("Comment id as listed by get_comments or get_issue (e.g. 4-123)")),
 				mcp.WithString("text", mcp.Description("New text (YouTrack Markdown; replaces the whole comment)")),
@@ -202,8 +202,8 @@ func (y *YouTrackREST) Tools() []ToolDef {
 		},
 		ToolDef{
 			Tool: mcp.NewTool("delete_comment",
-				mcp.WithDescription("Delete a comment. The result confirms the deletion by re-reading the comment: YouTrack no longer returns it afterwards (it disappears from the thread and from the issue's history), so the result carries its id with deleted = true. "+
-					"Whether the account may delete a comment is YouTrack's decision (its own comments, or any comment with the matching permission) — a refused deletion comes back as the API's error."),
+				mcp.WithDescription("Delete a comment. The result confirms the deletion by re-reading the comment: once YouTrack no longer returns it, the result carries its id with deleted = true. "+
+					"Whether the account may delete a comment is YouTrack's decision — a refused deletion comes back as the API's error."),
 				mcp.WithString("issue", mcp.Required(), mcp.Description("Readable issue ID")),
 				mcp.WithString("comment", mcp.Required(), mcp.Description("Comment id as listed by get_comments or get_issue (e.g. 4-123)")),
 				mcp.WithDestructiveHintAnnotation(true),
