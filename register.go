@@ -509,20 +509,7 @@ func (r *simpleReloader) registerProxy(conn config.Connection) {
 		if !tokenStore.HasToken() {
 			return
 		}
-		adapter := proxy.NewKeychainTokenAdapter(tokenStore)
-		clientID, clientSecret := config.LoadOAuthClientID(conn.Name)
-		mount := proxy.Mount{
-			Name:       conn.Name,
-			URL:        conn.URL,
-			TokenStore: tokenStore,
-			OAuth: &transport.OAuthConfig{
-				ClientID:     clientID,
-				ClientSecret: clientSecret,
-				RedirectURI:  fmt.Sprintf("http://localhost:%d/oauth/callback", r.cfg.Server.Port),
-				TokenStore:   adapter,
-				PKCEEnabled:  true,
-			},
-		}
+		mount := oauthProxyMount(conn.Name, conn.URL, r.cfg.Server.Port, tokenStore)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := proxy.RegisterMount(ctx, r.mcpServer, mount); err != nil {

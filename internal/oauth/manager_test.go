@@ -65,6 +65,16 @@ func TestTakeFlowExpiresAbandonedAttempts(t *testing.T) {
 	if _, ok := m.pending["stale"]; ok {
 		t.Error("stale flow survived a lookup for another state")
 	}
+
+	// Start sweeps as well (sweepLocked before it records the new flow), so
+	// an instance that only ever starts flows does not keep the abandoned ones.
+	m.pending["stale"] = &flow{service: "notion", started: now.Add(-flowTTL - time.Second)}
+	m.mu.Lock()
+	m.sweepLocked(now)
+	m.mu.Unlock()
+	if _, ok := m.pending["stale"]; ok {
+		t.Error("stale flow survived sweepLocked")
+	}
 }
 
 func TestCallbackRejectsUnknownState(t *testing.T) {

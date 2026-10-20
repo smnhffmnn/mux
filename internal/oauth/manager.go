@@ -27,9 +27,9 @@ import (
 )
 
 // flowTTL is how long a started flow waits for the provider's callback. A
-// user who closes the provider's page never completes the flow, and without
-// an expiry every such attempt would stay in memory for the life of the
-// process and its state would stay redeemable.
+// user who closes the provider's page never completes the flow; expired
+// flows are swept whenever a flow is started or a callback looked up, so an
+// abandoned attempt neither stays redeemable nor accumulates.
 const flowTTL = 10 * time.Minute
 
 // Manager runs OAuth authorization flows and tracks their pending state
@@ -52,12 +52,13 @@ type Manager struct {
 	pending map[string]*flow
 }
 
-// flow is one authorization attempt, keyed by its state parameter.
+// flow is one authorization attempt, keyed by its state parameter. The token
+// itself goes through the handler's TokenStore into the secret store; the
+// onAuthorized callbacks open their own store by connection name.
 type flow struct {
 	service      string
 	handler      *transport.OAuthHandler
 	codeVerifier string
-	tokenStore   *config.KeychainTokenStore
 	started      time.Time
 }
 
@@ -72,18 +73,21 @@ func NewManager(cfg *config.Config, port int, onAuthorized func(service string))
 	}
 }
 
-// takeFlow removes and returns the pending flow for state. Expired flows are
-// dropped on the way, so an abandoned attempt neither accumulates nor stays
-// redeemable; ok is false for an unknown or expired state.
-func (m *Manager) takeFlow(state string) (f *flow, ok bool) {
-	now := m.now()
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// sweepLocked drops every pending flow older than flowTTL. Caller holds m.mu.
+func (m *Manager) sweepLocked(now time.Time) {
 	for s, p := range m.pending {
 		if now.Sub(p.started) > flowTTL {
 			delete(m.pending, s)
 		}
 	}
+}
+
+// takeFlow removes and returns the pending flow for state; ok is false for an
+// unknown or expired state.
+func (m *Manager) takeFlow(state string) (f *flow, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sweepLocked(m.now())
 	f, ok = m.pending[state]
 	if ok {
 		delete(m.pending, state)
@@ -146,20 +150,20 @@ func (m *Manager) Start(name string) (string, error) {
 			return "", fmt.Errorf("client registration failed: %w", err)
 		}
 		if err := config.SaveOAuthClient(conn.Name, oauthHandler.GetClientID(), oauthHandler.GetClientSecret()); err != nil {
-			log.Printf("[oauth] Warning: could not save OAuth client to keychain: %v", err)
+			log.Printf("[oauth] Warning: could not save OAuth client to the secret store: %v", err)
 		}
 		log.Printf("[oauth] Registered client for %s: %s", conn.Name, oauthHandler.GetClientID())
 	}
 
 	codeVerifier, err := transport.GenerateCodeVerifier()
 	if err != nil {
-		return "", fmt.Errorf("failed to generate code verifier")
+		return "", fmt.Errorf("failed to generate code verifier: %w", err)
 	}
 	codeChallenge := transport.GenerateCodeChallenge(codeVerifier)
 
 	state, err := transport.GenerateState()
 	if err != nil {
-		return "", fmt.Errorf("failed to generate state")
+		return "", fmt.Errorf("failed to generate state: %w", err)
 	}
 
 	authURL, err := oauthHandler.GetAuthorizationURL(ctx, state, codeChallenge)
@@ -167,13 +171,14 @@ func (m *Manager) Start(name string) (string, error) {
 		return "", fmt.Errorf("failed to get auth URL: %w", err)
 	}
 
+	now := m.now()
 	m.mu.Lock()
+	m.sweepLocked(now)
 	m.pending[state] = &flow{
 		service:      conn.Name,
 		handler:      oauthHandler,
 		codeVerifier: codeVerifier,
-		tokenStore:   tokenStore,
-		started:      m.now(),
+		started:      now,
 	}
 	m.mu.Unlock()
 
