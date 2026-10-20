@@ -521,7 +521,9 @@ More info: https://github.com/smnhffmnn/mux
 		log.Println("[mux] Shutting down...")
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
-		servers.Shutdown(shutdownCtx)
+		if err := servers.Shutdown(shutdownCtx); err != nil {
+			log.Printf("[mux] shutdown error: %v", err)
+		}
 		cancel()
 		return
 	}
@@ -607,29 +609,66 @@ type httpServers struct {
 	https *http.Server // nil when TLS is not configured
 }
 
-// Shutdown gracefully shuts down all servers in parallel.
-func (s *httpServers) Shutdown(ctx context.Context) {
+// Shutdown gracefully shuts down all servers in parallel. It returns once
+// every server is down, or ctx expires; the error then names the server
+// that did not finish in time. The MCP notification streams end at the
+// first Shutdown call (see endStreamsOnShutdown), so what the deadline
+// covers is tool calls still running: they get until ctx expires to finish
+// and deliver their result, and an error here means one of them did not.
+func (s *httpServers) Shutdown(ctx context.Context) error {
 	var wg sync.WaitGroup
-	n := 1
-	if s.https != nil {
-		n = 2
-	}
-	wg.Add(n)
+	var httpErr, httpsErr error
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		if err := s.http.Shutdown(ctx); err != nil {
-			log.Printf("[mux] HTTP shutdown error: %v", err)
+			httpErr = fmt.Errorf("HTTP: %w", err)
 		}
 	}()
 	if s.https != nil {
+		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			if err := s.https.Shutdown(ctx); err != nil {
-				log.Printf("[mux] HTTPS shutdown error: %v", err)
+				httpsErr = fmt.Errorf("HTTPS: %w", err)
 			}
 		}()
 	}
 	wg.Wait()
+	return errors.Join(httpErr, httpsErr)
+}
+
+// endStreamsOnShutdown ends the MCP notification streams once shutdown is
+// cancelled and leaves every other request alone.
+//
+// http.Server.Shutdown closes the listeners and the idle connections and
+// then waits for the active ones — but it never cancels a running
+// handler's context. The notification stream (GET /mcp) is such a handler:
+// mcp-go blocks on r.Context().Done() for the life of the session, so that
+// connection never went idle and every Ctrl-C sat out the full shutdown
+// deadline before exiting with "HTTP shutdown error: context deadline
+// exceeded". A GET therefore runs on a request context that is cancelled
+// together with shutdown: the stream returns, the connection goes idle,
+// Shutdown closes it.
+//
+// A POST carries a tool call, and a tool call may be writing somewhere
+// remote. It keeps the plain connection context so it can finish and
+// deliver its result inside the callers' deadline instead of being cut off
+// the moment the stop begins; a call that outlives the deadline is what the
+// deadline is for.
+func endStreamsOnShutdown(h http.Handler, shutdown context.Context) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			h.ServeHTTP(w, r)
+			return
+		}
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		// Cancel with shutdown; unhook when the request ends, so streams that
+		// closed on their own leave nothing behind on the shutdown context.
+		defer context.AfterFunc(shutdown, cancel)()
+		h.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // startHTTPServer creates and starts the MCP HTTP server(s).
@@ -648,8 +687,11 @@ func (s *httpServers) Shutdown(ctx context.Context) {
 func startHTTPServer(s *server.MCPServer, cfg *config.Config, hc *health.Checker, localRoutes, tlsRoutes func(*http.ServeMux)) *httpServers {
 	httpMux := http.NewServeMux()
 
+	// The first Shutdown cancels streamCtx and with it every open
+	// notification stream; see endStreamsOnShutdown for why only those.
+	streamCtx, cancelStreams := context.WithCancel(context.Background())
 	mcpHandler := server.NewStreamableHTTPServer(s)
-	httpMux.Handle("/mcp", mcpHandler)
+	httpMux.Handle("/mcp", endStreamsOnShutdown(mcpHandler, streamCtx))
 
 	if hc != nil {
 		hc.Mount(httpMux)
@@ -680,6 +722,7 @@ func startHTTPServer(s *server.MCPServer, cfg *config.Config, hc *health.Checker
 		ReadHeaderTimeout: rht,
 		MaxHeaderBytes:    1 << 20,
 	}
+	httpSrv.RegisterOnShutdown(cancelStreams)
 	go func() {
 		log.Printf("[mux] Starting HTTP server on %s", httpAddr)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -715,6 +758,7 @@ func startHTTPServer(s *server.MCPServer, cfg *config.Config, hc *health.Checker
 				MinVersion: tls.VersionTLS12,
 			},
 		}
+		httpsSrv.RegisterOnShutdown(cancelStreams)
 		go func() {
 			certPath := config.ExpandHome(cfg.Server.TLSCert)
 			keyPath := config.ExpandHome(cfg.Server.TLSKey)

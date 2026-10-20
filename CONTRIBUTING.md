@@ -20,7 +20,7 @@ CGO_ENABLED=0 go build -tags notray -ldflags "-s -w" -o mux .
 make build
 
 # Run tests
-go test ./internal/...
+go test -tags notray ./...
 ```
 
 ### Project Structure
@@ -57,7 +57,7 @@ register.go     # Connection registration and hot-reload
 - Target the `main` branch
 - Keep PRs focused — one feature or fix per PR
 - Include a clear description of what changed and why
-- Ensure `go test ./internal/...` passes
+- Ensure `go test -tags notray ./...` passes
 - Follow existing code style (run `gofmt`)
 
 ## Code Style
