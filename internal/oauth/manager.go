@@ -26,6 +26,12 @@ import (
 	"github.com/smnhffmnn/mux/internal/proxy"
 )
 
+// flowTTL is how long a started flow waits for the provider's callback. A
+// user who closes the provider's page never completes the flow, and without
+// an expiry every such attempt would stay in memory for the life of the
+// process and its state would stay redeemable.
+const flowTTL = 10 * time.Minute
+
 // Manager runs OAuth authorization flows and tracks their pending state
 // between the authorization redirect and the provider's callback.
 type Manager struct {
@@ -38,6 +44,10 @@ type Manager struct {
 	// browser redirect is waiting on the HTTP response.
 	onAuthorized func(service string)
 
+	// now is the clock for flow expiry; tests replace it.
+	now func() time.Time
+
+	// mu protects pending.
 	mu      sync.Mutex
 	pending map[string]*flow
 }
@@ -48,6 +58,7 @@ type flow struct {
 	handler      *transport.OAuthHandler
 	codeVerifier string
 	tokenStore   *config.KeychainTokenStore
+	started      time.Time
 }
 
 // NewManager creates a Manager. onAuthorized may be nil.
@@ -56,8 +67,28 @@ func NewManager(cfg *config.Config, port int, onAuthorized func(service string))
 		cfg:          cfg,
 		port:         port,
 		onAuthorized: onAuthorized,
+		now:          time.Now,
 		pending:      make(map[string]*flow),
 	}
+}
+
+// takeFlow removes and returns the pending flow for state. Expired flows are
+// dropped on the way, so an abandoned attempt neither accumulates nor stays
+// redeemable; ok is false for an unknown or expired state.
+func (m *Manager) takeFlow(state string) (f *flow, ok bool) {
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for s, p := range m.pending {
+		if now.Sub(p.started) > flowTTL {
+			delete(m.pending, s)
+		}
+	}
+	f, ok = m.pending[state]
+	if ok {
+		delete(m.pending, state)
+	}
+	return f, ok
 }
 
 // Start begins an OAuth flow for the named proxy connection and returns the
@@ -142,6 +173,7 @@ func (m *Manager) Start(name string) (string, error) {
 		handler:      oauthHandler,
 		codeVerifier: codeVerifier,
 		tokenStore:   tokenStore,
+		started:      m.now(),
 	}
 	m.mu.Unlock()
 
@@ -168,13 +200,7 @@ func (m *Manager) CallbackHandler() http.HandlerFunc {
 			return
 		}
 
-		m.mu.Lock()
-		pending, ok := m.pending[state]
-		if ok {
-			delete(m.pending, state)
-		}
-		m.mu.Unlock()
-
+		pending, ok := m.takeFlow(state)
 		if !ok {
 			writeCallbackPage(w, "Error", "#f87171", "Unknown or expired OAuth state")
 			return

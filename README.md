@@ -147,6 +147,8 @@ mux                                        # auto-detects headless
 mux --port 8080 --config ./my-config.toml  # custom port and config
 ```
 
+OAuth proxy connections (Sentry, Notion, Asana MCP, …) are authorized from a browser: open `http://localhost:7700/oauth/start?connection=<name>`. mux redirects to the provider, the provider redirects back to `/oauth/callback` on the same port, the token is stored, and the connection's tools appear without a restart. Until then `/health` lists the connection as `awaiting oauth login`.
+
 ## Configuration
 
 Config file: `~/.config/mux/config.toml` (respects `$XDG_CONFIG_HOME`; Windows: `%USERPROFILE%\.mux\config.toml`. Pre-XDG installations at `~/.mux` are migrated automatically.)

@@ -620,6 +620,8 @@ url = "https://mcp.sentry.dev/mcp"
 
 URLs ending in `/sse` use SSE transport; everything else uses Streamable HTTP.
 
+OAuth proxies need a one-time login in a browser. The desktop app starts it with **Authorize** on the connection card; a headless instance has no UI, so open `http://localhost:7700/oauth/start?connection={name}` yourself (adjust the port). Either way the provider redirects back to `/oauth/callback` on the local port, the token is stored as `{name}-oauth-token`, and the connection mounts without a restart.
+
 Proxy-type aliases (`youtrack`, `sentry`, `netdata`, `notion`, `asana-mcp`, `higgsfield`) behave identically to `proxy` but provide semantic clarity. `youtrack` proxies JetBrains' built-in YouTrack MCP server; for issue work prefer the native [YouTrack REST](#youtrack-rest) type. `sentry` and `notion` additionally default `oauth = true`. `asana-mcp` defaults `oauth = true` and URL to `https://mcp.asana.com/v2/mcp`. `higgsfield` defaults `oauth = true`, URL to `https://mcp.higgsfield.ai/mcp`, and scopes to `openid email offline_access` (the `offline_access` scope obtains a refresh token, so the proxy keeps working without re-authentication).
 
 ### Google Workspace

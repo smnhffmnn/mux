@@ -2324,4 +2324,3 @@ func probeResponse(name string, res proxy.ProbeResult) testResponse {
 	}
 	return testResponse{Connection: name, Connected: true, Message: fmt.Sprintf("Connected: %s (%d tools)", res.ServerName, res.ToolCount)}
 }
-

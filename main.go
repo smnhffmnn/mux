@@ -478,23 +478,11 @@ More info: https://github.com/smnhffmnn/mux
 		registerConfigTools(s, cfg, tm)
 		hc := health.NewChecker(cfg, mcpToolRegistry{s}, tm, version, processStart)
 
-		// OAuth routes for headless mode (browser-based /oauth/start +
-		// /oauth/callback). The flow lives in internal/oauth and is available
-		// in every build — notray builds included, which previously had no
-		// OAuth at all because the code sat in the tag-guarded app.go.
-		oauthMgr := oauth.NewManager(cfg, cfg.Server.Port, oauthAuthorizedMount(cfg, s))
-		oauthRoutes := oauthMgr.Routes
-
-		var localRoutes, tlsRoutes func(*http.ServeMux)
+		var vh *vault.VaultHandlers
+		var tlsRoutes func(*http.ServeMux)
 		if vlt != nil {
-			vh := vault.NewVaultHandlers(vlt, waServer, approvalQueue)
-			// Local: vault + SSH endpoints + OAuth. TLS: vault only (SSH is localhost-only for security).
-			localRoutes = func(mux *http.ServeMux) {
-				vh.Mount(mux)
-				vh.MountSSH(mux)
-				tools.MountSSHAudit(mux)
-				oauthRoutes(mux)
-			}
+			vh = vault.NewVaultHandlers(vlt, waServer, approvalQueue)
+			// TLS: vault only (SSH endpoints and OAuth are localhost-only).
 			tlsRoutes = func(mux *http.ServeMux) { vh.Mount(mux) }
 			log.Println("[mux] Vault HTTP endpoints registered on /vault/*")
 
@@ -506,14 +494,8 @@ More info: https://github.com/smnhffmnn/mux
 				}
 			}()
 			defer credSock.Close()
-		} else {
-			// OAuth routes on local HTTP only — redirect_uri is always localhost.
-			localRoutes = func(mux *http.ServeMux) {
-				tools.MountSSHAudit(mux)
-				oauthRoutes(mux)
-			}
 		}
-		servers := startHTTPServer(s, cfg, hc, localRoutes, tlsRoutes)
+		servers := startHTTPServer(s, cfg, hc, headlessLocalRoutes(cfg, s, vh), tlsRoutes)
 
 		// Block until SIGINT/SIGTERM
 		sigCh := make(chan os.Signal, 1)
@@ -531,6 +513,30 @@ More info: https://github.com/smnhffmnn/mux
 
 	// --- Desktop mode (Wails v3 + MCP HTTP) ---
 	runDesktop(s, cfg, tm, ctx, cancel, vlt, waServer, approvalQueue)
+}
+
+// headlessLocalRoutes assembles the routes of the loopback HTTP server in
+// headless mode: the OAuth endpoints, the SSH audit page and, with a vault,
+// its handlers and SSH endpoints. vh is nil without a vault.
+//
+// The OAuth flow lives in internal/oauth and is part of every build, notray
+// builds included: without a UI, GET /oauth/start?connection=<name> is the
+// only way to authorize an OAuth proxy, and a notray binary had no such route
+// while the flow lived in the tag-guarded app.go. The routes stay on the
+// loopback server because the redirect_uri is always localhost.
+//
+// A function of its own so a test can build the route set of a notray binary
+// without starting headless mode.
+func headlessLocalRoutes(cfg *config.Config, s *server.MCPServer, vh *vault.VaultHandlers) func(*http.ServeMux) {
+	oauthMgr := oauth.NewManager(cfg, cfg.Server.Port, oauthAuthorizedMount(cfg, s))
+	return func(mux *http.ServeMux) {
+		if vh != nil {
+			vh.Mount(mux)
+			vh.MountSSH(mux)
+		}
+		tools.MountSSHAudit(mux)
+		oauthMgr.Routes(mux)
+	}
 }
 
 // gitHostsFromConfig extracts git connection configs for the credential socket.

@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/smnhffmnn/mux/internal/config"
 )
@@ -31,6 +32,38 @@ func TestStartValidation(t *testing.T) {
 	}
 	if _, err := m.Start("no-url"); err == nil {
 		t.Error("Start without URL succeeded, want error")
+	}
+}
+
+func TestTakeFlowExpiresAbandonedAttempts(t *testing.T) {
+	m := testManager()
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	m.now = func() time.Time { return now }
+
+	// Two attempts started directly, as Start would after a successful
+	// discovery and registration (which need a provider).
+	m.pending["fresh"] = &flow{service: "notion", started: now}
+	m.pending["stale"] = &flow{service: "notion", started: now.Add(-flowTTL - time.Second)}
+
+	if _, ok := m.takeFlow("stale"); ok {
+		t.Error("takeFlow(stale) redeemed a flow older than flowTTL")
+	}
+	if _, ok := m.takeFlow("fresh"); !ok {
+		t.Error("takeFlow(fresh) did not find a flow within flowTTL")
+	}
+	if _, ok := m.takeFlow("fresh"); ok {
+		t.Error("takeFlow(fresh) redeemed the same state twice")
+	}
+	if len(m.pending) != 0 {
+		t.Errorf("pending = %d flows after both were taken, want 0", len(m.pending))
+	}
+
+	// An abandoned attempt is also dropped when a different state is looked
+	// up, so a map of never-completed flows cannot grow unbounded.
+	m.pending["stale"] = &flow{service: "notion", started: now.Add(-flowTTL - time.Second)}
+	m.takeFlow("never-issued")
+	if _, ok := m.pending["stale"]; ok {
+		t.Error("stale flow survived a lookup for another state")
 	}
 }
 

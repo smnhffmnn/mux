@@ -82,10 +82,14 @@ prompt; in exclusive mode a sealed vault refuses every secret read. Leave
 `[vault] enabled` off here and let secrets come from provisioning or the
 mounted `secrets.toml`.
 
-OAuth connections cannot complete a login in the container either — the
-headless build registers no `/oauth/*` routes. Connections that need OAuth are
-reported by the health endpoint as `awaiting oauth login` and stay
-unregistered.
+OAuth connections are authorized from a browser, as on a host: `GET
+/oauth/start?connection=<name>` on the loopback listener sends it to the
+provider, the provider sends it back to `/oauth/callback` on the same
+listener, the token is written to the secret store — the mounted
+`secrets.toml` here — and the connection mounts without a restart. Until then
+`/health` reports it as `awaiting oauth login`. The listener is loopback-only
+(see below), so the browser's `localhost:7700` has to end up inside the
+container's network namespace; a published port does not get it there.
 
 ## Health
 
