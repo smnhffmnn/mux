@@ -202,7 +202,7 @@ func (y *YouTrackREST) Tools() []ToolDef {
 		},
 		ToolDef{
 			Tool: mcp.NewTool("delete_comment",
-				mcp.WithDescription("Delete a comment. YouTrack marks it deleted rather than dropping it — the thread keeps it with deleted = true — and the result shows the comment as it reads afterwards. "+
+				mcp.WithDescription("Delete a comment. The result confirms the deletion by re-reading the comment: YouTrack no longer returns it afterwards (it disappears from the thread and from the issue's history), so the result carries its id with deleted = true. "+
 					"Whether the account may delete a comment is YouTrack's decision (its own comments, or any comment with the matching permission) — a refused deletion comes back as the API's error."),
 				mcp.WithString("issue", mcp.Required(), mcp.Description("Readable issue ID")),
 				mcp.WithString("comment", mcp.Required(), mcp.Description("Comment id as listed by get_comments or get_issue (e.g. 4-123)")),

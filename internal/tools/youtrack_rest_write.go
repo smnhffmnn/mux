@@ -307,9 +307,11 @@ func (y *YouTrackREST) handleDeleteComment(ctx context.Context, req mcp.CallTool
 	if err := y.callJSON(ctx, "issue.comment.delete", params, nil, nil, nil); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	// YouTrack keeps a deleted comment readable with deleted = true (the UI
-	// offers to restore it), so the re-read shows what the thread carries
-	// now. A comment the API no longer returns is reported as gone.
+	// The re-read confirms the deletion. YouTrack answers 404 for a deleted
+	// comment — it is gone from the thread and from the issue's history as
+	// well (2026.3, verified live) — although IssueComment carries a deleted
+	// flag; should an instance keep returning the comment, it is shown as it
+	// reads then, flag included.
 	data, status, err := y.call(ctx, "issue.comment.get", params, nil, nil)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("comment %s deleted, but re-reading it failed: %v", comment, err)), nil

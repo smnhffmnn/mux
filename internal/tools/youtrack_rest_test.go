@@ -214,10 +214,10 @@ func newYTFake(t *testing.T) *ytFake {
 		fmt.Sscanf(rec.Query["$skip"], "%d", &skip)
 		jsonOK(w, ytFakeComments(skip))
 	})
-	// One comment of P-1 with state, kept the way YouTrack keeps it: POST
-	// changes text and visibility, DELETE marks it deleted and leaves it
-	// readable, GET reads it back. Ids sent in a visibility come back as the
-	// names a real instance would resolve them to.
+	// One comment of P-1 with state, behaving as YouTrack does: POST changes
+	// text and visibility, GET reads it back, and after a DELETE the comment
+	// is gone — every further call answers 404. Ids sent in a visibility come
+	// back as the names a real instance would resolve them to.
 	comment := struct {
 		text, visibility string
 		deleted          bool
@@ -225,6 +225,11 @@ func newYTFake(t *testing.T) *ytFake {
 	visibilityNames := strings.NewReplacer(`{"id":"25-1"}`, `{"name":"IT"}`, `{"id":"26-5"}`, `{"login":"john.roe"}`)
 	mux.HandleFunc("/api/issues/P-1/comments/4-9", func(w http.ResponseWriter, r *http.Request) {
 		rec := record(r)
+		if comment.deleted {
+			w.WriteHeader(404)
+			io.WriteString(w, `{"error":"Not Found","error_description":"Entity with id 4-9 not found"}`)
+			return
+		}
 		switch r.Method {
 		case http.MethodPost:
 			var body struct {
@@ -242,17 +247,16 @@ func newYTFake(t *testing.T) *ytFake {
 			comment.deleted = true
 			return
 		}
-		jsonOK(w, fmt.Sprintf(`{"id":"4-9","text":%q,"created":%d,"updated":%d,"author":{"login":"jane.doe"},"deleted":%t,"visibility":%s}`,
-			comment.text, ytFakeCreated, ytFakeCreated+60000, comment.deleted, comment.visibility))
+		jsonOK(w, fmt.Sprintf(`{"id":"4-9","text":%q,"created":%d,"updated":%d,"author":{"login":"jane.doe"},"visibility":%s}`,
+			comment.text, ytFakeCreated, ytFakeCreated+60000, comment.visibility))
 	})
-	// A comment the API no longer returns once it is deleted.
+	// An instance that keeps returning a deleted comment, flag set.
 	mux.HandleFunc("/api/issues/P-1/comments/4-8", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
 		if r.Method == http.MethodDelete {
 			return
 		}
-		w.WriteHeader(404)
-		io.WriteString(w, `{"error":"Not Found","error_description":"Entity with id 4-8 not found"}`)
+		jsonOK(w, fmt.Sprintf(`{"id":"4-8","text":"kept","created":%d,"author":{"login":"jane.doe"},"deleted":true}`, ytFakeCreated))
 	})
 	// Someone else's comment the account may not change.
 	mux.HandleFunc("/api/issues/P-1/comments/4-7", func(w http.ResponseWriter, r *http.Request) {
@@ -1104,8 +1108,8 @@ func TestYouTrackREST_DeleteComment(t *testing.T) {
 		return y.handleDeleteComment(context.Background(), toolRequest(args))
 	}
 
-	// The DELETE goes out without a body; the re-read shows the comment the
-	// way YouTrack keeps it: deleted, text still readable.
+	// The DELETE goes out without a body, the re-read answers 404 as
+	// YouTrack does for a deleted comment, and the result says so.
 	res, err := run(map[string]any{"issue": "P-1", "comment": "4-9"})
 	if err != nil {
 		t.Fatal(err)
@@ -1115,17 +1119,17 @@ func TestYouTrackREST_DeleteComment(t *testing.T) {
 		t.Errorf("DELETE request = %+v", r)
 	}
 	if r, ok := f.last(http.MethodGet, "/api/issues/P-1/comments/4-9"); !ok || !strings.Contains(r.Query["fields"], "deleted") {
-		t.Errorf("deleted comment was not re-read with its deleted flag: %+v", r)
+		t.Errorf("deleted comment was not re-read: %+v", r)
 	}
-	if c := out["comment"].(map[string]any); c["id"] != "4-9" || c["deleted"] != true || c["text"] != "posted" {
-		t.Errorf("comment rendering = %v", c)
+	if c := out["comment"].(map[string]any); c["id"] != "4-9" || c["deleted"] != true || c["text"] != nil || out["note"] == nil {
+		t.Errorf("gone comment = %v", out)
 	}
 
-	// A comment the API no longer returns is reported as gone.
+	// An instance that still returns the comment shows it with its flag.
 	res, _ = run(map[string]any{"issue": "P-1", "comment": "4-8"})
 	out = resultJSON(t, res)
-	if c := out["comment"].(map[string]any); c["id"] != "4-8" || c["deleted"] != true || out["note"] == nil {
-		t.Errorf("gone comment = %v", out)
+	if c := out["comment"].(map[string]any); c["id"] != "4-8" || c["deleted"] != true || c["text"] != "kept" || out["note"] != nil {
+		t.Errorf("kept comment = %v", out)
 	}
 
 	// Missing parameters send nothing; YouTrack's refusal is passed through.
