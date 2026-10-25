@@ -34,10 +34,12 @@ brew install mux                # CLI only
 brew install --cask mux         # Desktop app (installs to /Applications)
 ```
 
-> **macOS Gatekeeper:** The app is not code-signed yet. On first launch macOS may show "mux is damaged and can't be opened". Fix with:
+> **macOS Gatekeeper:** The app is signed ad-hoc (no Developer ID, not notarized), so Gatekeeper blocks the first launch of a downloaded copy. Fix with:
 > ```bash
 > xattr -cr /Applications/mux.app
 > ```
+>
+> **Local network:** the first time mux connects to a host on your LAN (Proxmox, Home Assistant, a NAS), macOS asks once for Local Network access. Without that permission every LAN dial fails with `connect: no route to host` while loopback and internet hosts keep working; the permission can be changed later in the system's privacy settings.
 
 ### GitHub Releases
 

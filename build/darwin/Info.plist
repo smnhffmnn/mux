@@ -22,5 +22,7 @@
   <true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key>
   <true/>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>mux connects to databases and services on your local network (for example Proxmox or Home Assistant).</string>
 </dict>
 </plist>

@@ -93,6 +93,7 @@ mux automatically selects the right mode — no flags needed:
 - Click tray icon to open web UI, see status, or quit
 - Requires CGO (Xcode Command Line Tools)
 - Gatekeeper may block unsigned binaries -- right-click -> Open, or `xattr -cr ./mux`
+- The release `.app` is signed ad-hoc with the bundle identifier `com.smnhffmnn.mux` and declares `NSLocalNetworkUsageDescription`. macOS stores the per-app Local Network permission under the signing identifier, so a bundle whose binary is swapped must be re-signed (`make build` does this for `build/bin/mux.app`); an unsigned swap leaves the linker's `a.out` identifier and every LAN connection fails with `no route to host`
 
 **Headless build**:
 - Works without Xcode

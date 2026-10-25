@@ -19,7 +19,8 @@ build: frontend
 	go build $(LDFLAGS) -o build/bin/$(BINARY) .
 	@if [ -d build/bin/$(BINARY).app ]; then \
 		cp build/bin/$(BINARY) build/bin/$(BINARY).app/Contents/MacOS/$(BINARY); \
-		echo "Updated $(BINARY).app bundle"; \
+		codesign --force --sign - build/bin/$(BINARY).app; \
+		echo "Updated and re-signed $(BINARY).app bundle"; \
 	fi
 
 # Development: run frontend dev server + Go binary separately
