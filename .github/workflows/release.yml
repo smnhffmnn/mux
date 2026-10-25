@@ -120,6 +120,18 @@ jobs:
           /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string appicon" mux.app/Contents/Info.plist 2>/dev/null || \
           /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile appicon" mux.app/Contents/Info.plist
 
+          # Sign the bundle (ad-hoc, no certificate needed). Without this step the
+          # binary only carries the linker's ad-hoc signature with identifier "a.out",
+          # and macOS keys the per-app "Local Network" permission on the signing
+          # identifier -- the shipped app then never matches a granted permission
+          # and every LAN dial fails with "no route to host". codesign takes the
+          # identifier from CFBundleIdentifier; the last line fails the job if it
+          # ends up anything else.
+          codesign --force --sign - mux.app
+          codesign --verify --strict --verbose=2 mux.app
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" mux.app/Contents/Info.plist)
+          codesign --display --verbose=2 mux.app 2>&1 | grep -x "Identifier=${BUNDLE_ID}"
+
           tar czf mux_${{ env.VERSION }}_darwin_${{ matrix.goarch }}_app.tar.gz mux.app
 
       - name: Upload to release
