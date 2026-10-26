@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -261,6 +262,14 @@ func allTypes() []TypeListEntry {
 	return types
 }
 
+// checkboxValue is the form value of a checkbox field: "true" or "".
+func checkboxValue(on bool) string {
+	if on {
+		return "true"
+	}
+	return ""
+}
+
 func buildConnInfo(conn config.Connection) ConnInfo {
 	td := config.LookupType(conn.Type)
 
@@ -275,6 +284,13 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 	case conn.Type == config.TypeSSH:
 		if conn.Host != "" {
 			summary = fmt.Sprintf("%s@%s:%d", conn.User, conn.Host, conn.Port)
+		}
+	case conn.Type == config.TypeIMAP:
+		if conn.Host != "" {
+			summary = fmt.Sprintf("%s@%s:%d", conn.User, conn.Host, conn.Port)
+			if conn.SendEnabled() {
+				summary += fmt.Sprintf(" · sends via %s", conn.SMTPHost)
+			}
 		}
 	default:
 		if conn.Host != "" {
@@ -292,6 +308,7 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 				Secret:      fd.Secret,
 				Small:       fd.Small,
 				Multiline:   fd.Multiline,
+				Checkbox:    fd.Checkbox,
 			}
 			if !fd.Secret {
 				switch fd.Key {
@@ -333,6 +350,18 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 					fi.Value = config.FormatLines(conn.AllowCommands)
 				case "deny_commands":
 					fi.Value = config.FormatLines(conn.DenyCommands)
+				case "smtp_host":
+					fi.Value = conn.SMTPHost
+				case "smtp_port":
+					if conn.SMTPPort > 0 {
+						fi.Value = fmt.Sprintf("%d", conn.SMTPPort)
+					}
+				case "from_name":
+					fi.Value = conn.FromName
+				case "allow_send":
+					fi.Value = checkboxValue(conn.AllowSend)
+				case "smtp_saves_sent":
+					fi.Value = checkboxValue(conn.SMTPSavesSent)
 				}
 			}
 			if fd.Secret {
@@ -624,6 +653,29 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 			}
 			conn.AllowCommands = allow
 			conn.DenyCommands = deny
+		}
+		if conn.Type == config.TypeIMAP {
+			// Written as sent, like the ssh fields: a cleared field clears the
+			// value, an unticked checkbox switches sending off.
+			next := *conn
+			next.SMTPHost = strings.TrimSpace(fields.SMTPHost)
+			next.SMTPPort = 0
+			if p := strings.TrimSpace(fields.SMTPPort); p != "" {
+				port, err := strconv.Atoi(p)
+				if err != nil {
+					return nil, fmt.Errorf("invalid smtp_port %q: must be a number", p)
+				}
+				next.SMTPPort = port
+			}
+			next.FromName = strings.TrimSpace(fields.FromName)
+			next.AllowSend = fields.AllowSend
+			next.SMTPSavesSent = fields.SMTPSavesSent
+			config.ApplyConnectionDefaults(&next)
+			if err := config.ValidateIMAPSending(next); err != nil {
+				return nil, err
+			}
+			conn.SMTPHost, conn.SMTPPort, conn.FromName = next.SMTPHost, next.SMTPPort, next.FromName
+			conn.AllowSend, conn.SMTPSavesSent = next.AllowSend, next.SMTPSavesSent
 		}
 	}
 
@@ -2043,7 +2095,12 @@ func (a *App) testIMAP(conn config.Connection) testResponse {
 		return testResponse{Connection: conn.Name, Connected: false, Message: err.Error()}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Two servers to sign in to when the connection may send.
+	timeout := 15 * time.Second
+	if im.SendEnabled() {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	port := conn.Port
@@ -2051,10 +2108,20 @@ func (a *App) testIMAP(conn config.Connection) testResponse {
 		port = 993 // NewIMAP's default — log the port actually dialed
 	}
 	testLog(conn.Name, "connecting to %s:%d and logging in as %s", conn.Host, port, conn.User)
+	if im.SendEnabled() {
+		smtpPort := conn.SMTPPort
+		if smtpPort == 0 {
+			smtpPort = config.DefaultSMTPPort
+		}
+		testLog(conn.Name, "sending is enabled — also signing in to %s:%d", conn.SMTPHost, smtpPort)
+	}
 	if err := im.Verify(ctx); err != nil {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("IMAP check failed: %v", err)}
 	}
 
+	if im.SendEnabled() {
+		return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: IMAP and SMTP login verified (%s)", conn.User)}
+	}
 	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: IMAP login verified (%s)", conn.User)}
 }
 

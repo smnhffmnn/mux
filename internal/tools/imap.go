@@ -1,9 +1,12 @@
 package tools
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +24,7 @@ import (
 
 	imaplib "github.com/emersion/go-imap"
 	imapclient "github.com/emersion/go-imap/client"
+	"github.com/emersion/go-imap/commands"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/smnhffmnn/mux/internal/config"
@@ -41,7 +45,13 @@ list_mailboxes reports messages/unseen per folder, so the number of pages can be
 get/archive/delete/reply/forward locate a conversation beyond the window (newest 5000 messages, thread completed via subject search).
 Each tool call opens a fresh IMAP connection (no persistent session).
 Archive/delete operations move messages to Archive/Trash folders.
-Draft creation saves to the Drafts folder — it does NOT send.`
+Replies go to the Reply-To of the latest message (its sender when it has none); reply_all adds everyone else on its To and Cc.
+Draft creation saves to the Drafts folder and returns a draft_id (the draft's Message-ID) — it does NOT send.`
+
+// IMAPSendInstructions are appended to DefaultIMAPInstructions when the
+// connection may send (allow_send with smtp_host).
+const IMAPSendInstructions = `Sending is enabled: send_draft sends a draft by its draft_id; reply_send and forward_send compose and send in one step.
+Sent mail cannot be recalled. sent=true means the SMTP server accepted the message — never send it again, even when warnings report that the Sent copy or the draft cleanup failed.`
 
 // IMAP wraps an IMAP mailbox as MCP tools with conversation threading.
 type IMAP struct {
@@ -49,14 +59,31 @@ type IMAP struct {
 	port     int
 	user     string
 	password string
+	fromName string // display name in the From header
 	domain   string // extracted from user for Message-ID generation
 	dialer   Dialer
+	smtp     *smtpSettings // nil: the connection does not send
+
+	// tlsRoots replaces the system roots when verifying the IMAP and SMTP
+	// servers. Only tests set it, to trust their own certificate.
+	tlsRoots *x509.CertPool
+}
+
+// smtpSettings is the sending side of an IMAP connection.
+type smtpSettings struct {
+	host        string
+	port        int
+	implicitTLS bool // TLS from the first byte (port 465) instead of STARTTLS
+	savesSent   bool // the server files submitted mail in Sent itself
 }
 
 // NewIMAP creates an IMAP connection from config.
 func NewIMAP(conn config.Connection, dialer Dialer) (*IMAP, error) {
 	if conn.Host == "" || conn.User == "" || conn.Password == "" {
 		return nil, fmt.Errorf("imap: host, user, and password are required")
+	}
+	if err := config.ValidateIMAPSending(conn); err != nil {
+		return nil, fmt.Errorf("imap: %w", err)
 	}
 	port := conn.Port
 	if port == 0 {
@@ -69,19 +96,44 @@ func NewIMAP(conn config.Connection, dialer Dialer) (*IMAP, error) {
 		domain = conn.User[idx+1:]
 	}
 
-	return &IMAP{
+	im := &IMAP{
 		host:     conn.Host,
 		port:     port,
 		user:     conn.User,
 		password: conn.Password,
+		fromName: strings.TrimSpace(conn.FromName),
 		domain:   domain,
 		dialer:   dialer,
-	}, nil
+	}
+	if conn.SendEnabled() {
+		smtpPort := conn.SMTPPort
+		if smtpPort == 0 {
+			smtpPort = config.DefaultSMTPPort
+		}
+		im.smtp = &smtpSettings{
+			host:        conn.SMTPHost,
+			port:        smtpPort,
+			implicitTLS: smtpPort == config.ImplicitTLSSMTPPort,
+			savesSent:   conn.SMTPSavesSent,
+		}
+	}
+	return im, nil
 }
 
-// Tools returns the MCP tools for this IMAP connection.
+// SendEnabled reports whether the connection registers its send tools.
+func (im *IMAP) SendEnabled() bool {
+	return im.smtp != nil
+}
+
+// tlsConfig verifies serverName against the system roots (or the test roots).
+func (im *IMAP) tlsConfig(serverName string) *tls.Config {
+	return &tls.Config{ServerName: serverName, RootCAs: im.tlsRoots}
+}
+
+// Tools returns the MCP tools for this IMAP connection. The send tools are
+// registered only when the connection may send.
 func (im *IMAP) Tools() []ToolDef {
-	return []ToolDef{
+	tools := []ToolDef{
 		{
 			Tool: mcp.NewTool("list_conversations",
 				mcp.WithDescription("List IMAP inbox conversations grouped by thread. Reads a window of the newest 200 messages (offset 0); page backwards with offset 200, 400, … until list_mailboxes' message count is reached. Returns conversations with latest message, participants, and message count."),
@@ -127,22 +179,27 @@ func (im *IMAP) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("create_reply_draft",
-				mcp.WithDescription("Create a reply draft for the latest message in an IMAP conversation. Saved to Drafts, does NOT send."),
+				mcp.WithDescription("Create a reply draft for the latest message in an IMAP conversation. Saved to Drafts, does NOT send. The reply goes to the message's Reply-To (its sender when it has none). Returns draft_id (the draft's Message-ID)."),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
 				mcp.WithString("body", mcp.Required(), mcp.Description("Reply text (plain text)")),
+				mcp.WithBoolean("reply_all", mcp.Description("Also address everyone else on the message's To and Cc, except this account (default: false)")),
 			),
 			Handler: im.handleCreateReplyDraft,
 		},
 		{
 			Tool: mcp.NewTool("create_forward_draft",
-				mcp.WithDescription("Create a forward draft for the latest message in an IMAP conversation. Saved to Drafts, does NOT send."),
+				mcp.WithDescription("Create a forward draft for the latest message in an IMAP conversation. Saved to Drafts, does NOT send. Returns draft_id (the draft's Message-ID)."),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
-				mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address")),
+				mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address(es), comma-separated for multiple")),
 				mcp.WithString("body", mcp.Description("Optional comment to include above the forwarded message")),
 			),
 			Handler: im.handleCreateForwardDraft,
 		},
 	}
+	if im.smtp != nil {
+		tools = append(tools, im.sendTools()...)
+	}
+	return tools
 }
 
 // --- IMAP client helpers ---
@@ -164,7 +221,7 @@ func (im *IMAP) connect(ctx context.Context) (*imapclient.Client, error) {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
 
-	tlsConn := tls.Client(rawConn, &tls.Config{ServerName: im.host})
+	tlsConn := tls.Client(rawConn, im.tlsConfig(im.host))
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		rawConn.Close()
 		return nil, fmt.Errorf("TLS handshake: %w", err)
@@ -180,7 +237,9 @@ func (im *IMAP) connect(ctx context.Context) (*imapclient.Client, error) {
 
 // Verify connects and logs in, then logs out — the connection test's way to
 // exercise exactly the dial/TLS/login path the live tools use (including the
-// tunnel dialer when one was passed to NewIMAP).
+// tunnel dialer when one was passed to NewIMAP). A connection that may send
+// also signs in to its SMTP server, so a wrong host or a password that only
+// works for IMAP shows up here and not on the first send.
 func (im *IMAP) Verify(ctx context.Context) error {
 	c, err := im.connect(ctx)
 	if err != nil {
@@ -190,6 +249,14 @@ func (im *IMAP) Verify(ctx context.Context) error {
 
 	if err := c.Login(im.user, im.password); err != nil {
 		return fmt.Errorf("login as %s: %w", im.user, err)
+	}
+	if im.smtp != nil {
+		sc, err := im.dialSMTP(ctx)
+		if err != nil {
+			return err
+		}
+		defer sc.close()
+		_ = sc.Quit()
 	}
 	return nil
 }
@@ -444,6 +511,7 @@ type imapMsg struct {
 	Subject   string
 	From      string
 	FromName  string
+	ReplyTo   []string
 	To        []string
 	CC        []string
 	Date      time.Time
@@ -468,6 +536,11 @@ func msgsFromIMAP(messages []*imaplib.Message) []imapMsg {
 		if len(env.From) > 0 {
 			m.From = addrString(env.From[0])
 			m.FromName = env.From[0].PersonalName
+		}
+		for _, a := range env.ReplyTo {
+			if s := addrString(a); s != "" {
+				m.ReplyTo = append(m.ReplyTo, s)
+			}
 		}
 		for _, a := range env.To {
 			if s := addrString(a); s != "" {
@@ -893,12 +966,8 @@ func (im *IMAP) handleArchiveConversation(ctx context.Context, req mcp.CallToolR
 		}
 
 		// Mark as deleted and expunge (C8: only our UIDs are marked)
-		item := imaplib.FormatFlagsOp(imaplib.AddFlags, true)
-		if err := c.UidStore(seqSet, item, []interface{}{imaplib.DeletedFlag}, nil); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("STORE \\Deleted: %v", err)), nil
-		}
-		if err := c.Expunge(nil); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("EXPUNGE: %v", err)), nil
+		if err := removeUIDs(c, seqSet); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 
 		return imapJSONResult(map[string]any{
@@ -939,12 +1008,8 @@ func (im *IMAP) handleDeleteConversation(ctx context.Context, req mcp.CallToolRe
 			return mcp.NewToolResultError(fmt.Sprintf("COPY to %s failed: %v", trashFolder, err)), nil
 		}
 
-		item := imaplib.FormatFlagsOp(imaplib.AddFlags, true)
-		if err := c.UidStore(seqSet, item, []interface{}{imaplib.DeletedFlag}, nil); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("STORE \\Deleted: %v", err)), nil
-		}
-		if err := c.Expunge(nil); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("EXPUNGE: %v", err)), nil
+		if err := removeUIDs(c, seqSet); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 
 		return imapJSONResult(map[string]any{
@@ -960,51 +1025,27 @@ func (im *IMAP) handleCreateReplyDraft(ctx context.Context, req mcp.CallToolRequ
 	if convID == "" || body == "" {
 		return mcp.NewToolResultError("conversation_id and body are required"), nil
 	}
+	replyAll := req.GetBool("reply_all", false)
 
 	return im.withClient(ctx, func(c *imapclient.Client) (*mcp.CallToolResult, error) {
-		thread, err := im.findConversation(c, convID)
+		m, err := im.prepareReply(c, convID, body, replyAll)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		raw, msgID := im.compose(m)
+		folder, err := appendDraft(c, raw)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		latest := thread[len(thread)-1]
-
-		subject := latest.Subject
-		if !strings.HasPrefix(strings.ToLower(subject), "re:") {
-			subject = "Re: " + subject
-		}
-
-		// Build References from thread Message-IDs (B6: proper chain)
-		var refs []string
-		for _, m := range thread {
-			if m.MessageID != "" {
-				refs = append(refs, m.MessageID)
-			}
-		}
-
-		msg := im.buildRFC822Message(
-			[]string{latest.From},
-			nil,
-			subject,
-			latest.MessageID,        // In-Reply-To
-			strings.Join(refs, " "), // References: full chain
-			normalizeCRLF(body),
-		)
-
-		draftsFolder := findFolder(c, "Drafts", "INBOX.Drafts", "Draft", "Entwürfe")
-		if draftsFolder == "" {
-			return mcp.NewToolResultError("Drafts folder not found"), nil
-		}
-
-		if err := c.Append(draftsFolder, []string{imaplib.DraftFlag, imaplib.SeenFlag}, time.Now(), msg); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("APPEND to Drafts: %v", err)), nil
-		}
-
 		return imapJSONResult(map[string]any{
 			"status":   "draft_created",
-			"folder":   draftsFolder,
-			"reply_to": latest.From,
-			"subject":  subject,
+			"draft_id": msgID,
+			"folder":   folder,
+			"reply_to": strings.Join(m.To, ", "),
+			"to":       m.To,
+			"cc":       m.Cc,
+			"subject":  m.Subject,
 		})
 	})
 }
@@ -1015,64 +1056,241 @@ func (im *IMAP) handleCreateForwardDraft(ctx context.Context, req mcp.CallToolRe
 	if convID == "" || to == "" {
 		return mcp.NewToolResultError("conversation_id and to are required"), nil
 	}
-
-	comment := ""
-	if v, ok := req.GetArguments()["body"].(string); ok {
-		comment = v
-	}
+	comment := req.GetString("body", "")
 
 	return im.withClient(ctx, func(c *imapclient.Client) (*mcp.CallToolResult, error) {
-		thread, err := im.findConversation(c, convID)
+		m, err := im.prepareForward(c, convID, to, comment)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		raw, msgID := im.compose(m)
+		folder, err := appendDraft(c, raw)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		latest := thread[len(thread)-1]
-
-		// Fetch the body of the latest message to include in forward
-		bodies, _ := fetchBodies(c, []uint32{latest.UID})
-		originalBody := bodies[latest.UID]
-
-		subject := latest.Subject
-		if !strings.HasPrefix(strings.ToLower(subject), "fwd:") {
-			subject = "Fwd: " + subject
-		}
-
-		fwdBody := ""
-		if comment != "" {
-			fwdBody = comment + "\r\n\r\n"
-		}
-		fwdBody += "---------- Forwarded message ----------\r\n"
-		fwdBody += fmt.Sprintf("From: %s\r\nDate: %s\r\nSubject: %s\r\nTo: %s\r\n\r\n",
-			latest.From, latest.Date.Format(time.RFC1123Z), latest.Subject, strings.Join(latest.To, ", "))
-		fwdBody += normalizeCRLF(originalBody)
-
-		// B7: No In-Reply-To on forwards — forwards are not replies
-		msg := im.buildRFC822Message(
-			[]string{to},
-			nil,
-			subject,
-			"", // no In-Reply-To
-			"", // no References
-			fwdBody,
-		)
-
-		draftsFolder := findFolder(c, "Drafts", "INBOX.Drafts", "Draft", "Entwürfe")
-		if draftsFolder == "" {
-			return mcp.NewToolResultError("Drafts folder not found"), nil
-		}
-
-		if err := c.Append(draftsFolder, []string{imaplib.DraftFlag, imaplib.SeenFlag}, time.Now(), msg); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("APPEND to Drafts: %v", err)), nil
-		}
-
 		return imapJSONResult(map[string]any{
-			"status":  "draft_created",
-			"folder":  draftsFolder,
-			"to":      to,
-			"subject": subject,
+			"status":   "draft_created",
+			"draft_id": msgID,
+			"folder":   folder,
+			"to":       m.To,
+			"subject":  m.Subject,
 		})
 	})
+}
+
+// --- Composing ---
+
+// outgoingMail is a plain-text message before it is encoded: a draft or a
+// message to send.
+type outgoingMail struct {
+	To, Cc     []string // bare addresses
+	Subject    string
+	InReplyTo  string
+	References string
+	Body       string
+}
+
+// recipients returns every envelope recipient of m.
+func (m outgoingMail) recipients() []string {
+	return append(append([]string{}, m.To...), m.Cc...)
+}
+
+// prepareReply builds the reply to the latest message of a conversation:
+// threaded on the whole chain, addressed by replyRecipients.
+func (im *IMAP) prepareReply(c *imapclient.Client, convID, body string, replyAll bool) (outgoingMail, error) {
+	thread, err := im.findConversation(c, convID)
+	if err != nil {
+		return outgoingMail{}, err
+	}
+	latest := thread[len(thread)-1]
+
+	subject := latest.Subject
+	if !strings.HasPrefix(strings.ToLower(subject), "re:") {
+		subject = "Re: " + subject
+	}
+
+	// Build References from thread Message-IDs (B6: proper chain)
+	var refs []string
+	for _, m := range thread {
+		if m.MessageID != "" {
+			refs = append(refs, m.MessageID)
+		}
+	}
+
+	to, cc := im.replyRecipients(latest, replyAll)
+	if len(to) == 0 {
+		return outgoingMail{}, fmt.Errorf("the latest message of conversation %s names no address to reply to", convID)
+	}
+	return outgoingMail{
+		To:         to,
+		Cc:         cc,
+		Subject:    subject,
+		InReplyTo:  latest.MessageID,
+		References: strings.Join(refs, " "),
+		Body:       body,
+	}, nil
+}
+
+// replyRecipients picks the addresses a reply to latest goes to: its
+// Reply-To (servers report the sender there when the header is absent), and
+// with all also everyone else on its To and Cc. The account's own address is
+// never a recipient; a reply to a message the account sent itself answers
+// that message's recipients.
+func (im *IMAP) replyRecipients(latest imapMsg, all bool) (to, cc []string) {
+	seen := map[string]bool{strings.ToLower(im.user): true}
+	add := func(list *[]string, addrs ...string) {
+		for _, a := range addrs {
+			key := strings.ToLower(a)
+			if a == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			*list = append(*list, a)
+		}
+	}
+
+	targets := latest.ReplyTo
+	if len(targets) == 0 && latest.From != "" {
+		targets = []string{latest.From}
+	}
+	add(&to, targets...)
+	if len(to) == 0 {
+		add(&to, latest.To...)
+	}
+	if all {
+		add(&cc, latest.To...)
+		add(&cc, latest.CC...)
+	}
+	return to, cc
+}
+
+// prepareForward builds a forward of the latest message of a conversation to
+// one or more addresses (comma-separated, display names allowed).
+func (im *IMAP) prepareForward(c *imapclient.Client, convID, to, comment string) (outgoingMail, error) {
+	list, err := mail.ParseAddressList(to)
+	if err != nil {
+		return outgoingMail{}, fmt.Errorf("invalid recipient %q: %v", to, err)
+	}
+	var addrs []string
+	for _, a := range list {
+		addrs = append(addrs, a.Address)
+	}
+
+	thread, err := im.findConversation(c, convID)
+	if err != nil {
+		return outgoingMail{}, err
+	}
+	latest := thread[len(thread)-1]
+
+	// Fetch the body of the latest message to include in forward
+	bodies, _ := fetchBodies(c, []uint32{latest.UID})
+	originalBody := bodies[latest.UID]
+
+	subject := latest.Subject
+	if !strings.HasPrefix(strings.ToLower(subject), "fwd:") {
+		subject = "Fwd: " + subject
+	}
+
+	fwdBody := ""
+	if comment != "" {
+		fwdBody = comment + "\n\n"
+	}
+	fwdBody += "---------- Forwarded message ----------\n"
+	fwdBody += fmt.Sprintf("From: %s\nDate: %s\nSubject: %s\nTo: %s\n\n",
+		latest.From, latest.Date.Format(time.RFC1123Z), latest.Subject, strings.Join(latest.To, ", "))
+	fwdBody += originalBody
+
+	// B7: No In-Reply-To on forwards — forwards are not replies
+	return outgoingMail{To: addrs, Subject: subject, Body: fwdBody}, nil
+}
+
+// compose encodes m as an RFC 5322 message from this account and returns it
+// with its Message-ID. Line endings are CRLF (B8), non-ASCII headers RFC 2047
+// encoded (B5), and a non-ASCII body quoted-printable, so the message passes
+// any SMTP server — also one without 8BITMIME — unchanged.
+func (im *IMAP) compose(m outgoingMail) ([]byte, string) {
+	var b strings.Builder
+
+	b.WriteString("From: " + im.fromHeader() + "\r\n")
+	b.WriteString("To: " + formatAddressList(m.To) + "\r\n")
+	if len(m.Cc) > 0 {
+		b.WriteString("Cc: " + formatAddressList(m.Cc) + "\r\n")
+	}
+	b.WriteString("Subject: " + encodeHeader(sanitizeHeaderValue(m.Subject)) + "\r\n")
+	b.WriteString("Date: " + time.Now().Format(time.RFC1123Z) + "\r\n")
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
+	encoding, body := encodeTextBody(normalizeCRLF(m.Body))
+	b.WriteString("Content-Transfer-Encoding: " + encoding + "\r\n")
+	if m.InReplyTo != "" {
+		b.WriteString("In-Reply-To: " + sanitizeHeaderValue(m.InReplyTo) + "\r\n")
+	}
+	if m.References != "" {
+		b.WriteString("References: " + sanitizeHeaderValue(m.References) + "\r\n")
+	}
+	msgID := im.newMessageID()
+	b.WriteString("Message-ID: " + msgID + "\r\n")
+	b.WriteString("\r\n")
+	b.WriteString(body)
+
+	return []byte(b.String()), msgID
+}
+
+// fromHeader is the From value: the account address, with the configured
+// display name quoted or RFC 2047 encoded as needed.
+func (im *IMAP) fromHeader() string {
+	a := mail.Address{Name: sanitizeHeaderValue(im.fromName), Address: sanitizeHeaderValue(im.user)}
+	return a.String()
+}
+
+// newMessageID returns a Message-ID that is unique also for drafts created
+// in the same nanosecond: send_draft finds a draft by it.
+func (im *IMAP) newMessageID() string {
+	var rnd [8]byte
+	_, _ = rand.Read(rnd[:]) // crypto/rand.Read never fails (Go 1.24+)
+	return fmt.Sprintf("<%d.%s.mux@%s>", time.Now().UnixNano(), hex.EncodeToString(rnd[:]), im.domain)
+}
+
+// encodeTextBody picks the transfer encoding of a CRLF text body: 7bit when it
+// is ASCII with lines SMTP accepts (998 octets), quoted-printable otherwise.
+func encodeTextBody(body string) (encoding, encoded string) {
+	plain := true
+	for _, line := range strings.Split(body, "\r\n") {
+		if len(line) > 998 {
+			plain = false
+			break
+		}
+		for i := 0; i < len(line); i++ {
+			if line[i] >= 0x80 || line[i] == 0 {
+				plain = false
+				break
+			}
+		}
+		if !plain {
+			break
+		}
+	}
+	if plain {
+		return "7bit", body
+	}
+	var buf bytes.Buffer
+	w := quotedprintable.NewWriter(&buf)
+	_, _ = w.Write([]byte(body)) // writes to a bytes.Buffer cannot fail
+	_ = w.Close()
+	return "quoted-printable", buf.String()
+}
+
+// appendDraft stores raw in the Drafts folder, flagged \Draft and \Seen.
+func appendDraft(c *imapclient.Client, raw []byte) (string, error) {
+	folder := findSpecialFolder(c, specialUseDrafts, draftsFolderNames...)
+	if folder == "" {
+		return "", fmt.Errorf("Drafts folder not found")
+	}
+	if err := c.Append(folder, []string{imaplib.DraftFlag, imaplib.SeenFlag}, time.Now(), newLiteral(raw)); err != nil {
+		return "", fmt.Errorf("APPEND to %s: %w", folder, err)
+	}
+	return folder, nil
 }
 
 // --- Shared helpers ---
@@ -1165,34 +1383,73 @@ func findFolder(c *imapclient.Client, names ...string) string {
 	return ""
 }
 
-// buildRFC822Message creates a minimal RFC822 message suitable for IMAP APPEND.
-// Handles RFC 2047 encoding for non-ASCII headers (B5) and CRLF line endings (B8).
-func (im *IMAP) buildRFC822Message(to []string, cc []string, subject, inReplyTo, references, body string) *imapLiteral {
-	var b strings.Builder
+// Special-use mailbox attributes (RFC 6154) and the names tried when a server
+// marks none of its mailboxes.
+const (
+	specialUseDrafts = `\Drafts`
+	specialUseSent   = `\Sent`
+)
 
-	b.WriteString("From: <" + sanitizeHeaderValue(im.user) + ">\r\n")
-	b.WriteString("To: " + formatAddressList(to) + "\r\n")
-	if len(cc) > 0 {
-		b.WriteString("Cc: " + formatAddressList(cc) + "\r\n")
-	}
-	b.WriteString("Subject: " + encodeHeader(sanitizeHeaderValue(subject)) + "\r\n")
-	b.WriteString("Date: " + time.Now().Format(time.RFC1123Z) + "\r\n")
-	b.WriteString("MIME-Version: 1.0\r\n")
-	b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
-	b.WriteString("Content-Transfer-Encoding: 8bit\r\n")
-	if inReplyTo != "" {
-		b.WriteString("In-Reply-To: " + sanitizeHeaderValue(inReplyTo) + "\r\n")
-	}
-	if references != "" {
-		b.WriteString("References: " + sanitizeHeaderValue(references) + "\r\n")
-	}
-	msgID := fmt.Sprintf("<%d.mux@%s>", time.Now().UnixNano(), im.domain)
-	b.WriteString("Message-ID: " + msgID + "\r\n")
-	b.WriteString("\r\n")
-	b.WriteString(body)
+var (
+	draftsFolderNames = []string{"Drafts", "INBOX.Drafts", "Draft", "Entwürfe"}
+	sentFolderNames   = []string{"Sent", "INBOX.Sent", "Sent Items", "Sent Messages", "Gesendet", "Gesendete Objekte", "Gesendete Elemente"}
+)
 
-	content := b.String()
-	return &imapLiteral{strings.NewReader(content), len(content)}
+// findSpecialFolder returns the mailbox the server marks with the special-use
+// attribute attr, else the first existing one of the fallback names.
+func findSpecialFolder(c *imapclient.Client, attr string, fallback ...string) string {
+	mailboxes := make(chan *imaplib.MailboxInfo, 50)
+	done := make(chan error, 1)
+	go func() {
+		done <- c.List("", "*", mailboxes)
+	}()
+	var found string
+	for mbox := range mailboxes {
+		if found == "" && hasFlag(mbox.Attributes, attr) {
+			found = mbox.Name
+		}
+	}
+	if err := <-done; err != nil {
+		log.Printf("[imap] LIST for %s failed: %v", attr, err)
+		found = ""
+	}
+	if found != "" {
+		return found
+	}
+	return findFolder(c, fallback...)
+}
+
+// removeUIDs flags the given messages of the selected mailbox \Deleted and
+// expunges exactly those where the server supports UID EXPUNGE (UIDPLUS).
+// Without it EXPUNGE removes every message flagged \Deleted in the mailbox —
+// the only means RFC 3501 has, and what every client without UIDPLUS does.
+func removeUIDs(c *imapclient.Client, seqSet *imaplib.SeqSet) error {
+	item := imaplib.FormatFlagsOp(imaplib.AddFlags, true)
+	if err := c.UidStore(seqSet, item, []interface{}{imaplib.DeletedFlag}, nil); err != nil {
+		return fmt.Errorf("STORE \\Deleted: %w", err)
+	}
+	if ok, err := c.Support("UIDPLUS"); err == nil && ok {
+		status, err := c.Execute(&commands.Uid{Cmd: uidExpunge{seqSet}}, nil)
+		if err == nil {
+			err = status.Err()
+		}
+		if err != nil {
+			return fmt.Errorf("UID EXPUNGE: %w", err)
+		}
+		return nil
+	}
+	if err := c.Expunge(nil); err != nil {
+		return fmt.Errorf("EXPUNGE: %w", err)
+	}
+	return nil
+}
+
+// uidExpunge is the EXPUNGE of UID EXPUNGE (RFC 4315), wrapped in a UID
+// command: go-imap v1 has no command for it.
+type uidExpunge struct{ seqSet *imaplib.SeqSet }
+
+func (cmd uidExpunge) Command() *imaplib.Command {
+	return &imaplib.Command{Name: "EXPUNGE", Arguments: []interface{}{cmd.seqSet}}
 }
 
 // formatAddressList wraps bare email addresses in angle brackets.
@@ -1234,10 +1491,14 @@ func normalizeCRLF(s string) string {
 	return s
 }
 
-// imapLiteral wraps a string reader to implement imap.Literal.
+// imapLiteral wraps a message to implement imap.Literal.
 type imapLiteral struct {
-	*strings.Reader
+	*bytes.Reader
 	size int
+}
+
+func newLiteral(raw []byte) *imapLiteral {
+	return &imapLiteral{bytes.NewReader(raw), len(raw)}
 }
 
 func (l *imapLiteral) Len() int {

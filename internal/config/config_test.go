@@ -160,6 +160,48 @@ func TestApplyConnectionDefaults_IMAP(t *testing.T) {
 	if c.Port != 993 {
 		t.Errorf("IMAP default port should be 993, got %d", c.Port)
 	}
+	if c.SMTPPort != 0 {
+		t.Errorf("without smtp_host no SMTP port should be set, got %d", c.SMTPPort)
+	}
+
+	c = Connection{Type: TypeIMAP, SMTPHost: "smtp.x.com"}
+	ApplyConnectionDefaults(&c)
+	if c.SMTPPort != DefaultSMTPPort {
+		t.Errorf("SMTP default port should be %d, got %d", DefaultSMTPPort, c.SMTPPort)
+	}
+
+	c = Connection{Type: TypeIMAP, SMTPHost: "smtp.x.com", SMTPPort: ImplicitTLSSMTPPort}
+	ApplyConnectionDefaults(&c)
+	if c.SMTPPort != ImplicitTLSSMTPPort {
+		t.Errorf("an explicit SMTP port must stay, got %d", c.SMTPPort)
+	}
+}
+
+func TestValidateIMAPSending(t *testing.T) {
+	tests := []struct {
+		name    string
+		conn    Connection
+		wantErr bool
+		send    bool
+	}{
+		{"no sending fields", Connection{Type: TypeIMAP}, false, false},
+		{"server without the switch registers no send tools", Connection{Type: TypeIMAP, SMTPHost: "smtp.x.com"}, false, false},
+		{"switch and server", Connection{Type: TypeIMAP, SMTPHost: "smtp.x.com", AllowSend: true}, false, true},
+		{"switch without server", Connection{Type: TypeIMAP, AllowSend: true}, true, false},
+		{"port out of range", Connection{Type: TypeIMAP, SMTPHost: "smtp.x.com", SMTPPort: 70000}, true, false},
+		{"other type never sends", Connection{Type: TypeMariaDB, SMTPHost: "smtp.x.com", AllowSend: true}, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateIMAPSending(tt.conn)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateIMAPSending() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got := tt.conn.SendEnabled(); got != tt.send {
+				t.Errorf("SendEnabled() = %v, want %v", got, tt.send)
+			}
+		})
+	}
 }
 
 func TestApplyConnectionDefaults_Higgsfield(t *testing.T) {

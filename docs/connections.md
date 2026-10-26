@@ -511,13 +511,13 @@ The endpoints and `fields=` selectors the type sends are listed in a registry an
 
 ### IMAP
 
-Connects to an IMAP mailbox with conversation threading (subject-based grouping). Supports MIME parsing, RFC 2047 encoded headers, and common mailbox operations.
+Connects to an IMAP mailbox with conversation threading (subject-based grouping). Supports MIME parsing, RFC 2047 encoded headers, and common mailbox operations. With an SMTP server configured and sending allowed, the same connection also sends mail.
 
 **Required fields**: `name`, `type`, `host`, `user`
 
-**Optional fields**: `port` (default: 993), `tunnel`, `instructions`
+**Optional fields**: `port` (default: 993), `from_name`, `smtp_host`, `smtp_port` (default: 587), `allow_send` (default: false), `smtp_saves_sent` (default: false), `tunnel`, `instructions`
 
-**Secret**: `{name}-password` in secret store
+**Secret**: `{name}-password` in secret store — used for IMAP and SMTP
 
 ```toml
 [[connections]]
@@ -526,6 +526,9 @@ type = "imap"
 host = "imap.example.com"
 port = 993
 user = "user@example.com"
+from_name = "Jane Doe"
+smtp_host = "smtp.example.com"
+allow_send = true
 ```
 
 **MCP tools exposed**:
@@ -538,8 +541,19 @@ user = "user@example.com"
 | `{name}_list_mailboxes` | List all IMAP mailbox folders with `messages` and `unseen` counts. |
 | `{name}_archive_conversation` | Archive a conversation (move to Archive or Trash). Parameter: `conversation_id` (required). |
 | `{name}_delete_conversation` | Delete a conversation (move to Trash, not permanent). Parameter: `conversation_id` (required). |
-| `{name}_create_reply_draft` | Create a reply draft for the latest message. Saved to Drafts, does NOT send. Parameters: `conversation_id`, `body` (required). |
-| `{name}_create_forward_draft` | Create a forward draft. Saved to Drafts, does NOT send. Parameters: `conversation_id`, `to` (required), `body` (optional). |
+| `{name}_create_reply_draft` | Create a reply draft for the latest message. Saved to Drafts, does NOT send. The reply goes to the message's `Reply-To` (its sender when it has none). Returns `draft_id`. Parameters: `conversation_id`, `body` (required), `reply_all` (optional: also everyone else on To and Cc). |
+| `{name}_create_forward_draft` | Create a forward draft. Saved to Drafts, does NOT send. Returns `draft_id`. Parameters: `conversation_id`, `to` (required, comma-separated for several), `body` (optional). |
+| `{name}_send_draft` | *Only with `allow_send`.* Send a draft over SMTP. Recipients are the draft's To, Cc and Bcc; Bcc is not transmitted. The draft is removed, a copy stored in Sent. Parameter: `draft_id` (required). |
+| `{name}_reply_send` | *Only with `allow_send`.* Reply and send in one step — no draft. Parameters as `create_reply_draft`. |
+| `{name}_forward_send` | *Only with `allow_send`.* Forward and send in one step — no draft. Parameters as `create_forward_draft`. |
+
+**Drafts and Sent.** mux finds both folders by their special-use attribute (`\Drafts`, `\Sent`, RFC 6154) and falls back to common names (`Drafts`, `INBOX.Drafts`, `Entwürfe` … and `Sent`, `INBOX.Sent`, `Sent Items`, `Gesendet` …) when the server marks none. `draft_id` is the Message-ID mux gives the draft; `send_draft` finds the draft by it, so it also finds a draft another client has edited as long as that client keeps the Message-ID. Two drafts with the same Message-ID are refused rather than guessed between.
+
+**Sending.** `allow_send` is the switch, `smtp_host` its precondition: `smtp_host` alone registers no send tool, and `allow_send` without `smtp_host` fails the connection with a message saying so. mux signs in to the SMTP server with the IMAP user and password — implicit TLS on port 465, STARTTLS on any other port (a server without STARTTLS is refused; the password never travels unencrypted), AUTH PLAIN or LOGIN. The **Test** button signs in to both servers. After the server has accepted a message, mux stores a copy in Sent (skip it with `smtp_saves_sent = true` for providers such as Gmail that do this themselves) and, for `send_draft`, removes the draft; a failure there is reported as a warning next to `sent: true`, never as an error, so an agent does not send twice. An error that leaves open whether the server accepted the message says so (`unclear whether sent`).
+
+**Encoding.** mux writes plain-text mail with CRLF line endings, RFC 2047 encoded headers and the display name from `from_name`. A body with non-ASCII text is quoted-printable, so it passes servers without 8BITMIME; a draft written by another client with 8-bit content is refused by such a server before anything is sent.
+
+**Removing messages.** Archive, delete and the draft cleanup after sending flag the messages `\Deleted` and remove exactly those with `UID EXPUNGE` where the server supports UIDPLUS. Without it, `EXPUNGE` also removes other messages in that folder that are already flagged `\Deleted` — the only means plain IMAP has.
 
 ### Meilisearch
 

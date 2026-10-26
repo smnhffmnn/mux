@@ -280,6 +280,13 @@ export class FieldInfo {
              */
             this["multiline"] = false;
         }
+        if (!("checkbox" in $$source)) {
+            /**
+             * @member
+             * @type {boolean}
+             */
+            this["checkbox"] = false;
+        }
         if (!("secretStored" in $$source)) {
             /**
              * @member
@@ -766,6 +773,43 @@ export class SaveConnectionRequest {
              * @type {string | undefined}
              */
             this["passphrase"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * imap connection type: sending over SMTP. The checkboxes are always sent
+             * by the form, so false switches them off.
+             * @member
+             * @type {string | undefined}
+             */
+            this["smtpHost"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["smtpPort"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["fromName"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {boolean | undefined}
+             */
+            this["allowSend"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {boolean | undefined}
+             */
+            this["smtpSavesSent"] = undefined;
         }
 
         Object.assign(this, $$source);

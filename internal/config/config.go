@@ -172,6 +172,21 @@ type Connection struct {
 	ProtectedFields []string `toml:"protected_fields,omitempty" json:"protectedFields,omitempty"`
 	SetOnceFields   []string `toml:"set_once_fields,omitempty" json:"setOnceFields,omitempty"`
 
+	// IMAP connection type (TypeIMAP): sending over SMTP. SMTPHost and
+	// SMTPPort name the submission server (port 465 is implicit TLS, any
+	// other port must offer STARTTLS); it signs in with the IMAP user and
+	// password. AllowSend is the explicit decision that agents may send
+	// through this connection — a configured SMTPHost alone registers no
+	// send tool. SMTPSavesSent marks providers that file mail submitted over
+	// SMTP in the Sent folder themselves (Gmail does); mux then skips its own
+	// copy. FromName is the display name in the From header of drafts and
+	// sent mail.
+	SMTPHost      string `toml:"smtp_host,omitempty" json:"smtpHost,omitempty"`
+	SMTPPort      int    `toml:"smtp_port,omitzero" json:"smtpPort,omitempty"`
+	AllowSend     bool   `toml:"allow_send,omitempty" json:"allowSend,omitempty"`
+	SMTPSavesSent bool   `toml:"smtp_saves_sent,omitempty" json:"smtpSavesSent,omitempty"`
+	FromName      string `toml:"from_name,omitempty" json:"fromName,omitempty"`
+
 	// SSH connection type (TypeSSH). Auth selects the key source: "key"
 	// (default — the secret {name}-private-key or key_file) or "agent" (the
 	// user's ssh-agent, no key in mux). HostKey pins the server's public key;
@@ -852,6 +867,9 @@ func ApplyConnectionDefaults(c *Connection) {
 	case TypeIMAP:
 		if c.Port == 0 {
 			c.Port = 993
+		}
+		if c.SMTPHost != "" && c.SMTPPort == 0 {
+			c.SMTPPort = DefaultSMTPPort
 		}
 	case TypeMeilisearch:
 		if c.Port == 0 {

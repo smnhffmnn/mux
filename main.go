@@ -402,7 +402,7 @@ More info: https://github.com/smnhffmnn/mux
 	for _, conn := range cfg.AllConnections() {
 		instr := conn.Instructions
 		if instr == "" {
-			instr = tools.DefaultInstructions(conn.Type)
+			instr = tools.DefaultInstructions(conn)
 		}
 		if instr != "" {
 			instruction += fmt.Sprintf("\n\n%s: %s", conn.Name, instr)

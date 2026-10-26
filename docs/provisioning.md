@@ -151,6 +151,11 @@ All fields use **camelCase** JSON keys.
 | `denyCommands` | string[] | no | ssh: commands it never runs, same form, wildcards `*`/`?` |
 | `privateKey` | string | no | ssh: the private key (PEM). If omitted, mux checks the secret store for `{name}-private-key`. |
 | `passphrase` | string | no | ssh: passphrase of an encrypted `privateKey`. If omitted, mux checks the secret store for `{name}-private-key-passphrase`. |
+| `smtpHost` | string | no | imap: SMTP submission server for sending; signs in with `user` and `password` |
+| `smtpPort` | integer | no | imap: SMTP port (default 587 with STARTTLS; 465 is implicit TLS) |
+| `allowSend` | boolean | no | imap: register the send tools (default: false). Requires `smtpHost` — `smtpHost` alone does not enable sending. |
+| `smtpSavesSent` | boolean | no | imap: the provider files mail submitted over SMTP in Sent itself, so mux stores no copy (default: false) |
+| `fromName` | string | no | imap: display name in the From header of drafts and sent mail |
 
 ### Tunnel Object
 

@@ -10,6 +10,7 @@ type TypeField struct {
 	Secret      bool
 	Small       bool
 	Multiline   bool // render as textarea (e.g. header lines)
+	Checkbox    bool // boolean switch; the value is "true" or ""
 }
 
 // TypeDef defines a connection type with its UI metadata and fields.
@@ -126,6 +127,11 @@ var AllTypes = []TypeDef{
 		{Key: "port", Label: "Port", Placeholder: "993", Small: true},
 		{Key: "user", Label: "Email / Username", Placeholder: "user@example.com"},
 		{Key: "password", Label: "Password", Placeholder: "password", Secret: true},
+		{Key: "from_name", Label: "Sender Name", Placeholder: "Jane Doe (optional)"},
+		{Key: "smtp_host", Label: "SMTP Host", Placeholder: "smtp.example.com (optional, for sending)"},
+		{Key: "smtp_port", Label: "SMTP Port", Placeholder: "587", Small: true},
+		{Key: "allow_send", Label: "Allow sending", Checkbox: true},
+		{Key: "smtp_saves_sent", Label: "Server files sent mail itself", Checkbox: true},
 	}},
 	{Type: TypeGit, Label: "Git Credential", Fields: []TypeField{
 		{Key: "host", Label: "Git Host", Placeholder: "gitlab.com"},

@@ -100,6 +100,7 @@ export interface FieldInfo {
   secret: boolean
   small: boolean
   multiline: boolean
+  checkbox: boolean
   secretStored: boolean
 }
 
@@ -192,6 +193,12 @@ export interface SaveConnectionRequest {
   denyCommands?: string
   privateKey?: string
   passphrase?: string
+  // imap: sending over SMTP
+  smtpHost?: string
+  smtpPort?: string
+  fromName?: string
+  allowSend?: boolean
+  smtpSavesSent?: boolean
 }
 
 // API functions

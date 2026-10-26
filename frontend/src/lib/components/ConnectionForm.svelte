@@ -35,6 +35,11 @@
     allow_commands: 'allowCommands',
     deny_commands: 'denyCommands',
     private_key: 'privateKey',
+    smtp_host: 'smtpHost',
+    smtp_port: 'smtpPort',
+    from_name: 'fromName',
+    allow_send: 'allowSend',
+    smtp_saves_sent: 'smtpSavesSent',
   }
 
   async function handleSave() {
@@ -44,7 +49,11 @@
       const req: SaveConnectionRequest = {}
       for (const f of conn.fields) {
         const val = formValues[f.key]
-        if (val) {
+        if (f.checkbox) {
+          // Always sent, so unticking switches the option off
+          const jsonKey = fieldKeyMap[f.key] ?? f.key
+          ;(req as any)[jsonKey] = val === 'true'
+        } else if (val) {
           const jsonKey = fieldKeyMap[f.key] ?? f.key
           ;(req as any)[jsonKey] = val
         } else if (f.multiline && !f.secret) {
@@ -69,9 +78,21 @@
 <div class="form">
   <div class="form-grid">
     {#each conn.fields as field (field.key)}
-      <div class="form-field" class:small={field.small} class:full={field.multiline}>
-        <label for={field.key}>{field.label}</label>
-        {#if field.secret && field.multiline}
+      <div class="form-field" class:small={field.small} class:full={field.multiline} class:checkbox-field={field.checkbox}>
+        {#if !field.checkbox}
+          <label for={field.key}>{field.label}</label>
+        {/if}
+        {#if field.checkbox}
+          <label>
+            <input
+              type="checkbox"
+              checked={formValues[field.key] === 'true'}
+              onchange={(e) => (formValues[field.key] = e.currentTarget.checked ? 'true' : '')}
+              disabled={conn.isProvisioned}
+            />
+            {field.label}
+          </label>
+        {:else if field.secret && field.multiline}
           <!-- A PEM key spans many lines; a single-line password input would
                drop the newlines on paste and hand mux an unparsable key. -->
           <textarea
@@ -174,6 +195,27 @@
 
   .form-field.full {
     grid-column: 1 / -1;
+  }
+
+  .checkbox-field {
+    justify-content: flex-end;
+  }
+
+  .checkbox-field label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: 400;
+    cursor: pointer;
+  }
+
+  .checkbox-field input[type="checkbox"] {
+    width: auto;
+    padding: 0;
   }
 
   label {
