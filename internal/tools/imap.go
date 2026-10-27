@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/mail"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -190,7 +191,7 @@ func (im *IMAP) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("create_forward_draft",
-				mcp.WithDescription("Create a forward draft of a message of an IMAP conversation (default: the latest). Saved to Drafts, does NOT send. Returns draft_id (the draft's Message-ID)."),
+				mcp.WithDescription("Create a forward draft of a message of an IMAP conversation (default: the latest). Saved to Drafts, does NOT send. Forwards the message's text only — attachments are not included. Returns draft_id (the draft's Message-ID)."),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
 				mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address(es), comma-separated for multiple")),
 				mcp.WithString("body", mcp.Description("Optional comment to include above the forwarded message")),
@@ -1088,7 +1089,7 @@ func (im *IMAP) handleCreateForwardDraft(ctx context.Context, req mcp.CallToolRe
 			"status":   "draft_created",
 			"draft_id": msgID,
 			"folder":   folder,
-			"to":       strings.Join(m.To, ", "),
+			"to":       to,
 			"subject":  m.Subject,
 		})
 	})
@@ -1099,17 +1100,46 @@ func (im *IMAP) handleCreateForwardDraft(ctx context.Context, req mcp.CallToolRe
 // uidDescription documents the uid argument of the reply and forward tools.
 const uidDescription = "UID of the message to act on, from list_conversations (latestMessage.uid) or get_conversation"
 
-// uidArg reads the uid argument: 0 when it is optional and absent.
+// uidArg reads the uid argument: 0 when it is optional and absent (or null).
+// A UID is a whole number from 1 to 2^32-1; a fraction is refused rather than
+// truncated to another message.
 func uidArg(req mcp.CallToolRequest, required bool) (uint32, error) {
-	if _, ok := req.GetArguments()["uid"]; !ok {
+	raw, ok := req.GetArguments()["uid"]
+	if !ok || raw == nil {
 		if required {
-			return 0, fmt.Errorf("uid is required: the UID of the message to act on, from get_conversation — a message sent at once needs a fixed target")
+			return 0, fmt.Errorf("uid is required: the UID of the message to act on, from list_conversations or get_conversation — a message sent at once needs a fixed target")
 		}
 		return 0, nil
 	}
-	v, err := req.RequireInt("uid")
-	if err != nil || v <= 0 || v > math.MaxUint32 {
-		return 0, fmt.Errorf("uid must be a message UID from get_conversation")
+	bad := fmt.Errorf("uid must be a message UID from list_conversations or get_conversation, got %v", raw)
+	var v int64
+	switch n := raw.(type) {
+	case float64:
+		if n != math.Trunc(n) || n < 1 || n > math.MaxUint32 {
+			return 0, bad
+		}
+		v = int64(n)
+	case int:
+		v = int64(n)
+	case int64:
+		v = n
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			return 0, bad
+		}
+		v = i
+	case string:
+		i, err := strconv.ParseInt(strings.TrimSpace(n), 10, 64)
+		if err != nil {
+			return 0, bad
+		}
+		v = i
+	default:
+		return 0, fmt.Errorf("uid must be a number, got %T", raw)
+	}
+	if v < 1 || v > math.MaxUint32 {
+		return 0, bad
 	}
 	return uint32(v), nil
 }
@@ -1219,8 +1249,8 @@ func (im *IMAP) replyRecipients(latest imapMsg, all bool) (to, cc []string) {
 		targets = []string{latest.From}
 	}
 	add(&to, targets...)
-	if len(to) == 0 {
-		add(&to, latest.To...)
+	if len(to) == 0 && strings.EqualFold(latest.From, im.user) {
+		add(&to, latest.To...) // a message the account sent itself
 	}
 	if all {
 		add(&cc, latest.To...)
@@ -1240,6 +1270,9 @@ func (im *IMAP) prepareForward(c *imapclient.Client, convID, to, comment string,
 	var addrs []string
 	for _, a := range list {
 		addrs = append(addrs, a.Address)
+	}
+	if len(addrs) == 0 {
+		return outgoingMail{}, fmt.Errorf("no recipient in %q", to)
 	}
 
 	thread, err := im.findConversation(c, convID)

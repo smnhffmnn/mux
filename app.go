@@ -61,15 +61,9 @@ type App struct {
 	// Nil in stdio mode.
 	emitEvent func(name string, data any)
 
-	// toolsMu protects registeredTools and closers from concurrent access.
-	toolsMu sync.Mutex
-
-	// registeredTools tracks which MCP tool names are registered per connection,
-	// so they can be removed on hot-reload.
-	registeredTools map[string][]string
-
-	// closers tracks io.Closers (e.g. sql.DB pools) per connection for cleanup on hot-reload.
-	closers map[string][]io.Closer
+	// book tracks the MCP tool names and io.Closers (e.g. sql.DB pools) per
+	// connection for removal on hot-reload; shared with startup registration.
+	book *toolBook
 }
 
 type pendingDeviceFlow struct {
@@ -81,18 +75,17 @@ type pendingDeviceFlow struct {
 }
 
 // NewApp creates the App instance. Called before wails.Run().
-func NewApp(cfg *config.Config, version, buildTime string, port int, mcpServer *server.MCPServer, tm *tunnelManager) *App {
+func NewApp(cfg *config.Config, version, buildTime string, port int, mcpServer *server.MCPServer, tm *tunnelManager, book *toolBook) *App {
 	a := &App{
-		cfg:             cfg,
-		version:         version,
-		buildTime:       buildTime,
-		startTime:       time.Now(),
-		port:            port,
-		mcpServer:       mcpServer,
-		tm:              tm,
-		pendingDevice:   make(map[string]*pendingDeviceFlow),
-		registeredTools: make(map[string][]string),
-		closers:         make(map[string][]io.Closer),
+		cfg:           cfg,
+		version:       version,
+		buildTime:     buildTime,
+		startTime:     time.Now(),
+		port:          port,
+		mcpServer:     mcpServer,
+		tm:            tm,
+		pendingDevice: make(map[string]*pendingDeviceFlow),
+		book:          book,
 	}
 	a.oauth = oauth.NewManager(cfg, port, a.onOAuthAuthorized)
 	return a
@@ -128,19 +121,7 @@ func (a *App) unregisterConnectionTools(connName string) {
 	if a.mcpServer == nil {
 		return
 	}
-	a.toolsMu.Lock()
-	defer a.toolsMu.Unlock()
-	if names, ok := a.registeredTools[connName]; ok && len(names) > 0 {
-		a.mcpServer.DeleteTools(names...)
-		log.Printf("[mux] Unregistered %d tools for %s", len(names), connName)
-	}
-	delete(a.registeredTools, connName)
-	if closers, ok := a.closers[connName]; ok {
-		for _, c := range closers {
-			c.Close()
-		}
-		delete(a.closers, connName)
-	}
+	a.book.remove(a.mcpServer, connName)
 }
 
 // registerConnectionTools registers (or re-registers) MCP tools for a connection.
@@ -177,12 +158,7 @@ func (a *App) registerConnectionTools(conn config.Connection) {
 		log.Printf("[mux] Warning: %s not available: %v", conn.Name, err)
 		return
 	}
-	a.toolsMu.Lock()
-	a.registeredTools[conn.Name] = names
-	if closer != nil {
-		a.closers[conn.Name] = append(a.closers[conn.Name], closer)
-	}
-	a.toolsMu.Unlock()
+	a.book.record(conn.Name, names, closer)
 }
 
 // oauthMount builds the OAuth proxy mount for a connection. Thin wrapper
@@ -240,11 +216,7 @@ func (a *App) trackProxyTools(connName string) {
 			names = append(names, name)
 		}
 	}
-	if len(names) > 0 {
-		a.toolsMu.Lock()
-		a.registeredTools[connName] = names
-		a.toolsMu.Unlock()
-	}
+	a.book.record(connName, names, nil)
 }
 
 // --- Connection type registry ---
@@ -722,6 +694,11 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 
 // DeleteConnection removes a local connection.
 func (a *App) DeleteConnection(name string) error {
+	// Before anything changes: a connection deleted while its secrets
+	// cannot be would leave them for the next connection of that name.
+	if err := config.ConnectionSecretsDeletable(); err != nil {
+		return err
+	}
 	found := false
 	var deleted config.Connection
 	var newConns []config.Connection
@@ -744,10 +721,15 @@ func (a *App) DeleteConnection(name string) error {
 	a.unregisterConnectionTools(name)
 	a.cfg.Connections = newConns
 	if err := a.cfg.Save(); err != nil {
-		log.Printf("[app] Warning: could not save config file: %v", err)
+		// The connection comes back at the next start; its secrets stay
+		// with it rather than leaving it without credentials.
+		log.Printf("[app] Warning: could not save config file: %v — secrets of %q kept", err, name)
+		return nil
 	}
 	// No credential outlives its connection (same rule as connection_delete).
-	config.DeleteConnectionSecrets(deleted.Name, a.cfg.AllConnections())
+	if _, err := config.DeleteConnectionSecrets(deleted.Name, a.cfg.AllConnections()); err != nil {
+		return fmt.Errorf("connection %q deleted, but its secrets were kept: %w", name, err)
+	}
 	return nil
 }
 

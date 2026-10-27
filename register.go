@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -128,7 +127,7 @@ func (tm *tunnelManager) Close() {
 
 // registerConnections registers native database tools for each configured connection.
 // Fail-closed: if a connection references a tunnel that isn't available, it's skipped.
-func registerConnections(s *server.MCPServer, cfg *config.Config, tm *tunnelManager) {
+func registerConnections(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, book *toolBook) {
 	for _, conn := range cfg.AllConnections() {
 		if config.IsProxyType(conn.Type) {
 			continue // handled by registerProxies
@@ -147,9 +146,12 @@ func registerConnections(s *server.MCPServer, cfg *config.Config, tm *tunnelMana
 			}
 		}
 
-		if _, _, err := tools.RegisterConnection(s, conn, dialer); err != nil {
+		names, closer, err := tools.RegisterConnection(s, conn, dialer)
+		if err != nil {
 			log.Printf("[mux] Warning: %s not available: %v", conn.Name, err)
+			continue
 		}
+		book.record(conn.Name, names, closer)
 	}
 }
 
@@ -281,7 +283,7 @@ func registerProxies(ctx context.Context, s *server.MCPServer, cfg *config.Confi
 // Runs in a goroutine — must be safe for concurrent access.
 var retryMu sync.Mutex
 
-func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config.Config, tm *tunnelManager) {
+func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config.Config, tm *tunnelManager, book *toolBook) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[vault] Retry panicked: %v", r)
@@ -421,9 +423,10 @@ func retryAfterVaultUnlock(ctx context.Context, s *server.MCPServer, cfg *config
 				continue
 			}
 		}
-		if _, _, err := tools.RegisterConnection(s, conn, dialer); err != nil {
+		if names, closer, err := tools.RegisterConnection(s, conn, dialer); err != nil {
 			log.Printf("[vault] Retry: %s failed: %v", conn.Name, err)
 		} else {
+			book.record(conn.Name, names, closer)
 			log.Printf("[vault] Retry: %s connected", conn.Name)
 			count++
 		}
@@ -439,21 +442,11 @@ type simpleReloader struct {
 	mcpServer *server.MCPServer
 	cfg       *config.Config
 	tm        *tunnelManager
-
-	// toolsMu protects registeredTools and closers.
-	toolsMu         sync.Mutex
-	registeredTools map[string][]string
-	closers         map[string][]io.Closer
+	book      *toolBook // shared with startup registration
 }
 
-func newSimpleReloader(s *server.MCPServer, cfg *config.Config, tm *tunnelManager) *simpleReloader {
-	return &simpleReloader{
-		mcpServer:       s,
-		cfg:             cfg,
-		tm:              tm,
-		registeredTools: make(map[string][]string),
-		closers:         make(map[string][]io.Closer),
-	}
+func newSimpleReloader(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, book *toolBook) *simpleReloader {
+	return &simpleReloader{mcpServer: s, cfg: cfg, tm: tm, book: book}
 }
 
 func (r *simpleReloader) ReloadConnection(conn config.Connection) {
@@ -483,12 +476,7 @@ func (r *simpleReloader) ReloadConnection(conn config.Connection) {
 		log.Printf("[mux] Warning: %s not available: %v", conn.Name, err)
 		return
 	}
-	r.toolsMu.Lock()
-	r.registeredTools[conn.Name] = names
-	if closer != nil {
-		r.closers[conn.Name] = append(r.closers[conn.Name], closer)
-	}
-	r.toolsMu.Unlock()
+	r.book.record(conn.Name, names, closer)
 }
 
 func (r *simpleReloader) UnloadConnection(name string) {
@@ -496,19 +484,7 @@ func (r *simpleReloader) UnloadConnection(name string) {
 }
 
 func (r *simpleReloader) unregisterConnection(name string) {
-	r.toolsMu.Lock()
-	defer r.toolsMu.Unlock()
-	if names, ok := r.registeredTools[name]; ok && len(names) > 0 {
-		r.mcpServer.DeleteTools(names...)
-		log.Printf("[mux] Unregistered %d tools for %s", len(names), name)
-	}
-	delete(r.registeredTools, name)
-	if closers, ok := r.closers[name]; ok {
-		for _, c := range closers {
-			c.Close()
-		}
-		delete(r.closers, name)
-	}
+	r.book.remove(r.mcpServer, name)
 }
 
 func (r *simpleReloader) registerProxy(conn config.Connection) {
@@ -553,9 +529,5 @@ func (r *simpleReloader) trackProxyTools(connName string) {
 			names = append(names, name)
 		}
 	}
-	if len(names) > 0 {
-		r.toolsMu.Lock()
-		r.registeredTools[connName] = names
-		r.toolsMu.Unlock()
-	}
+	r.book.record(connName, names, nil)
 }

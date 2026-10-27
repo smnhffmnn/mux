@@ -166,7 +166,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 func (ct *ConfigTools) connectionDeleteTool() ToolDef {
 	return ToolDef{
 		Tool: mcp.NewTool("connection_delete",
-			mcp.WithDescription("Delete a local connection together with every secret stored for it (password, token, ssh key, OAuth tokens). Provisioned connections cannot be deleted."),
+			mcp.WithDescription("Delete a local connection together with the secrets stored for it (password, token, ssh key, OAuth tokens and client). Refused while the vault is locked. Provisioned connections cannot be deleted."),
 			mcp.WithString("name", mcp.Required(),
 				mcp.Description("Connection name to delete."),
 			),
@@ -613,6 +613,11 @@ func (ct *ConfigTools) handleConnectionDelete(_ context.Context, req mcp.CallToo
 	if err != nil {
 		return mcp.NewToolResultError("missing required parameter: name"), nil
 	}
+	// Before anything changes: a connection deleted while its secrets
+	// cannot be would leave them for the next connection of that name.
+	if err := config.ConnectionSecretsDeletable(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("connection %q not deleted: %v", name, err)), nil
+	}
 
 	found := false
 	var deleted config.Connection
@@ -644,7 +649,12 @@ func (ct *ConfigTools) handleConnectionDelete(_ context.Context, req mcp.CallToo
 	}
 
 	msg := fmt.Sprintf("connection %q deleted", name)
-	if keys := config.DeleteConnectionSecrets(deleted.Name, ct.cfg.AllConnections()); len(keys) > 0 {
+	keys, err := config.DeleteConnectionSecrets(deleted.Name, ct.cfg.AllConnections())
+	if err != nil {
+		// Checked before the delete; the vault locked itself in between.
+		return mcp.NewToolResultError(msg + ", but its secrets were kept: " + err.Error()), nil
+	}
+	if len(keys) > 0 {
 		msg += " together with its stored secrets (" + strings.Join(keys, ", ") + ")"
 	}
 	return mcp.NewToolResultText(msg), nil

@@ -80,7 +80,7 @@ func TestOAuthAuthorizedReloadTracksMountedTools(t *testing.T) {
 	}
 
 	s := server.NewMCPServer("mux-test", "0.0.0")
-	reloader := newSimpleReloader(s, cfg, nil)
+	reloader := newSimpleReloader(s, cfg, nil, newToolBook())
 
 	oauthAuthorizedReload(cfg, reloader)(name)
 

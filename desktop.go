@@ -21,9 +21,9 @@ import (
 	"github.com/smnhffmnn/mux/internal/vault"
 )
 
-func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx context.Context, cancel context.CancelFunc, vlt *vault.Vault, waServer *vault.WebAuthnServer, approvalQueue *vault.ApprovalQueue) {
+func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, book *toolBook, ctx context.Context, cancel context.CancelFunc, vlt *vault.Vault, waServer *vault.WebAuthnServer, approvalQueue *vault.ApprovalQueue) {
 	log.Println("[mux] Starting desktop app")
-	app := NewApp(cfg, version, buildTime, cfg.Server.Port, s, tm)
+	app := NewApp(cfg, version, buildTime, cfg.Server.Port, s, tm, book)
 
 	// Register config management tools (with app as hot-reloader)
 	configTools := tools.NewConfigTools(cfg, app)

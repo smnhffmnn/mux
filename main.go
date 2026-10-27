@@ -416,8 +416,10 @@ More info: https://github.com/smnhffmnn/mux
 		server.WithInstructions(instruction),
 	)
 
-	// Register connections (with fail-closed tunnel logic)
-	registerConnections(s, cfg, tm)
+	// Register connections (with fail-closed tunnel logic). The book records
+	// their tools, so the reloader below can remove them again.
+	book := newToolBook()
+	registerConnections(s, cfg, tm, book)
 
 	// Register proxy mounts
 	ctx, cancel := context.WithCancel(context.Background())
@@ -427,7 +429,7 @@ More info: https://github.com/smnhffmnn/mux
 	// Wire up vault unlock → retry skipped connections
 	if vlt != nil {
 		vlt.SetOnUnlock(func() {
-			retryAfterVaultUnlock(ctx, s, cfg, tm)
+			retryAfterVaultUnlock(ctx, s, cfg, tm, book)
 		})
 	}
 
@@ -447,7 +449,7 @@ More info: https://github.com/smnhffmnn/mux
 	// --- Stdio mode (Claude Desktop, piped stdin) ---
 	if useStdio {
 		log.Println("[mux] Starting in stdio mode")
-		registerConfigTools(s, cfg, tm)
+		registerConfigTools(s, cfg, tm, book)
 		if err := server.ServeStdio(s); err != nil {
 			log.Printf("[mux] stdio server error: %v", err)
 			fmt.Fprintf(os.Stderr, "stdio server error: %v\n", err)
@@ -475,7 +477,7 @@ More info: https://github.com/smnhffmnn/mux
 	if !hasDisplay {
 		log.Println("[mux] Starting in headless HTTP mode")
 
-		reloader := registerConfigTools(s, cfg, tm)
+		reloader := registerConfigTools(s, cfg, tm, book)
 		hc := health.NewChecker(cfg, mcpToolRegistry{s}, tm, version, processStart)
 
 		var vh *vault.VaultHandlers
@@ -512,7 +514,7 @@ More info: https://github.com/smnhffmnn/mux
 	}
 
 	// --- Desktop mode (Wails v3 + MCP HTTP) ---
-	runDesktop(s, cfg, tm, ctx, cancel, vlt, waServer, approvalQueue)
+	runDesktop(s, cfg, tm, book, ctx, cancel, vlt, waServer, approvalQueue)
 }
 
 // headlessLocalRoutes assembles the routes of the loopback HTTP server in
@@ -558,8 +560,8 @@ func gitHostsFromConfig(cfg *config.Config) []vault.GitHost {
 // registerConfigTools creates a simpleReloader, registers the config
 // management tools on the MCP server and returns the reloader, so other
 // paths that mount or unmount connections at runtime share its bookkeeping.
-func registerConfigTools(s *server.MCPServer, cfg *config.Config, tm *tunnelManager) *simpleReloader {
-	reloader := newSimpleReloader(s, cfg, tm)
+func registerConfigTools(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, book *toolBook) *simpleReloader {
+	reloader := newSimpleReloader(s, cfg, tm, book)
 	configTools := tools.NewConfigTools(cfg, reloader)
 	for _, t := range configTools.Tools() {
 		s.AddTool(t.Tool, t.Handler)

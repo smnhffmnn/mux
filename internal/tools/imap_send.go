@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/mail"
 	"net/smtp"
@@ -56,7 +57,7 @@ func (im *IMAP) sendTools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("forward_send",
-				mcp.WithDescription("Forward a message of an IMAP conversation and send it immediately over SMTP — no draft, cannot be recalled. A copy is stored in Sent. "+sentMeansDone),
+				mcp.WithDescription("Forward a message of an IMAP conversation and send it immediately over SMTP — no draft, cannot be recalled. Forwards the message's text only — attachments are not included. A copy is stored in Sent. "+sentMeansDone),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
 				mcp.WithNumber("uid", mcp.Required(), mcp.Description(uidDescription)),
 				mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address(es), comma-separated for multiple")),
@@ -302,12 +303,18 @@ func prepareDraftForSending(raw []byte, now time.Time) (draftOut, error) {
 	var recipients []string
 	seen := map[string]bool{}
 	for _, field := range []string{"To", "Cc", "Bcc"} {
-		list, err := msg.Header.AddressList(field)
-		if errors.Is(err, mail.ErrHeaderNotPresent) {
-			continue
-		}
-		if err != nil {
-			return draftOut{}, fmt.Errorf("draft header %s: %w", field, err)
+		// Every occurrence of the field, not only the first: a client may
+		// write two To lines, and what is transmitted must also be addressed.
+		var list []*mail.Address
+		for _, value := range msg.Header[field] {
+			if strings.TrimSpace(value) == "" {
+				continue
+			}
+			l, err := (&mail.AddressParser{WordDecoder: &mime.WordDecoder{}}).ParseList(value)
+			if err != nil {
+				return draftOut{}, fmt.Errorf("draft header %s: %w", field, err)
+			}
+			list = append(list, l...)
 		}
 		for _, a := range list {
 			key := strings.ToLower(a.Address)
@@ -387,6 +394,11 @@ func (im *IMAP) saveSentCopy(c *imapclient.Client, raw []byte) (folder, warning 
 	folder = findSpecialFolder(c, specialUseSent, sentFolderNames...)
 	if folder == "" {
 		return "", "sent, but no Sent folder was found — no copy stored"
+	}
+	// A copy in Drafts would carry the draft's Message-ID unflagged, and
+	// send_draft would find it and send it again.
+	if folder == findSpecialFolder(c, specialUseDrafts, draftsFolderNames...) {
+		return "", fmt.Sprintf("sent, but %s is both the Sent and the Drafts folder — no copy stored", folder)
 	}
 	if err := c.Append(folder, []string{imaplib.SeenFlag}, time.Now(), newLiteral(raw)); err != nil {
 		return "", fmt.Sprintf("sent, but storing the copy in %s failed: %v", folder, err)

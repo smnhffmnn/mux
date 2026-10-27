@@ -620,6 +620,13 @@ func TestReplyRecipients(t *testing.T) {
 	if to, _ := im.replyRecipients(own, false); !slices.Equal(to, []string{"dave@example.org"}) {
 		t.Errorf("reply to an own message: to=%v, want its recipients", to)
 	}
+
+	// No usable sender (From: root, or none): nobody to reply to — not the
+	// message's other recipients.
+	noSender := imapMsg{To: []string{"carol@example.org", "dave@example.org"}}
+	if to, _ := im.replyRecipients(noSender, false); len(to) != 0 {
+		t.Errorf("reply to a message without sender: to=%v, want none", to)
+	}
 }
 
 func TestComposeEncoding(t *testing.T) {
@@ -1219,5 +1226,102 @@ func TestIMAPReadToolsShowADistinctReplyTo(t *testing.T) {
 				t.Errorf("Bob has no Reply-To of his own, replyTo should be absent: %v", m["replyTo"])
 			}
 		}
+	}
+}
+
+func TestUIDArg(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		args     map[string]any
+		required bool
+		want     uint32
+		wantErr  bool
+	}{
+		{"absent, optional", map[string]any{}, false, 0, false},
+		{"null, optional", map[string]any{"uid": nil}, false, 0, false},
+		{"absent, required", map[string]any{}, true, 0, true},
+		{"number", map[string]any{"uid": float64(7)}, true, 7, false},
+		{"numeric string", map[string]any{"uid": "12"}, true, 12, false},
+		{"Go int", map[string]any{"uid": 9}, true, 9, false},
+		{"json.Number", map[string]any{"uid": json.Number("11")}, true, 11, false},
+		{"fraction", map[string]any{"uid": 7.9}, true, 0, true},
+		{"zero", map[string]any{"uid": float64(0)}, true, 0, true},
+		{"negative", map[string]any{"uid": float64(-1)}, true, 0, true},
+		{"beyond 32 bits", map[string]any{"uid": float64(5e9)}, true, 0, true},
+		{"boolean", map[string]any{"uid": true}, true, 0, true},
+		{"word", map[string]any{"uid": "latest"}, true, 0, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := uidArg(toolRequest(tt.args), tt.required)
+			if (err != nil) != tt.wantErr || got != tt.want {
+				t.Errorf("uidArg(%v) = %d, %v; want %d, err=%v", tt.args, got, err, tt.want, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestIMAPReplyToAMessageWithoutSender(t *testing.T) {
+	f := newMailFixture(t, fixtureOptions{})
+	f.seed("INBOX", "From: root\r\nTo: me@example.com, carol@example.org\r\nSubject: Angebot\r\nDate: Mon, 26 Oct 2026 08:00:00 +0100\r\nMessage-ID: <cron-1@example.org>\r\n\r\nJob done\r\n")
+
+	msgs := f.conversationMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("conversation = %v", msgs)
+	}
+	if _, errText := f.call(f.im.handleReplySend, map[string]any{"conversation_id": conversationID(t), "uid": msgs[0]["uid"], "body": "x"}); !strings.Contains(errText, "names no address to reply to") {
+		t.Errorf("reply to a message without sender: %q", errText)
+	}
+	if n := len(f.smtp.got()); n != 0 {
+		t.Errorf("nothing may be sent, deliveries = %d", n)
+	}
+}
+
+func TestPrepareDraftRepeatedRecipientFields(t *testing.T) {
+	raw := "To: a@example.org\r\nTo: b@example.org\r\nBcc: c@example.org\r\nBcc: d@example.org\r\nSubject: x\r\n\r\nBody\r\n"
+	out, err := prepareDraftForSending([]byte(raw), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"a@example.org", "b@example.org", "c@example.org", "d@example.org"}; !slices.Equal(out.recipients, want) {
+		t.Errorf("recipients = %v, want %v", out.recipients, want)
+	}
+	if strings.Contains(string(out.transmit), "Bcc") {
+		t.Errorf("no Bcc line may be transmitted:\n%s", out.transmit)
+	}
+}
+
+func TestIMAPForwardChecksItsRecipients(t *testing.T) {
+	f := newMailFixture(t, fixtureOptions{})
+	f.seed("INBOX", threadMessage)
+
+	if _, errText := f.call(f.im.handleCreateForwardDraft, map[string]any{"conversation_id": conversationID(t), "to": "undisclosed-recipients:;"}); !strings.Contains(errText, "no recipient") {
+		t.Errorf("forward to an empty group: %q", errText)
+	}
+	res, errText := f.call(f.im.handleCreateForwardDraft, map[string]any{"conversation_id": conversationID(t), "to": "Yvonne <y@example.org>"})
+	if errText != "" || res["to"] != "Yvonne <y@example.org>" {
+		t.Errorf("forward draft echoes its input as before: %v %s", res, errText)
+	}
+}
+
+func TestIMAPSendWhenSentIsDrafts(t *testing.T) {
+	// One mailbox: found as Drafts by its name, marked \Sent by the server.
+	f := newMailFixture(t, fixtureOptions{
+		specials:  map[string]string{"Drafts": specialUseSent},
+		mailboxes: []string{"Drafts"},
+	})
+	f.seed("Drafts", "To: a@example.org\r\nSubject: x\r\nMessage-ID: <same@example.com>\r\n\r\nText\r\n")
+
+	res, errText := f.call(f.im.handleSendDraft, map[string]any{"draft_id": "<same@example.com>"})
+	if errText != "" {
+		t.Fatal(errText)
+	}
+	if res["sent_copy"] != "" || len(stringsOf(res["warnings"])) != 1 {
+		t.Errorf("result = %v, want no copy and one warning", res)
+	}
+	if _, errText := f.call(f.im.handleSendDraft, map[string]any{"draft_id": "<same@example.com>"}); !strings.Contains(errText, "no draft") {
+		t.Errorf("the draft must not be found again: %q", errText)
+	}
+	if n := len(f.smtp.got()); n != 1 {
+		t.Errorf("deliveries = %d, want 1", n)
 	}
 }
