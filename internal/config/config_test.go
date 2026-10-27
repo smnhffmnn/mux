@@ -186,8 +186,10 @@ func TestValidateIMAPSending(t *testing.T) {
 	}{
 		{"no sending fields", Connection{Type: TypeIMAP}, false, false},
 		{"server without the switch registers no send tools", Connection{Type: TypeIMAP, SMTPHost: "smtp.x.com"}, false, false},
-		{"switch and server", Connection{Type: TypeIMAP, SMTPHost: "smtp.x.com", AllowSend: true}, false, true},
-		{"switch without server", Connection{Type: TypeIMAP, AllowSend: true}, true, false},
+		{"switch and server", Connection{Type: TypeIMAP, User: "me@x.com", SMTPHost: "smtp.x.com", AllowSend: true}, false, true},
+		{"switch without server", Connection{Type: TypeIMAP, User: "me@x.com", AllowSend: true}, true, false},
+		{"login name is no sender address", Connection{Type: TypeIMAP, User: "web12p3", SMTPHost: "smtp.x.com", AllowSend: true}, true, true},
+		{"login name without sending", Connection{Type: TypeIMAP, User: "web12p3"}, false, false},
 		{"port out of range", Connection{Type: TypeIMAP, SMTPHost: "smtp.x.com", SMTPPort: 70000}, true, false},
 		{"other type never sends", Connection{Type: TypeMariaDB, SMTPHost: "smtp.x.com", AllowSend: true}, false, false},
 	}

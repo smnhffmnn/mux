@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,12 +11,18 @@ import (
 )
 
 // isolateConfigDir points the config and secret files at a temporary home, so
-// connection_add's Save never touches the real config.
+// connection_add's Save never touches the real config. Windows reads the home
+// from USERPROFILE and ignores XDG; the guard skips wherever the override
+// still does not hold rather than write into a developer's config.
 func isolateConfigDir(t *testing.T) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", home+"/.config")
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	if got := config.Dir(); !strings.HasPrefix(got, home) {
+		t.Skipf("config.Dir() = %q is outside the temporary home on this platform", got)
+	}
 }
 
 func TestConnectionAddIMAPSending(t *testing.T) {

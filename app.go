@@ -746,12 +746,8 @@ func (a *App) DeleteConnection(name string) error {
 	if err := a.cfg.Save(); err != nil {
 		log.Printf("[app] Warning: could not save config file: %v", err)
 	}
-	if deleted.Type == config.TypeSSH {
-		// A private key must not outlive the connection it was stored for.
-		// Other types keep their secrets on delete (see connection_delete).
-		config.DeleteSecret(name + "-private-key")
-		config.DeleteSecret(name + "-private-key-passphrase")
-	}
+	// No credential outlives its connection (same rule as connection_delete).
+	config.DeleteConnectionSecrets(deleted.Name, a.cfg.AllConnections())
 	return nil
 }
 

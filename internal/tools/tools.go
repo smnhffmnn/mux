@@ -143,6 +143,11 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 			toolDefs = a.Tools()
 		}
 	case config.TypeIMAP:
+		// The send tools depend on the configuration. Remove them before every
+		// registration, so switching sending off takes effect even where the
+		// caller kept no list of the names (connections registered at startup)
+		// and even when the new configuration fails to register.
+		s.DeleteTools(imapSendToolNames(conn.Name)...)
 		var im *IMAP
 		im, err = NewIMAP(conn, dialer)
 		if err == nil {

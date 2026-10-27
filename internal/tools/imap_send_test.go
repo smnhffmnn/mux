@@ -12,8 +12,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
+	"mime"
 	"mime/quotedprintable"
 	"net"
 	"net/mail"
@@ -30,6 +32,7 @@ import (
 	"github.com/emersion/go-imap/commands"
 	imapserver "github.com/emersion/go-imap/server"
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/smnhffmnn/mux/internal/config"
 )
@@ -456,6 +459,38 @@ func (f *mailFixture) call(handler func(context.Context, mcp.CallToolRequest) (*
 	return out, ""
 }
 
+// conversationMessages returns get_conversation's messages for the Angebot thread.
+func (f *mailFixture) conversationMessages() []map[string]any {
+	f.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	res, err := f.im.handleGetConversation(ctx, toolRequest(map[string]any{"conversation_id": conversationID(f.t)}))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	text := resultText(f.t, res)
+	if res.IsError {
+		f.t.Fatal(text)
+	}
+	var msgs []map[string]any
+	if err := json.Unmarshal([]byte(text), &msgs); err != nil {
+		f.t.Fatalf("get_conversation is not a JSON list: %v\n%s", err, text)
+	}
+	return msgs
+}
+
+// uidFrom returns the UID of the message from sender in the Angebot thread.
+func (f *mailFixture) uidFrom(sender string) float64 {
+	f.t.Helper()
+	for _, m := range f.conversationMessages() {
+		if m["sender"] == sender {
+			return m["uid"].(float64)
+		}
+	}
+	f.t.Fatalf("no message from %s in the conversation", sender)
+	return 0
+}
+
 const threadMessage = "From: Alice <alice@example.org>\r\n" +
 	"Reply-To: list@example.org\r\n" +
 	"To: me@example.com, carol@example.org\r\n" +
@@ -759,7 +794,8 @@ func TestIMAPReplySendAndForwardSend(t *testing.T) {
 	f := newMailFixture(t, fixtureOptions{})
 	f.seed("INBOX", threadMessage)
 
-	res, errText := f.call(f.im.handleReplySend, map[string]any{"conversation_id": conversationID(t), "body": "Ja."})
+	alice := f.uidFrom("alice@example.org")
+	res, errText := f.call(f.im.handleReplySend, map[string]any{"conversation_id": conversationID(t), "uid": alice, "body": "Ja."})
 	if errText != "" {
 		t.Fatal(errText)
 	}
@@ -769,6 +805,7 @@ func TestIMAPReplySendAndForwardSend(t *testing.T) {
 
 	res, errText = f.call(f.im.handleForwardSend, map[string]any{
 		"conversation_id": conversationID(t),
+		"uid":             alice,
 		"to":              "x@example.org, Yvonne <y@example.org>",
 		"body":            "Zur Info",
 	})
@@ -789,7 +826,7 @@ func TestIMAPReplySendAndForwardSend(t *testing.T) {
 		t.Errorf("Sent holds %d copies, want 2", n)
 	}
 
-	if _, errText := f.call(f.im.handleForwardSend, map[string]any{"conversation_id": conversationID(t), "to": "not an address"}); !strings.Contains(errText, "invalid recipient") {
+	if _, errText := f.call(f.im.handleForwardSend, map[string]any{"conversation_id": conversationID(t), "uid": alice, "to": "not an address"}); !strings.Contains(errText, "invalid recipient") {
 		t.Errorf("invalid recipient: %q", errText)
 	}
 }
@@ -866,7 +903,7 @@ func TestIMAPSendWithoutSentFolderWarns(t *testing.T) {
 	f := newMailFixture(t, fixtureOptions{specials: map[string]string{"Mein Entwurf": specialUseDrafts}})
 	f.seed("INBOX", threadMessage)
 
-	res, errText := f.call(f.im.handleReplySend, map[string]any{"conversation_id": conversationID(t), "body": "ok"})
+	res, errText := f.call(f.im.handleReplySend, map[string]any{"conversation_id": conversationID(t), "uid": f.uidFrom("alice@example.org"), "body": "ok"})
 	if errText != "" {
 		t.Fatalf("a missing Sent folder must not turn a sent message into an error: %s", errText)
 	}
@@ -939,7 +976,7 @@ func TestSMTPRefusesEightBitWithout8BITMIME(t *testing.T) {
 
 	// What mux composes itself is 7-bit clean and goes through.
 	f.seed("INBOX", threadMessage)
-	if _, errText := f.call(f.im.handleReplySend, map[string]any{"conversation_id": conversationID(t), "body": "Grüße"}); errText != "" {
+	if _, errText := f.call(f.im.handleReplySend, map[string]any{"conversation_id": conversationID(t), "uid": f.uidFrom("alice@example.org"), "body": "Grüße"}); errText != "" {
 		t.Errorf("a composed reply must pass a server without 8BITMIME: %s", errText)
 	}
 }
@@ -961,5 +998,226 @@ func TestIMAPVerifySignsInToSMTP(t *testing.T) {
 	f.im.smtp.port = 1 // nothing listens there
 	if err := f.im.Verify(ctx); err == nil || !strings.Contains(err.Error(), "SMTP") {
 		t.Errorf("Verify with an unreachable SMTP server: %v", err)
+	}
+}
+
+// --- Review fixes ---
+
+func TestRegisterIMAPDropsSendToolsWhenSwitchedOff(t *testing.T) {
+	s := server.NewMCPServer("test", "0", server.WithToolCapabilities(true))
+	conn := config.Connection{
+		Name: "mail", Type: config.TypeIMAP, Host: "imap.x", User: testAccount, Password: testPassword,
+		SMTPHost: "smtp.x", AllowSend: true,
+	}
+	// Registered like at startup: the caller keeps no list of the names.
+	if _, _, err := RegisterConnection(s, conn, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.ListTools()["mail_send_draft"]; !ok {
+		t.Fatal("mail_send_draft missing with allow_send")
+	}
+
+	conn.AllowSend = false
+	if _, _, err := RegisterConnection(s, conn, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range imapSendToolNames("mail") {
+		if _, ok := s.ListTools()[name]; ok {
+			t.Errorf("%s still registered after sending was switched off", name)
+		}
+	}
+	if _, ok := s.ListTools()["mail_create_reply_draft"]; !ok {
+		t.Error("the reading and draft tools must stay")
+	}
+
+	// A configuration that fails to register leaves no send tool behind either.
+	conn.AllowSend = true
+	_, _, _ = RegisterConnection(s, conn, nil)
+	conn.SMTPHost = ""
+	if _, _, err := RegisterConnection(s, conn, nil); err == nil {
+		t.Fatal("allow_send without smtp_host must fail")
+	}
+	if _, ok := s.ListTools()["mail_send_draft"]; ok {
+		t.Error("a failed registration must not keep the old send tools")
+	}
+}
+
+func TestSendToolDescriptionsCarryTheRule(t *testing.T) {
+	for _, td := range (&IMAP{}).sendTools() {
+		if !strings.Contains(td.Tool.Description, "never send it again") {
+			t.Errorf("%s: description lacks the never-send-again rule", td.Tool.Name)
+		}
+	}
+}
+
+func TestPrepareDraftRefusesBareLineBreaks(t *testing.T) {
+	raw := "To: <a@example.org>\nBcc: <secret@example.net>\r\nSubject: x\r\n\r\nBody\r\n"
+	if _, err := prepareDraftForSending([]byte(raw), time.Now()); err == nil || !strings.Contains(err.Error(), "CRLF") {
+		t.Errorf("a header with a bare LF: err = %v, want a refusal", err)
+	}
+	raw = "To: <a@example.org>\rBcc: <secret@example.net>\r\nSubject: x\r\n\r\nBody\r\n"
+	if _, err := prepareDraftForSending([]byte(raw), time.Now()); err == nil {
+		t.Error("a header with a bare CR must be refused too")
+	}
+	// The body may contain whatever the client wrote.
+	raw = "To: <a@example.org>\r\nSubject: x\r\n\r\nline\nline\r\n"
+	if _, err := prepareDraftForSending([]byte(raw), time.Now()); err != nil {
+		t.Errorf("bare LF in the body: %v", err)
+	}
+}
+
+func TestComposeFoldsLongHeaders(t *testing.T) {
+	im := &IMAP{user: testAccount, domain: "example.com"}
+	var refs []string
+	for i := 0; i < 40; i++ {
+		refs = append(refs, fmt.Sprintf("<%d.some-long-message-id-from-a-mail-client@mail.example.org>", i))
+	}
+	var many []string
+	for i := 0; i < 30; i++ {
+		many = append(many, fmt.Sprintf("person%d@example.org", i))
+	}
+	subject := strings.Repeat("Größere Anfrage zur Lieferung ", 30)
+	raw, _ := im.compose(outgoingMail{
+		To: many, Cc: many, Subject: subject,
+		InReplyTo: refs[len(refs)-1], References: strings.Join(trimReferences(refs), " "),
+		Body: "x",
+	})
+
+	for _, line := range strings.Split(string(raw), "\r\n") {
+		if len(line) > 78 && !strings.HasPrefix(line, "References:") && !strings.HasPrefix(line, " <") {
+			t.Errorf("line of %d characters: %.60q…", len(line), line)
+		}
+		if len(line) > 998 {
+			t.Fatalf("line beyond the SMTP limit: %d", len(line))
+		}
+	}
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := (&mime.WordDecoder{}).DecodeHeader(msg.Header.Get("Subject")); got != subject {
+		t.Errorf("subject after unfolding = %q", got)
+	}
+	gotRefs := strings.Fields(msg.Header.Get("References"))
+	if len(gotRefs) != maxReferences || gotRefs[0] != refs[0] || gotRefs[len(gotRefs)-1] != refs[len(refs)-1] {
+		t.Errorf("References = %d IDs (first %q, last %q), want the root and the newest", len(gotRefs), gotRefs[0], gotRefs[len(gotRefs)-1])
+	}
+	if list, err := msg.Header.AddressList("Cc"); err != nil || len(list) != len(many) {
+		t.Errorf("Cc after unfolding: %d addresses, %v", len(list), err)
+	}
+}
+
+func TestFoldHeaderRoundTrip(t *testing.T) {
+	value := "a  b " + strings.Repeat("word ", 40) + "end"
+	folded := foldHeader("X-Test", value)
+	unfolded := strings.TrimSuffix(strings.ReplaceAll(folded, "\r\n ", " "), "\r\n")
+	if unfolded != "X-Test: "+value {
+		t.Errorf("unfolding does not restore the value:\n%q\n%q", unfolded, "X-Test: "+value)
+	}
+}
+
+func TestIMAPForwardDraftKeepsToAString(t *testing.T) {
+	f := newMailFixture(t, fixtureOptions{})
+	f.seed("INBOX", threadMessage)
+	res, errText := f.call(f.im.handleCreateForwardDraft, map[string]any{"conversation_id": conversationID(t), "to": "x@example.org, y@example.org"})
+	if errText != "" {
+		t.Fatal(errText)
+	}
+	if res["to"] != "x@example.org, y@example.org" {
+		t.Errorf("to = %#v, want the string it was before", res["to"])
+	}
+}
+
+func TestIMAPSendDraftSkipsDeletedDrafts(t *testing.T) {
+	f := newMailFixture(t, fixtureOptions{})
+	f.seed("Mein Entwurf", "To: a@example.org\r\nSubject: x\r\nMessage-ID: <gone@example.com>\r\n\r\nText\r\n", imaplib.DraftFlag, imaplib.DeletedFlag)
+
+	if _, errText := f.call(f.im.handleSendDraft, map[string]any{"draft_id": "<gone@example.com>"}); !strings.Contains(errText, "no draft") {
+		t.Errorf("a draft flagged \\Deleted: %q, want not found", errText)
+	}
+	if n := len(f.smtp.got()); n != 0 {
+		t.Errorf("a discarded draft was sent: %d deliveries", n)
+	}
+}
+
+func TestSubmitDialErrorSaysNotSent(t *testing.T) {
+	f := newMailFixture(t, fixtureOptions{})
+	f.im.smtp.port = 1 // nothing listens there
+	raw, _ := f.im.compose(outgoingMail{To: []string{"a@example.org"}, Subject: "x", Body: "y"})
+	err := f.im.submit(context.Background(), []string{"a@example.org"}, raw)
+	if err == nil || !strings.HasPrefix(err.Error(), "not sent:") {
+		t.Errorf("err = %v, want it to start with \"not sent:\"", err)
+	}
+}
+
+// --- Reply target ---
+
+// hijackMessage joins the Angebot thread by subject, claims a later Date and
+// asks for replies elsewhere.
+const hijackMessage = "From: Mallory <mallory@evil.example>\r\n" +
+	"Reply-To: mallory@evil.example\r\n" +
+	"To: me@example.com\r\n" +
+	"Subject: Re: Angebot\r\n" +
+	"Date: Fri, 01 Jan 2100 00:00:00 +0000\r\n" +
+	"Message-ID: <hijack-1@evil.example>\r\n" +
+	"\r\n" +
+	"Antwort bitte an mich.\r\n"
+
+func TestIMAPSendsToTheMessageGivenByUID(t *testing.T) {
+	f := newMailFixture(t, fixtureOptions{})
+	f.seed("INBOX", threadMessage)
+	f.seed("INBOX", hijackMessage)
+
+	if _, errText := f.call(f.im.handleReplySend, map[string]any{"conversation_id": conversationID(t), "body": "x"}); !strings.Contains(errText, "uid is required") {
+		t.Errorf("reply_send without uid: %q", errText)
+	}
+	if _, errText := f.call(f.im.handleForwardSend, map[string]any{"conversation_id": conversationID(t), "to": "x@example.org"}); !strings.Contains(errText, "uid is required") {
+		t.Errorf("forward_send without uid: %q", errText)
+	}
+	if _, errText := f.call(f.im.handleReplySend, map[string]any{"conversation_id": conversationID(t), "uid": 99999, "body": "x"}); !strings.Contains(errText, "not part of conversation") {
+		t.Errorf("reply_send with a foreign uid: %q", errText)
+	}
+	if n := len(f.smtp.got()); n != 0 {
+		t.Fatalf("refused calls must not send, deliveries = %d", n)
+	}
+
+	res, errText := f.call(f.im.handleReplySend, map[string]any{"conversation_id": conversationID(t), "uid": f.uidFrom("alice@example.org"), "body": "Passt."})
+	if errText != "" {
+		t.Fatal(errText)
+	}
+	if !slices.Equal(stringsOf(res["to"]), []string{"list@example.org"}) {
+		t.Errorf("reply went to %v, want Alice's Reply-To", res["to"])
+	}
+	d := f.smtp.got()[0]
+	if slices.Contains(d.rcpts, "mallory@evil.example") || !strings.Contains(d.data, "In-Reply-To: <orig-1@example.org>") {
+		t.Errorf("reply pinned to Alice's message: rcpts %v\n%s", d.rcpts, d.data)
+	}
+	if strings.Contains(d.data, "hijack-1") {
+		t.Error("References must stop at the message answered")
+	}
+
+	// A draft without uid still answers the latest message, as before.
+	draft, errText := f.call(f.im.handleCreateReplyDraft, map[string]any{"conversation_id": conversationID(t), "body": "x"})
+	if errText != "" || draft["reply_to"] != "mallory@evil.example" {
+		t.Errorf("draft without uid: %v %s", draft, errText)
+	}
+}
+
+func TestIMAPReadToolsShowADistinctReplyTo(t *testing.T) {
+	f := newMailFixture(t, fixtureOptions{})
+	f.seed("INBOX", threadMessage)
+	f.seed("INBOX", "From: Bob <bob@example.org>\r\nTo: me@example.com\r\nSubject: Re: Angebot\r\nDate: Mon, 26 Oct 2026 09:00:00 +0100\r\nMessage-ID: <bob-1@example.org>\r\n\r\nOk\r\n")
+
+	for _, m := range f.conversationMessages() {
+		switch m["sender"] {
+		case "alice@example.org":
+			if got := stringsOf(m["replyTo"]); !slices.Equal(got, []string{"list@example.org"}) {
+				t.Errorf("Alice's message: replyTo = %v", got)
+			}
+		case "bob@example.org":
+			if _, ok := m["replyTo"]; ok {
+				t.Errorf("Bob has no Reply-To of his own, replyTo should be absent: %v", m["replyTo"])
+			}
+		}
 	}
 }

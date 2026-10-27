@@ -150,7 +150,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("imap: SMTP port. Default 587 (STARTTLS); 465 is implicit TLS."),
 			),
 			mcp.WithBoolean("allow_send",
-				mcp.Description("imap: register the send tools (send_draft, reply_send, forward_send). Requires smtp_host. Default false — a configured smtp_host alone does not enable sending."),
+				mcp.Description("imap: register the send tools (send_draft, reply_send, forward_send). Requires smtp_host and a user that is an email address. Default false — a configured smtp_host alone does not enable sending."),
 			),
 			mcp.WithBoolean("smtp_saves_sent",
 				mcp.Description("imap: the provider files mail submitted over SMTP in the Sent folder itself (Gmail does), so mux skips its own copy. Default false."),
@@ -166,7 +166,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 func (ct *ConfigTools) connectionDeleteTool() ToolDef {
 	return ToolDef{
 		Tool: mcp.NewTool("connection_delete",
-			mcp.WithDescription("Delete a local connection. Provisioned connections cannot be deleted."),
+			mcp.WithDescription("Delete a local connection together with every secret stored for it (password, token, ssh key, OAuth tokens). Provisioned connections cannot be deleted."),
 			mcp.WithString("name", mcp.Required(),
 				mcp.Description("Connection name to delete."),
 			),
@@ -552,7 +552,9 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 		}
 	}
 
-	// imap-only fields, checked like the ssh ones above.
+	// imap-only fields: on another type their mere presence is an error (a
+	// boolean switch has no empty value to ignore), stricter than the ssh
+	// check above.
 	args := req.GetArguments()
 	if typ != config.TypeIMAP {
 		for _, key := range config.IMAPSendFields {
@@ -642,12 +644,8 @@ func (ct *ConfigTools) handleConnectionDelete(_ context.Context, req mcp.CallToo
 	}
 
 	msg := fmt.Sprintf("connection %q deleted", name)
-	if deleted.Type == config.TypeSSH {
-		// A private key is not a token: it must not outlive the connection
-		// it was stored for. Other types keep their secrets on delete.
-		config.DeleteSecret(name + "-private-key")
-		config.DeleteSecret(name + "-private-key-passphrase")
-		msg += " together with its private key and passphrase secrets"
+	if keys := config.DeleteConnectionSecrets(deleted.Name, ct.cfg.AllConnections()); len(keys) > 0 {
+		msg += " together with its stored secrets (" + strings.Join(keys, ", ") + ")"
 	}
 	return mcp.NewToolResultText(msg), nil
 }

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
@@ -45,7 +46,7 @@ list_mailboxes reports messages/unseen per folder, so the number of pages can be
 get/archive/delete/reply/forward locate a conversation beyond the window (newest 5000 messages, thread completed via subject search).
 Each tool call opens a fresh IMAP connection (no persistent session).
 Archive/delete operations move messages to Archive/Trash folders.
-Replies go to the Reply-To of the latest message (its sender when it has none); reply_all adds everyone else on its To and Cc.
+Replies and forwards act on the message given by uid (from list_conversations/get_conversation); drafts default to the latest message. A reply goes to that message's Reply-To (shown as replyTo where it differs from the sender, else its sender); reply_all adds everyone else on its To and Cc.
 Draft creation saves to the Drafts folder and returns a draft_id (the draft's Message-ID) — it does NOT send.`
 
 // IMAPSendInstructions are appended to DefaultIMAPInstructions when the
@@ -179,19 +180,21 @@ func (im *IMAP) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("create_reply_draft",
-				mcp.WithDescription("Create a reply draft for the latest message in an IMAP conversation. Saved to Drafts, does NOT send. The reply goes to the message's Reply-To (its sender when it has none). Returns draft_id (the draft's Message-ID)."),
+				mcp.WithDescription("Create a reply draft to a message of an IMAP conversation (default: the latest). Saved to Drafts, does NOT send. The reply goes to the message's Reply-To (its sender when it has none). Returns draft_id (the draft's Message-ID)."),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
 				mcp.WithString("body", mcp.Required(), mcp.Description("Reply text (plain text)")),
 				mcp.WithBoolean("reply_all", mcp.Description("Also address everyone else on the message's To and Cc, except this account (default: false)")),
+				mcp.WithNumber("uid", mcp.Description(uidDescription+" (default: the latest message of the conversation)")),
 			),
 			Handler: im.handleCreateReplyDraft,
 		},
 		{
 			Tool: mcp.NewTool("create_forward_draft",
-				mcp.WithDescription("Create a forward draft for the latest message in an IMAP conversation. Saved to Drafts, does NOT send. Returns draft_id (the draft's Message-ID)."),
+				mcp.WithDescription("Create a forward draft of a message of an IMAP conversation (default: the latest). Saved to Drafts, does NOT send. Returns draft_id (the draft's Message-ID)."),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
 				mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address(es), comma-separated for multiple")),
 				mcp.WithString("body", mcp.Description("Optional comment to include above the forwarded message")),
+				mcp.WithNumber("uid", mcp.Description(uidDescription+" (default: the latest message of the conversation)")),
 			),
 			Handler: im.handleCreateForwardDraft,
 		},
@@ -654,6 +657,7 @@ type imapMessageBrief struct {
 	UID        uint32   `json:"uid"`
 	Sender     string   `json:"sender"`
 	SenderName string   `json:"senderName"`
+	ReplyTo    []string `json:"replyTo,omitempty"` // only where it differs from the sender
 	To         []string `json:"to"`
 	CC         []string `json:"cc,omitempty"`
 	Date       string   `json:"date"`
@@ -664,6 +668,7 @@ type imapMessageFull struct {
 	UID        uint32   `json:"uid"`
 	Sender     string   `json:"sender"`
 	SenderName string   `json:"senderName"`
+	ReplyTo    []string `json:"replyTo,omitempty"` // only where it differs from the sender
 	To         []string `json:"to"`
 	CC         []string `json:"cc,omitempty"`
 	Date       string   `json:"date"`
@@ -732,6 +737,7 @@ func buildConversations(groups map[string][]imapMsg, limit int) []imapConversati
 				UID:        latest.UID,
 				Sender:     latest.From,
 				SenderName: latest.FromName,
+				ReplyTo:    distinctReplyTo(latest),
 				To:         latest.To,
 				CC:         latest.CC,
 				Date:       latest.Date.Format(time.RFC3339),
@@ -807,6 +813,7 @@ func (im *IMAP) handleGetConversation(ctx context.Context, req mcp.CallToolReque
 				UID:        m.UID,
 				Sender:     m.From,
 				SenderName: m.FromName,
+				ReplyTo:    distinctReplyTo(m),
 				To:         m.To,
 				CC:         m.CC,
 				Date:       m.Date.Format(time.RFC3339),
@@ -1026,9 +1033,13 @@ func (im *IMAP) handleCreateReplyDraft(ctx context.Context, req mcp.CallToolRequ
 		return mcp.NewToolResultError("conversation_id and body are required"), nil
 	}
 	replyAll := req.GetBool("reply_all", false)
+	uid, err := uidArg(req, false)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	return im.withClient(ctx, func(c *imapclient.Client) (*mcp.CallToolResult, error) {
-		m, err := im.prepareReply(c, convID, body, replyAll)
+		m, err := im.prepareReply(c, convID, body, replyAll, uid)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -1057,9 +1068,13 @@ func (im *IMAP) handleCreateForwardDraft(ctx context.Context, req mcp.CallToolRe
 		return mcp.NewToolResultError("conversation_id and to are required"), nil
 	}
 	comment := req.GetString("body", "")
+	uid, err := uidArg(req, false)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	return im.withClient(ctx, func(c *imapclient.Client) (*mcp.CallToolResult, error) {
-		m, err := im.prepareForward(c, convID, to, comment)
+		m, err := im.prepareForward(c, convID, to, comment, uid)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -1073,13 +1088,56 @@ func (im *IMAP) handleCreateForwardDraft(ctx context.Context, req mcp.CallToolRe
 			"status":   "draft_created",
 			"draft_id": msgID,
 			"folder":   folder,
-			"to":       m.To,
+			"to":       strings.Join(m.To, ", "),
 			"subject":  m.Subject,
 		})
 	})
 }
 
 // --- Composing ---
+
+// uidDescription documents the uid argument of the reply and forward tools.
+const uidDescription = "UID of the message to act on, from list_conversations (latestMessage.uid) or get_conversation"
+
+// uidArg reads the uid argument: 0 when it is optional and absent.
+func uidArg(req mcp.CallToolRequest, required bool) (uint32, error) {
+	if _, ok := req.GetArguments()["uid"]; !ok {
+		if required {
+			return 0, fmt.Errorf("uid is required: the UID of the message to act on, from get_conversation — a message sent at once needs a fixed target")
+		}
+		return 0, nil
+	}
+	v, err := req.RequireInt("uid")
+	if err != nil || v <= 0 || v > math.MaxUint32 {
+		return 0, fmt.Errorf("uid must be a message UID from get_conversation")
+	}
+	return uint32(v), nil
+}
+
+// pickMessage returns the index of the message with the given UID in a
+// conversation, the latest when uid is 0. Choosing by UID keeps a reply away
+// from a message that only joined the conversation by subject or by a Date
+// header its sender set.
+func pickMessage(thread []imapMsg, convID string, uid uint32) (int, error) {
+	if uid == 0 {
+		return len(thread) - 1, nil
+	}
+	for i, m := range thread {
+		if m.UID == uid {
+			return i, nil
+		}
+	}
+	return 0, fmt.Errorf("message %d is not part of conversation %s", uid, convID)
+}
+
+// distinctReplyTo is a message's Reply-To where it differs from its sender —
+// servers report the sender there when the header is absent.
+func distinctReplyTo(m imapMsg) []string {
+	if len(m.ReplyTo) == 0 || (len(m.ReplyTo) == 1 && strings.EqualFold(m.ReplyTo[0], m.From)) {
+		return nil
+	}
+	return m.ReplyTo
+}
 
 // outgoingMail is a plain-text message before it is encoded: a draft or a
 // message to send.
@@ -1096,23 +1154,29 @@ func (m outgoingMail) recipients() []string {
 	return append(append([]string{}, m.To...), m.Cc...)
 }
 
-// prepareReply builds the reply to the latest message of a conversation:
-// threaded on the whole chain, addressed by replyRecipients.
-func (im *IMAP) prepareReply(c *imapclient.Client, convID, body string, replyAll bool) (outgoingMail, error) {
+// prepareReply builds the reply to a message of a conversation — the one
+// with the given UID, the latest when uid is 0 —, threaded on the chain up to
+// that message and addressed by replyRecipients.
+func (im *IMAP) prepareReply(c *imapclient.Client, convID, body string, replyAll bool, uid uint32) (outgoingMail, error) {
 	thread, err := im.findConversation(c, convID)
 	if err != nil {
 		return outgoingMail{}, err
 	}
-	latest := thread[len(thread)-1]
+	idx, err := pickMessage(thread, convID, uid)
+	if err != nil {
+		return outgoingMail{}, err
+	}
+	latest := thread[idx]
 
 	subject := latest.Subject
 	if !strings.HasPrefix(strings.ToLower(subject), "re:") {
 		subject = "Re: " + subject
 	}
 
-	// Build References from thread Message-IDs (B6: proper chain)
+	// Build References from thread Message-IDs (B6: proper chain), up to the
+	// message answered
 	var refs []string
-	for _, m := range thread {
+	for _, m := range thread[:idx+1] {
 		if m.MessageID != "" {
 			refs = append(refs, m.MessageID)
 		}
@@ -1120,14 +1184,14 @@ func (im *IMAP) prepareReply(c *imapclient.Client, convID, body string, replyAll
 
 	to, cc := im.replyRecipients(latest, replyAll)
 	if len(to) == 0 {
-		return outgoingMail{}, fmt.Errorf("the latest message of conversation %s names no address to reply to", convID)
+		return outgoingMail{}, fmt.Errorf("message %d of conversation %s names no address to reply to", latest.UID, convID)
 	}
 	return outgoingMail{
 		To:         to,
 		Cc:         cc,
 		Subject:    subject,
 		InReplyTo:  latest.MessageID,
-		References: strings.Join(refs, " "),
+		References: strings.Join(trimReferences(refs), " "),
 		Body:       body,
 	}, nil
 }
@@ -1165,9 +1229,10 @@ func (im *IMAP) replyRecipients(latest imapMsg, all bool) (to, cc []string) {
 	return to, cc
 }
 
-// prepareForward builds a forward of the latest message of a conversation to
-// one or more addresses (comma-separated, display names allowed).
-func (im *IMAP) prepareForward(c *imapclient.Client, convID, to, comment string) (outgoingMail, error) {
+// prepareForward builds a forward of a message of a conversation — the one
+// with the given UID, the latest when uid is 0 — to one or more addresses
+// (comma-separated, display names allowed).
+func (im *IMAP) prepareForward(c *imapclient.Client, convID, to, comment string, uid uint32) (outgoingMail, error) {
 	list, err := mail.ParseAddressList(to)
 	if err != nil {
 		return outgoingMail{}, fmt.Errorf("invalid recipient %q: %v", to, err)
@@ -1181,9 +1246,13 @@ func (im *IMAP) prepareForward(c *imapclient.Client, convID, to, comment string)
 	if err != nil {
 		return outgoingMail{}, err
 	}
-	latest := thread[len(thread)-1]
+	idx, err := pickMessage(thread, convID, uid)
+	if err != nil {
+		return outgoingMail{}, err
+	}
+	latest := thread[idx]
 
-	// Fetch the body of the latest message to include in forward
+	// Fetch the body of the message to include in forward
 	bodies, _ := fetchBodies(c, []uint32{latest.UID})
 	originalBody := bodies[latest.UID]
 
@@ -1207,27 +1276,28 @@ func (im *IMAP) prepareForward(c *imapclient.Client, convID, to, comment string)
 
 // compose encodes m as an RFC 5322 message from this account and returns it
 // with its Message-ID. Line endings are CRLF (B8), non-ASCII headers RFC 2047
-// encoded (B5), and a non-ASCII body quoted-printable, so the message passes
-// any SMTP server — also one without 8BITMIME — unchanged.
+// encoded (B5), header lines folded, and a non-ASCII body quoted-printable,
+// so the message stays within SMTP's line limit and passes servers without
+// 8BITMIME unchanged.
 func (im *IMAP) compose(m outgoingMail) ([]byte, string) {
 	var b strings.Builder
 
-	b.WriteString("From: " + im.fromHeader() + "\r\n")
-	b.WriteString("To: " + formatAddressList(m.To) + "\r\n")
+	b.WriteString(foldHeader("From", im.fromHeader()))
+	b.WriteString(foldHeader("To", formatAddressList(m.To)))
 	if len(m.Cc) > 0 {
-		b.WriteString("Cc: " + formatAddressList(m.Cc) + "\r\n")
+		b.WriteString(foldHeader("Cc", formatAddressList(m.Cc)))
 	}
-	b.WriteString("Subject: " + encodeHeader(sanitizeHeaderValue(m.Subject)) + "\r\n")
+	b.WriteString(foldHeader("Subject", encodeHeader(sanitizeHeaderValue(m.Subject))))
 	b.WriteString("Date: " + time.Now().Format(time.RFC1123Z) + "\r\n")
 	b.WriteString("MIME-Version: 1.0\r\n")
 	b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
 	encoding, body := encodeTextBody(normalizeCRLF(m.Body))
 	b.WriteString("Content-Transfer-Encoding: " + encoding + "\r\n")
 	if m.InReplyTo != "" {
-		b.WriteString("In-Reply-To: " + sanitizeHeaderValue(m.InReplyTo) + "\r\n")
+		b.WriteString(foldHeader("In-Reply-To", sanitizeHeaderValue(m.InReplyTo)))
 	}
 	if m.References != "" {
-		b.WriteString("References: " + sanitizeHeaderValue(m.References) + "\r\n")
+		b.WriteString(foldHeader("References", sanitizeHeaderValue(m.References)))
 	}
 	msgID := im.newMessageID()
 	b.WriteString("Message-ID: " + msgID + "\r\n")
@@ -1235,6 +1305,40 @@ func (im *IMAP) compose(m outgoingMail) ([]byte, string) {
 	b.WriteString(body)
 
 	return []byte(b.String()), msgID
+}
+
+// foldHeader renders one header field, folded before words that would take
+// the line past 78 characters (RFC 5322 2.2.3) — also before the first one,
+// so an RFC 2047 encoded-word (up to 75 characters) gets a line of its own.
+// Folding replaces a space by CRLF and that space, so unfolding restores the
+// value exactly; only a single word longer than a line stays unbroken.
+func foldHeader(name, value string) string {
+	var b strings.Builder
+	b.WriteString(name + ":")
+	col := len(name) + 1
+	for _, word := range strings.Split(value, " ") {
+		if word != "" && col+1+len(word) > 78 {
+			b.WriteString("\r\n")
+			col = 0
+		}
+		b.WriteString(" " + word)
+		col += 1 + len(word)
+	}
+	b.WriteString("\r\n")
+	return b.String()
+}
+
+// maxReferences bounds the References chain of a reply: the first message
+// of the conversation and the newest ones, as RFC 5322 3.6.4 allows when a
+// chain grows long. Conversations group up to imapScanMax messages.
+const maxReferences = 20
+
+// trimReferences keeps the root and the newest maxReferences-1 IDs.
+func trimReferences(refs []string) []string {
+	if len(refs) <= maxReferences {
+		return refs
+	}
+	return append([]string{refs[0]}, refs[len(refs)-(maxReferences-1):]...)
 }
 
 // fromHeader is the From value: the account address, with the configured
@@ -1424,10 +1528,24 @@ func findSpecialFolder(c *imapclient.Client, attr string, fallback ...string) st
 // Without it EXPUNGE removes every message flagged \Deleted in the mailbox —
 // the only means RFC 3501 has, and what every client without UIDPLUS does.
 func removeUIDs(c *imapclient.Client, seqSet *imaplib.SeqSet) error {
+	if err := flagDeleted(c, seqSet); err != nil {
+		return err
+	}
+	return expungeUIDs(c, seqSet)
+}
+
+// flagDeleted flags the given messages of the selected mailbox \Deleted.
+func flagDeleted(c *imapclient.Client, seqSet *imaplib.SeqSet) error {
 	item := imaplib.FormatFlagsOp(imaplib.AddFlags, true)
 	if err := c.UidStore(seqSet, item, []interface{}{imaplib.DeletedFlag}, nil); err != nil {
 		return fmt.Errorf("STORE \\Deleted: %w", err)
 	}
+	return nil
+}
+
+// expungeUIDs removes the given \Deleted messages of the selected mailbox:
+// exactly those with UID EXPUNGE (UIDPLUS), otherwise with EXPUNGE.
+func expungeUIDs(c *imapclient.Client, seqSet *imaplib.SeqSet) error {
 	if ok, err := c.Support("UIDPLUS"); err == nil && ok {
 		status, err := c.Execute(&commands.Uid{Cmd: uidExpunge{seqSet}}, nil)
 		if err == nil {

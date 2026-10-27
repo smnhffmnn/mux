@@ -159,7 +159,7 @@ read_only = true
 # from_name = "Jane Doe"                        # optional: display name in From
 # smtp_host = "smtp.example.com"                # optional: submission server, same user and password
 # smtp_port = 587                               # 587 = STARTTLS (default), 465 = implicit TLS
-# allow_send = true                             # registers send_draft, reply_send, forward_send; smtp_host alone does not
+# allow_send = true                             # registers send_draft, reply_send, forward_send; smtp_host alone does not; user must be an address
 # smtp_saves_sent = false                       # true when the provider files SMTP mail in Sent itself (Gmail)
 # Password stored as secret (key: "mail-password")
 

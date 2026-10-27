@@ -27,12 +27,16 @@ import (
 // the caller's context sets no earlier deadline.
 const smtpTimeout = 2 * time.Minute
 
+// sentMeansDone closes every send tool's description: the rule must reach the
+// agent also when the connection's own instructions replace the defaults.
+const sentMeansDone = "sent=true means the SMTP server accepted the message — never send it again, even when warnings report that the Sent copy or the draft cleanup failed."
+
 // sendTools are registered only on connections that may send.
 func (im *IMAP) sendTools() []ToolDef {
 	return []ToolDef{
 		{
 			Tool: mcp.NewTool("send_draft",
-				mcp.WithDescription("Send a draft from the Drafts folder over SMTP. The email goes out immediately and cannot be recalled. Recipients are the draft's To, Cc and Bcc; Bcc is not transmitted. On success the draft is removed and a copy is stored in Sent."),
+				mcp.WithDescription("Send a draft from the Drafts folder over SMTP. The email goes out immediately and cannot be recalled. Recipients are the draft's To, Cc and Bcc; Bcc is not transmitted. On success the draft is removed and a copy is stored in Sent. "+sentMeansDone),
 				mcp.WithString("draft_id", mcp.Required(), mcp.Description("Message-ID of the draft, as returned by create_reply_draft or create_forward_draft")),
 				mcp.WithDestructiveHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(true),
@@ -41,8 +45,9 @@ func (im *IMAP) sendTools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("reply_send",
-				mcp.WithDescription("Reply to the latest message in an IMAP conversation and send the reply immediately over SMTP — no draft, cannot be recalled. Addressed like create_reply_draft; a copy is stored in Sent."),
+				mcp.WithDescription("Reply to a message of an IMAP conversation and send the reply immediately over SMTP — no draft, cannot be recalled. The reply goes to that message's Reply-To (its sender when it has none); a copy is stored in Sent. "+sentMeansDone),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
+				mcp.WithNumber("uid", mcp.Required(), mcp.Description(uidDescription)),
 				mcp.WithString("body", mcp.Required(), mcp.Description("Reply text (plain text)")),
 				mcp.WithBoolean("reply_all", mcp.Description("Also address everyone else on the message's To and Cc, except this account (default: false)")),
 				mcp.WithOpenWorldHintAnnotation(true),
@@ -51,8 +56,9 @@ func (im *IMAP) sendTools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("forward_send",
-				mcp.WithDescription("Forward the latest message in an IMAP conversation and send it immediately over SMTP — no draft, cannot be recalled. A copy is stored in Sent."),
+				mcp.WithDescription("Forward a message of an IMAP conversation and send it immediately over SMTP — no draft, cannot be recalled. A copy is stored in Sent. "+sentMeansDone),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
+				mcp.WithNumber("uid", mcp.Required(), mcp.Description(uidDescription)),
 				mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address(es), comma-separated for multiple")),
 				mcp.WithString("body", mcp.Description("Optional comment to include above the forwarded message")),
 				mcp.WithOpenWorldHintAnnotation(true),
@@ -60,6 +66,16 @@ func (im *IMAP) sendTools() []ToolDef {
 			Handler: im.handleForwardSend,
 		},
 	}
+}
+
+// imapSendToolNames are the registered names of the send tools of the
+// connection connName, whether or not they are registered right now.
+func imapSendToolNames(connName string) []string {
+	var names []string
+	for _, td := range (&IMAP{}).sendTools() {
+		names = append(names, config.SanitizeToolName(connName+"_"+td.Tool.Name))
+	}
+	return names
 }
 
 // --- Handlers ---
@@ -92,16 +108,24 @@ func (im *IMAP) handleSendDraft(ctx context.Context, req mcp.CallToolRequest) (*
 		}
 
 		// Sent from here on: what fails now is reported as a warning, never as
-		// an error an agent might answer by sending again.
+		// an error an agent might answer by sending again. The draft is flagged
+		// \Deleted first — fetchDraft skips flagged drafts, so even a call that
+		// hangs in the steps below cannot be retried into a second send.
 		var warnings []string
+		seqSet := new(imaplib.SeqSet)
+		seqSet.AddNum(uid)
+		flagged := flagDeleted(c, seqSet)
+		if flagged != nil {
+			warnings = append(warnings, fmt.Sprintf("sent, but flagging the draft in %s failed: %v — it is still there", folder, flagged))
+		}
 		sentCopy, warning := im.saveSentCopy(c, out.sentCopy)
 		if warning != "" {
 			warnings = append(warnings, warning)
 		}
-		seqSet := new(imaplib.SeqSet)
-		seqSet.AddNum(uid)
-		if err := removeUIDs(c, seqSet); err != nil {
-			warnings = append(warnings, fmt.Sprintf("sent, but removing the draft from %s failed: %v", folder, err))
+		if flagged == nil {
+			if err := expungeUIDs(c, seqSet); err != nil {
+				warnings = append(warnings, fmt.Sprintf("sent, but removing the draft from %s failed: %v — it is flagged \\Deleted", folder, err))
+			}
 		}
 
 		return imapJSONResult(map[string]any{
@@ -121,9 +145,13 @@ func (im *IMAP) handleReplySend(ctx context.Context, req mcp.CallToolRequest) (*
 		return mcp.NewToolResultError("conversation_id and body are required"), nil
 	}
 	replyAll := req.GetBool("reply_all", false)
+	uid, err := uidArg(req, true)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	return im.withClient(ctx, func(c *imapclient.Client) (*mcp.CallToolResult, error) {
-		m, err := im.prepareReply(c, convID, body, replyAll)
+		m, err := im.prepareReply(c, convID, body, replyAll, uid)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -138,9 +166,13 @@ func (im *IMAP) handleForwardSend(ctx context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultError("conversation_id and to are required"), nil
 	}
 	comment := req.GetString("body", "")
+	uid, err := uidArg(req, true)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	return im.withClient(ctx, func(c *imapclient.Client) (*mcp.CallToolResult, error) {
-		m, err := im.prepareForward(c, convID, to, comment)
+		m, err := im.prepareForward(c, convID, to, comment, uid)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -180,6 +212,9 @@ func (im *IMAP) sendComposed(ctx context.Context, c *imapclient.Client, m outgoi
 func fetchDraft(c *imapclient.Client, messageID string) (uint32, []byte, error) {
 	criteria := imaplib.NewSearchCriteria()
 	criteria.Header.Add("Message-Id", messageID)
+	// A draft flagged \Deleted was discarded (by a client that only flags) or
+	// was already sent by an earlier call whose cleanup did not finish.
+	criteria.WithoutFlags = []string{imaplib.DeletedFlag}
 	uids, err := c.UidSearch(criteria)
 	if err != nil {
 		return 0, nil, fmt.Errorf("SEARCH: %w", err)
@@ -253,6 +288,12 @@ func prepareDraftForSending(raw []byte, now time.Time) (draftOut, error) {
 		return draftOut{}, fmt.Errorf("the draft has no header/body separator")
 	}
 	head, body := raw[:sep], raw[sep+4:]
+	// net/mail also ends a header line at a bare LF, headerFields only at
+	// CRLF: such a header would yield a Bcc recipient whose line is
+	// transmitted all the same. Refused rather than repaired.
+	if bytes.Count(head, []byte("\n")) != bytes.Count(head, []byte("\r\n")) || bytes.Count(head, []byte("\r")) != bytes.Count(head, []byte("\r\n")) {
+		return draftOut{}, fmt.Errorf("the draft header has line breaks other than CRLF — not sent")
+	}
 
 	msg, err := mail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {
@@ -362,7 +403,7 @@ func (im *IMAP) saveSentCopy(c *imapclient.Client, raw []byte) (folder, warning 
 func (im *IMAP) submit(ctx context.Context, recipients []string, msg []byte) error {
 	c, err := im.dialSMTP(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("not sent: %w", err)
 	}
 	defer c.close()
 
@@ -403,10 +444,11 @@ func (im *IMAP) submit(ctx context.Context, recipients []string, msg []byte) err
 	return nil
 }
 
-// smtpSession is a signed-in SMTP client bound to the caller's context.
+// smtpSession is a signed-in SMTP client bound to a context that ends with
+// the caller's or after smtpTimeout, whichever comes first.
 type smtpSession struct {
 	*smtp.Client
-	release func() bool // unbinds the context
+	release func() // ends the binding
 }
 
 // close ends the session; after Quit it only releases the context binding.
@@ -423,36 +465,43 @@ func (im *IMAP) dialSMTP(ctx context.Context) (*smtpSession, error) {
 	s := im.smtp
 	addr := net.JoinHostPort(s.host, strconv.Itoa(s.port))
 
+	// net/smtp has no context. The session gets its own, bounded by
+	// smtpTimeout, and closes the raw connection when it ends — a deadline
+	// on the connection alone would not hold on tunnel connections that do
+	// not implement deadlines.
+	sctx, cancel := context.WithTimeout(ctx, smtpTimeout)
 	var (
-		conn net.Conn
-		err  error
+		raw net.Conn
+		err error
 	)
 	if im.dialer != nil {
-		conn, err = im.dialer.DialContext(ctx, "tcp", addr)
+		raw, err = im.dialer.DialContext(sctx, "tcp", addr)
 	} else {
 		d := &net.Dialer{}
-		conn, err = d.DialContext(ctx, "tcp", addr)
+		raw, err = d.DialContext(sctx, "tcp", addr)
 	}
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("SMTP dial %s: %w", addr, err)
 	}
-	// net/smtp has no context: the deadline bounds the session, and a
-	// cancelled call closes the connection under it.
-	deadline := time.Now().Add(smtpTimeout)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
+	if d, ok := sctx.Deadline(); ok {
+		_ = raw.SetDeadline(d)
 	}
-	_ = conn.SetDeadline(deadline)
-	release := context.AfterFunc(ctx, func() { conn.Close() })
+	stop := context.AfterFunc(sctx, func() { raw.Close() })
+	release := func() {
+		stop()
+		cancel()
+	}
 	fail := func(err error) (*smtpSession, error) {
 		release()
-		conn.Close()
+		raw.Close()
 		return nil, err
 	}
 
+	conn := raw
 	if s.implicitTLS {
-		tlsConn := tls.Client(conn, im.tlsConfig(s.host))
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
+		tlsConn := tls.Client(raw, im.tlsConfig(s.host))
+		if err := tlsConn.HandshakeContext(sctx); err != nil {
 			return fail(fmt.Errorf("SMTP TLS handshake with %s: %w", addr, err))
 		}
 		conn = tlsConn
