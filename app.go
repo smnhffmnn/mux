@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -60,15 +61,9 @@ type App struct {
 	// Nil in stdio mode.
 	emitEvent func(name string, data any)
 
-	// toolsMu protects registeredTools and closers from concurrent access.
-	toolsMu sync.Mutex
-
-	// registeredTools tracks which MCP tool names are registered per connection,
-	// so they can be removed on hot-reload.
-	registeredTools map[string][]string
-
-	// closers tracks io.Closers (e.g. sql.DB pools) per connection for cleanup on hot-reload.
-	closers map[string][]io.Closer
+	// book tracks the MCP tool names and io.Closers (e.g. sql.DB pools) per
+	// connection for removal on hot-reload; shared with startup registration.
+	book *toolBook
 }
 
 type pendingDeviceFlow struct {
@@ -80,18 +75,17 @@ type pendingDeviceFlow struct {
 }
 
 // NewApp creates the App instance. Called before wails.Run().
-func NewApp(cfg *config.Config, version, buildTime string, port int, mcpServer *server.MCPServer, tm *tunnelManager) *App {
+func NewApp(cfg *config.Config, version, buildTime string, port int, mcpServer *server.MCPServer, tm *tunnelManager, book *toolBook) *App {
 	a := &App{
-		cfg:             cfg,
-		version:         version,
-		buildTime:       buildTime,
-		startTime:       time.Now(),
-		port:            port,
-		mcpServer:       mcpServer,
-		tm:              tm,
-		pendingDevice:   make(map[string]*pendingDeviceFlow),
-		registeredTools: make(map[string][]string),
-		closers:         make(map[string][]io.Closer),
+		cfg:           cfg,
+		version:       version,
+		buildTime:     buildTime,
+		startTime:     time.Now(),
+		port:          port,
+		mcpServer:     mcpServer,
+		tm:            tm,
+		pendingDevice: make(map[string]*pendingDeviceFlow),
+		book:          book,
 	}
 	a.oauth = oauth.NewManager(cfg, port, a.onOAuthAuthorized)
 	return a
@@ -127,19 +121,7 @@ func (a *App) unregisterConnectionTools(connName string) {
 	if a.mcpServer == nil {
 		return
 	}
-	a.toolsMu.Lock()
-	defer a.toolsMu.Unlock()
-	if names, ok := a.registeredTools[connName]; ok && len(names) > 0 {
-		a.mcpServer.DeleteTools(names...)
-		log.Printf("[mux] Unregistered %d tools for %s", len(names), connName)
-	}
-	delete(a.registeredTools, connName)
-	if closers, ok := a.closers[connName]; ok {
-		for _, c := range closers {
-			c.Close()
-		}
-		delete(a.closers, connName)
-	}
+	a.book.remove(a.mcpServer, connName)
 }
 
 // registerConnectionTools registers (or re-registers) MCP tools for a connection.
@@ -176,12 +158,7 @@ func (a *App) registerConnectionTools(conn config.Connection) {
 		log.Printf("[mux] Warning: %s not available: %v", conn.Name, err)
 		return
 	}
-	a.toolsMu.Lock()
-	a.registeredTools[conn.Name] = names
-	if closer != nil {
-		a.closers[conn.Name] = append(a.closers[conn.Name], closer)
-	}
-	a.toolsMu.Unlock()
+	a.book.record(conn.Name, names, closer)
 }
 
 // oauthMount builds the OAuth proxy mount for a connection. Thin wrapper
@@ -239,11 +216,7 @@ func (a *App) trackProxyTools(connName string) {
 			names = append(names, name)
 		}
 	}
-	if len(names) > 0 {
-		a.toolsMu.Lock()
-		a.registeredTools[connName] = names
-		a.toolsMu.Unlock()
-	}
+	a.book.record(connName, names, nil)
 }
 
 // --- Connection type registry ---
@@ -261,6 +234,14 @@ func allTypes() []TypeListEntry {
 	return types
 }
 
+// checkboxValue is the form value of a checkbox field: "true" or "".
+func checkboxValue(on bool) string {
+	if on {
+		return "true"
+	}
+	return ""
+}
+
 func buildConnInfo(conn config.Connection) ConnInfo {
 	td := config.LookupType(conn.Type)
 
@@ -275,6 +256,13 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 	case conn.Type == config.TypeSSH:
 		if conn.Host != "" {
 			summary = fmt.Sprintf("%s@%s:%d", conn.User, conn.Host, conn.Port)
+		}
+	case conn.Type == config.TypeIMAP:
+		if conn.Host != "" {
+			summary = fmt.Sprintf("%s@%s:%d", conn.User, conn.Host, conn.Port)
+			if conn.SendEnabled() {
+				summary += fmt.Sprintf(" · sends via %s", conn.SMTPHost)
+			}
 		}
 	default:
 		if conn.Host != "" {
@@ -292,6 +280,7 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 				Secret:      fd.Secret,
 				Small:       fd.Small,
 				Multiline:   fd.Multiline,
+				Checkbox:    fd.Checkbox,
 			}
 			if !fd.Secret {
 				switch fd.Key {
@@ -333,6 +322,18 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 					fi.Value = config.FormatLines(conn.AllowCommands)
 				case "deny_commands":
 					fi.Value = config.FormatLines(conn.DenyCommands)
+				case "smtp_host":
+					fi.Value = conn.SMTPHost
+				case "smtp_port":
+					if conn.SMTPPort > 0 {
+						fi.Value = fmt.Sprintf("%d", conn.SMTPPort)
+					}
+				case "from_name":
+					fi.Value = conn.FromName
+				case "allow_send":
+					fi.Value = checkboxValue(conn.AllowSend)
+				case "smtp_saves_sent":
+					fi.Value = checkboxValue(conn.SMTPSavesSent)
 				}
 			}
 			if fd.Secret {
@@ -625,6 +626,29 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 			conn.AllowCommands = allow
 			conn.DenyCommands = deny
 		}
+		if conn.Type == config.TypeIMAP {
+			// Written as sent, like the ssh fields: a cleared field clears the
+			// value, an unticked checkbox switches sending off.
+			next := *conn
+			next.SMTPHost = strings.TrimSpace(fields.SMTPHost)
+			next.SMTPPort = 0
+			if p := strings.TrimSpace(fields.SMTPPort); p != "" {
+				port, err := strconv.Atoi(p)
+				if err != nil {
+					return nil, fmt.Errorf("invalid smtp_port %q: must be a number", p)
+				}
+				next.SMTPPort = port
+			}
+			next.FromName = strings.TrimSpace(fields.FromName)
+			next.AllowSend = fields.AllowSend
+			next.SMTPSavesSent = fields.SMTPSavesSent
+			config.ApplyConnectionDefaults(&next)
+			if err := config.ValidateIMAPSending(next); err != nil {
+				return nil, err
+			}
+			conn.SMTPHost, conn.SMTPPort, conn.FromName = next.SMTPHost, next.SMTPPort, next.FromName
+			conn.AllowSend, conn.SMTPSavesSent = next.AllowSend, next.SMTPSavesSent
+		}
 	}
 
 	if fields.PrivateKey != "" {
@@ -670,6 +694,11 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 
 // DeleteConnection removes a local connection.
 func (a *App) DeleteConnection(name string) error {
+	// Before anything changes: a connection deleted while its secrets
+	// cannot be would leave them for the next connection of that name.
+	if err := config.ConnectionSecretsDeletable(); err != nil {
+		return err
+	}
 	found := false
 	var deleted config.Connection
 	var newConns []config.Connection
@@ -692,13 +721,14 @@ func (a *App) DeleteConnection(name string) error {
 	a.unregisterConnectionTools(name)
 	a.cfg.Connections = newConns
 	if err := a.cfg.Save(); err != nil {
-		log.Printf("[app] Warning: could not save config file: %v", err)
+		// The connection comes back at the next start; its secrets stay
+		// with it rather than leaving it without credentials.
+		log.Printf("[app] Warning: could not save config file: %v — secrets of %q kept", err, name)
+		return nil
 	}
-	if deleted.Type == config.TypeSSH {
-		// A private key must not outlive the connection it was stored for.
-		// Other types keep their secrets on delete (see connection_delete).
-		config.DeleteSecret(name + "-private-key")
-		config.DeleteSecret(name + "-private-key-passphrase")
+	// No credential outlives its connection (same rule as connection_delete).
+	if _, err := config.DeleteConnectionSecrets(deleted.Name, a.cfg.AllConnections()); err != nil {
+		return fmt.Errorf("connection %q deleted, but its secrets were kept: %w", name, err)
 	}
 	return nil
 }
@@ -2043,7 +2073,12 @@ func (a *App) testIMAP(conn config.Connection) testResponse {
 		return testResponse{Connection: conn.Name, Connected: false, Message: err.Error()}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Two servers to sign in to when the connection may send.
+	timeout := 15 * time.Second
+	if im.SendEnabled() {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	port := conn.Port
@@ -2051,10 +2086,20 @@ func (a *App) testIMAP(conn config.Connection) testResponse {
 		port = 993 // NewIMAP's default — log the port actually dialed
 	}
 	testLog(conn.Name, "connecting to %s:%d and logging in as %s", conn.Host, port, conn.User)
+	if im.SendEnabled() {
+		smtpPort := conn.SMTPPort
+		if smtpPort == 0 {
+			smtpPort = config.DefaultSMTPPort
+		}
+		testLog(conn.Name, "sending is enabled — also signing in to %s:%d", conn.SMTPHost, smtpPort)
+	}
 	if err := im.Verify(ctx); err != nil {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("IMAP check failed: %v", err)}
 	}
 
+	if im.SendEnabled() {
+		return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: IMAP and SMTP login verified (%s)", conn.User)}
+	}
 	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: IMAP login verified (%s)", conn.User)}
 }
 

@@ -12,6 +12,6 @@ import (
 	"github.com/smnhffmnn/mux/internal/vault"
 )
 
-func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, ctx context.Context, cancel context.CancelFunc, _ *vault.Vault, _ *vault.WebAuthnServer, _ *vault.ApprovalQueue) {
+func runDesktop(s *server.MCPServer, cfg *config.Config, tm *tunnelManager, _ *toolBook, ctx context.Context, cancel context.CancelFunc, _ *vault.Vault, _ *vault.WebAuthnServer, _ *vault.ApprovalQueue) {
 	log.Fatal("Desktop mode not available in headless build. This binary was built with -tags notray.")
 }

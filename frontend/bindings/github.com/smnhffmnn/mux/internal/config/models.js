@@ -203,6 +203,50 @@ export class Connection {
         }
         if (/** @type {any} */(false)) {
             /**
+             * IMAP connection type (TypeIMAP): sending over SMTP. SMTPHost and
+             * SMTPPort name the submission server (port 465 is implicit TLS, any
+             * other port must offer STARTTLS); it signs in with the IMAP user and
+             * password. AllowSend is the explicit decision that agents may send
+             * through this connection — a configured SMTPHost alone registers no
+             * send tool. SMTPSavesSent marks providers that file mail submitted over
+             * SMTP in the Sent folder themselves (Gmail does); mux then skips its own
+             * copy. FromName is the display name in the From header of drafts and
+             * sent mail.
+             * @member
+             * @type {string | undefined}
+             */
+            this["smtpHost"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {number | undefined}
+             */
+            this["smtpPort"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {boolean | undefined}
+             */
+            this["allowSend"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {boolean | undefined}
+             */
+            this["smtpSavesSent"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["fromName"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
              * SSH connection type (TypeSSH). Auth selects the key source: "key"
              * (default — the secret {name}-private-key or key_file) or "agent" (the
              * user's ssh-agent, no key in mux). HostKey pins the server's public key;
@@ -256,8 +300,8 @@ export class Connection {
         const $$createField21_0 = $$createType0;
         const $$createField22_0 = $$createType1;
         const $$createField23_0 = $$createType1;
-        const $$createField27_0 = $$createType1;
-        const $$createField28_0 = $$createType1;
+        const $$createField32_0 = $$createType1;
+        const $$createField33_0 = $$createType1;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("headers" in $$parsedSource) {
             $$parsedSource["headers"] = $$createField21_0($$parsedSource["headers"]);
@@ -269,10 +313,10 @@ export class Connection {
             $$parsedSource["setOnceFields"] = $$createField23_0($$parsedSource["setOnceFields"]);
         }
         if ("allowCommands" in $$parsedSource) {
-            $$parsedSource["allowCommands"] = $$createField27_0($$parsedSource["allowCommands"]);
+            $$parsedSource["allowCommands"] = $$createField32_0($$parsedSource["allowCommands"]);
         }
         if ("denyCommands" in $$parsedSource) {
-            $$parsedSource["denyCommands"] = $$createField28_0($$parsedSource["denyCommands"]);
+            $$parsedSource["denyCommands"] = $$createField33_0($$parsedSource["denyCommands"]);
         }
         return new Connection(/** @type {Partial<Connection>} */($$parsedSource));
     }

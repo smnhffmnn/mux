@@ -23,7 +23,7 @@ func TestHeadlessLocalRoutesServeOAuth(t *testing.T) {
 	s := server.NewMCPServer("mux-test", "0.0.0")
 
 	mux := http.NewServeMux()
-	headlessLocalRoutes(cfg, newSimpleReloader(s, cfg, nil), nil)(mux)
+	headlessLocalRoutes(cfg, newSimpleReloader(s, cfg, nil, newToolBook()), nil)(mux)
 
 	cases := []struct {
 		name   string

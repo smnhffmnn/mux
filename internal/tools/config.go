@@ -143,6 +143,21 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 			mcp.WithString("deny_commands",
 				mcp.Description("ssh: commands the connection never runs, one per line ('journalctl --vacuum*'); applies on top of allow_commands and the read-only list."),
 			),
+			mcp.WithString("smtp_host",
+				mcp.Description("imap: SMTP submission server for sending (e.g. 'smtp.example.com'). Signs in with the IMAP user and password. Sending also needs allow_send."),
+			),
+			mcp.WithNumber("smtp_port",
+				mcp.Description("imap: SMTP port. Default 587 (STARTTLS); 465 is implicit TLS."),
+			),
+			mcp.WithBoolean("allow_send",
+				mcp.Description("imap: register the send tools (send_draft, reply_send, forward_send). Requires smtp_host and a user that is an email address. Default false — a configured smtp_host alone does not enable sending."),
+			),
+			mcp.WithBoolean("smtp_saves_sent",
+				mcp.Description("imap: the provider files mail submitted over SMTP in the Sent folder itself (Gmail does), so mux skips its own copy. Default false."),
+			),
+			mcp.WithString("from_name",
+				mcp.Description("imap: display name in the From header of drafts and sent mail (e.g. 'Jane Doe')."),
+			),
 		),
 		Handler: ct.handleConnectionAdd,
 	}
@@ -151,7 +166,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 func (ct *ConfigTools) connectionDeleteTool() ToolDef {
 	return ToolDef{
 		Tool: mcp.NewTool("connection_delete",
-			mcp.WithDescription("Delete a local connection. Provisioned connections cannot be deleted."),
+			mcp.WithDescription("Delete a local connection together with the secrets stored for it (password, token, ssh key, OAuth tokens and client). Refused while the vault is locked. Provisioned connections cannot be deleted."),
 			mcp.WithString("name", mcp.Required(),
 				mcp.Description("Connection name to delete."),
 			),
@@ -343,6 +358,21 @@ func (ct *ConfigTools) handleConnectionList(_ context.Context, _ mcp.CallToolReq
 			secrets["private_key"] = c.PrivateKey != ""
 			secrets["private_key_passphrase"] = c.Passphrase != ""
 		}
+		if c.Type == config.TypeIMAP {
+			if c.SMTPHost != "" {
+				entry["smtp_host"] = c.SMTPHost
+				entry["smtp_port"] = c.SMTPPort
+			}
+			if c.AllowSend {
+				entry["allow_send"] = true
+			}
+			if c.SMTPSavesSent {
+				entry["smtp_saves_sent"] = true
+			}
+			if c.FromName != "" {
+				entry["from_name"] = c.FromName
+			}
+		}
 		entry["secrets_set"] = secrets
 		conns = append(conns, entry)
 	}
@@ -522,6 +552,36 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 		}
 	}
 
+	// imap-only fields: on another type their mere presence is an error (a
+	// boolean switch has no empty value to ignore), stricter than the ssh
+	// check above.
+	args := req.GetArguments()
+	if typ != config.TypeIMAP {
+		for _, key := range config.IMAPSendFields {
+			if _, ok := args[key]; ok {
+				return mcp.NewToolResultError(fmt.Sprintf("%s applies to type %q only, not %q", key, config.TypeIMAP, typ)), nil
+			}
+		}
+	}
+	if v := strings.TrimSpace(req.GetString("smtp_host", "")); v != "" {
+		conn.SMTPHost = v
+	}
+	if v, ok := args["smtp_port"].(float64); ok && v > 0 {
+		conn.SMTPPort = int(v)
+	}
+	if _, ok := args["allow_send"]; ok {
+		conn.AllowSend = req.GetBool("allow_send", false)
+	}
+	if _, ok := args["smtp_saves_sent"]; ok {
+		conn.SMTPSavesSent = req.GetBool("smtp_saves_sent", false)
+	}
+	if v := strings.TrimSpace(req.GetString("from_name", "")); v != "" {
+		conn.FromName = v
+	}
+	if err := config.ValidateIMAPSending(conn); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
 	config.ApplyConnectionDefaults(&conn)
 	// A key stored before the connection was added (secret_set first,
 	// connection_add second) must be found now, not at the next restart.
@@ -552,6 +612,11 @@ func (ct *ConfigTools) handleConnectionDelete(_ context.Context, req mcp.CallToo
 	name, err := req.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError("missing required parameter: name"), nil
+	}
+	// Before anything changes: a connection deleted while its secrets
+	// cannot be would leave them for the next connection of that name.
+	if err := config.ConnectionSecretsDeletable(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("connection %q not deleted: %v", name, err)), nil
 	}
 
 	found := false
@@ -584,12 +649,13 @@ func (ct *ConfigTools) handleConnectionDelete(_ context.Context, req mcp.CallToo
 	}
 
 	msg := fmt.Sprintf("connection %q deleted", name)
-	if deleted.Type == config.TypeSSH {
-		// A private key is not a token: it must not outlive the connection
-		// it was stored for. Other types keep their secrets on delete.
-		config.DeleteSecret(name + "-private-key")
-		config.DeleteSecret(name + "-private-key-passphrase")
-		msg += " together with its private key and passphrase secrets"
+	keys, err := config.DeleteConnectionSecrets(deleted.Name, ct.cfg.AllConnections())
+	if err != nil {
+		// Checked before the delete; the vault locked itself in between.
+		return mcp.NewToolResultError(msg + ", but its secrets were kept: " + err.Error()), nil
+	}
+	if len(keys) > 0 {
+		msg += " together with its stored secrets (" + strings.Join(keys, ", ") + ")"
 	}
 	return mcp.NewToolResultText(msg), nil
 }

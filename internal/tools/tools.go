@@ -143,6 +143,11 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 			toolDefs = a.Tools()
 		}
 	case config.TypeIMAP:
+		// The send tools depend on the configuration. Remove them before every
+		// registration, so switching sending off takes effect even where the
+		// caller kept no list of the names (connections registered at startup)
+		// and even when the new configuration fails to register.
+		s.DeleteTools(imapSendToolNames(conn.Name)...)
 		var im *IMAP
 		im, err = NewIMAP(conn, dialer)
 		if err == nil {
@@ -223,9 +228,11 @@ func withCallLogging(name string, handler server.ToolHandlerFunc) server.ToolHan
 }
 
 // DefaultInstructions returns built-in instructions for connection types that have them.
-// Returns empty string for types without default instructions.
-func DefaultInstructions(connType string) string {
-	switch connType {
+// Returns empty string for types without default instructions. The connection
+// is passed, not just its type, because some instructions depend on its
+// configuration (an imap connection that may send says so).
+func DefaultInstructions(conn config.Connection) string {
+	switch conn.Type {
 	case config.TypeOpenAI:
 		return DefaultOpenAIInstructions
 	case config.TypeElevenLabs:
@@ -241,6 +248,9 @@ func DefaultInstructions(connType string) string {
 	case config.TypeGemini:
 		return DefaultGeminiInstructions
 	case config.TypeIMAP:
+		if conn.SendEnabled() {
+			return DefaultIMAPInstructions + "\n" + IMAPSendInstructions
+		}
 		return DefaultIMAPInstructions
 	case config.TypeGoogleWorkspace:
 		return DefaultGoogleWorkspaceInstructions

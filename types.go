@@ -97,6 +97,7 @@ type FieldInfo struct {
 	Secret       bool   `json:"secret"`
 	Small        bool   `json:"small"`
 	Multiline    bool   `json:"multiline"`
+	Checkbox     bool   `json:"checkbox"`
 	SecretStored bool   `json:"secretStored"`
 }
 
@@ -197,4 +198,12 @@ type SaveConnectionRequest struct {
 	DenyCommands  string `json:"denyCommands,omitempty"`
 	PrivateKey    string `json:"privateKey,omitempty"`
 	Passphrase    string `json:"passphrase,omitempty"`
+
+	// imap connection type: sending over SMTP. The checkboxes are always sent
+	// by the form, so false switches them off.
+	SMTPHost      string `json:"smtpHost,omitempty"`
+	SMTPPort      string `json:"smtpPort,omitempty"`
+	FromName      string `json:"fromName,omitempty"`
+	AllowSend     bool   `json:"allowSend,omitempty"`
+	SMTPSavesSent bool   `json:"smtpSavesSent,omitempty"`
 }
