@@ -2,9 +2,12 @@ package tools
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/mail"
+	"net/url"
 	"strings"
 	"time"
 
@@ -48,7 +51,7 @@ func (n *Nylas) sendTools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("forward_send",
-				mcp.WithDescription("Forward a message of a conversation and send it immediately — no draft, cannot be recalled. The message's attachments are forwarded with it unless include_attachments is false. "+nylasSentMeansDone),
+				mcp.WithDescription("Forward a message of a conversation and send it immediately — no draft, cannot be recalled. The message's attachments (up to 3 MB in total) are downloaded and attached unless include_attachments is false. "+nylasSentMeansDone),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
 				mcp.WithString("message_id", mcp.Required(), mcp.Description(nylasMessageIDDescription)),
 				mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address(es), comma-separated for multiple")),
@@ -65,12 +68,17 @@ func (n *Nylas) sendTools() []ToolDef {
 // connection — removed before every registration so switching allow_send off
 // takes effect without a restart.
 func nylasSendToolNames(connName string) []string {
-	names := make([]string, 0, 3)
-	for _, t := range []string{"send_draft", "reply_send", "forward_send"} {
-		names = append(names, config.SanitizeToolName(connName+"_"+t))
+	var names []string
+	for _, td := range (&Nylas{}).sendTools() {
+		names = append(names, config.SanitizeToolName(connName+"_"+td.Tool.Name))
 	}
 	return names
 }
+
+// nylasForwardAttachmentsMax caps the attachments a forward carries: Nylas
+// takes JSON sends up to 3 MB; larger forwards would need the multipart form,
+// which this type does not use.
+const nylasForwardAttachmentsMax = 3 << 20
 
 // nylasOutgoing is a message before it goes to the API: a draft or a message
 // to send. Nylas builds the MIME message from it.
@@ -78,8 +86,17 @@ type nylasOutgoing struct {
 	To, Cc           []nylasAddress
 	Subject          string
 	Body             string
-	ReplyToMessageID string            // threads the message on the one it answers
-	Attachments      []nylasAttachment // forwarded by reference to the original message's attachments
+	ReplyToMessageID string // threads the message on the one it answers; on IMAP grants Nylas' message id is the RFC 822 Message-ID, as the API expects there
+	Attachments      []nylasOutgoingAttachment
+}
+
+// nylasOutgoingAttachment is an attachment in the form the send and draft
+// requests document: the content itself, base64.
+type nylasOutgoingAttachment struct {
+	Content            string `json:"content"`
+	ContentType        string `json:"content_type"`
+	Filename           string `json:"filename"`
+	ContentDisposition string `json:"content_disposition,omitempty"`
 }
 
 // payload is the JSON body for POST /drafts and POST /messages/send.
@@ -211,18 +228,73 @@ func (n *Nylas) prepareForward(ctx context.Context, convID, to, comment, message
 	b.WriteString(nylasBodyText(orig.Body))
 	out := nylasOutgoing{To: addrs, Subject: subject, Body: b.String()}
 	if includeAttachments {
-		for _, a := range orig.Attachments {
-			if a.IsInline {
-				continue // inline images belong to the original's HTML, which the plain-text forward does not carry
-			}
-			out.Attachments = append(out.Attachments, a)
+		atts, err := n.downloadAttachments(ctx, orig)
+		if err != nil {
+			return nylasOutgoing{}, err
 		}
+		out.Attachments = atts
 	}
 	return out, nil
 }
 
-// draftResult is what create_*_draft returns.
-func (n *Nylas) draftResult(ctx context.Context, m nylasOutgoing, extra map[string]any) (*mcp.CallToolResult, error) {
+// downloadAttachments fetches the original's attachments so the forward can
+// carry them as content — the only form the send and draft requests document.
+// Inline images are skipped: they belong to the original's HTML, which the
+// plain-text forward does not carry. Over the size cap the forward is refused
+// rather than sent without files.
+func (n *Nylas) downloadAttachments(ctx context.Context, orig nylasMessage) ([]nylasOutgoingAttachment, error) {
+	var total int64
+	for _, a := range orig.Attachments {
+		if !a.IsInline {
+			total += a.Size
+		}
+	}
+	if total > nylasForwardAttachmentsMax {
+		return nil, fmt.Errorf("the message's attachments total %d bytes, more than the %d bytes a forward can carry — forward with include_attachments=false, or fetch them with get_attachment", total, nylasForwardAttachmentsMax)
+	}
+	grantID, _, _ := n.grant()
+	var out []nylasOutgoingAttachment
+	var read int64
+	for _, a := range orig.Attachments {
+		if a.IsInline {
+			continue
+		}
+		q := url.Values{}
+		q.Set("message_id", orig.ID)
+		resp, err := n.call(ctx, "attachment.download", map[string]string{"grant_id": grantID, "attachment_id": a.ID}, q, nil)
+		if err != nil {
+			return nil, fmt.Errorf("download attachment %s: %w", a.Filename, err)
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, nylasForwardAttachmentsMax+1))
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("download attachment %s: %w", a.Filename, err)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("download attachment %s: %s", a.Filename, (&nylasHTTPError{Status: resp.StatusCode, Body: trimForError(data)}).Error())
+		}
+		read += int64(len(data))
+		if read > nylasForwardAttachmentsMax {
+			return nil, fmt.Errorf("the message's attachments exceed the %d bytes a forward can carry — forward with include_attachments=false, or fetch them with get_attachment", nylasForwardAttachmentsMax)
+		}
+		contentType := a.ContentType
+		if ct := resp.Header.Get("Content-Type"); ct != "" && !strings.HasPrefix(ct, "application/octet-stream") && contentType == "" {
+			contentType = ct
+		}
+		out = append(out, nylasOutgoingAttachment{
+			Content:            base64.StdEncoding.EncodeToString(data),
+			ContentType:        contentType,
+			Filename:           a.Filename,
+			ContentDisposition: "attachment",
+		})
+	}
+	return out, nil
+}
+
+// draftResult is what create_*_draft returns. convID is the conversation the
+// draft belongs to; a draft Nylas filed in another thread is reported as a
+// warning, because that is where a reply that did not thread shows first.
+func (n *Nylas) draftResult(ctx context.Context, convID string, m nylasOutgoing, extra map[string]any) (*mcp.CallToolResult, error) {
 	grantID, _, _ := n.grant()
 	var draft struct {
 		ID       string   `json:"id"`
@@ -232,7 +304,7 @@ func (n *Nylas) draftResult(ctx context.Context, m nylasOutgoing, extra map[stri
 	if _, err := n.callJSON(ctx, "drafts.create", map[string]string{"grant_id": grantID}, nil, n.payload(m), &draft); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("create draft: %v", err)), nil
 	}
-	folder := "Drafts"
+	folder := ""
 	if folders, err := n.listFolders(ctx, false); err == nil && len(draft.Folders) > 0 {
 		if names := folderNames(folders, draft.Folders); len(names) > 0 {
 			folder = names[0]
@@ -241,12 +313,19 @@ func (n *Nylas) draftResult(ctx context.Context, m nylasOutgoing, extra map[stri
 	result := map[string]any{
 		"status":   "draft_created",
 		"draft_id": draft.ID,
-		"folder":   folder,
 		"to":       nylasAddresses(m.To),
+		"cc":       nylasAddresses(m.Cc),
 		"subject":  m.Subject,
+		"warnings": []string{},
 	}
-	if len(m.Cc) > 0 {
-		result["cc"] = nylasAddresses(m.Cc)
+	if folder != "" {
+		result["folder"] = folder
+	}
+	if draft.ThreadID != "" {
+		result["thread_id"] = draft.ThreadID
+		if m.ReplyToMessageID != "" && draft.ThreadID != convID {
+			result["warnings"] = []string{fmt.Sprintf("Nylas filed the draft in thread %s, not in conversation %s — the reply may not be threaded", draft.ThreadID, convID)}
+		}
 	}
 	for k, v := range extra {
 		result[k] = v
@@ -267,7 +346,7 @@ func (n *Nylas) handleCreateReplyDraft(ctx context.Context, req mcp.CallToolRequ
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return n.draftResult(ctx, m, map[string]any{"reply_to": strings.Join(nylasAddresses(m.To), ", "), "in_reply_to": m.ReplyToMessageID})
+	return n.draftResult(ctx, convID, m, map[string]any{"reply_to": strings.Join(nylasAddresses(m.To), ", "), "in_reply_to": m.ReplyToMessageID})
 }
 
 func (n *Nylas) handleCreateForwardDraft(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -283,7 +362,7 @@ func (n *Nylas) handleCreateForwardDraft(ctx context.Context, req mcp.CallToolRe
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return n.draftResult(ctx, m, map[string]any{"attachments": len(m.Attachments)})
+	return n.draftResult(ctx, convID, m, map[string]any{"attachments": len(m.Attachments)})
 }
 
 // --- Sending ---
@@ -298,15 +377,39 @@ type sentMessage struct {
 	Date     int64          `json:"date"`
 }
 
-// sendError shapes a failed send. A request that produced no HTTP status may
-// still have been carried out: that is said so, because an agent that reads
-// a plain error sends again.
+// sendError shapes a failed send so an agent can tell the two cases apart:
+// "not sent" (Nylas refused the request, 4xx) and "unclear whether sent" (no
+// answer, or a 5xx such as the documented 504 — the provider may have sent
+// the message before the gateway gave up). A plain error would read as "try
+// again", and that is how a mail goes out twice.
 func sendError(what string, err error) *mcp.CallToolResult {
 	var transport *nylasTransportError
 	if errors.As(err, &transport) {
 		return mcp.NewToolResultError(fmt.Sprintf("%s: unclear whether sent — the request failed without an answer from Nylas (%v); check the Sent folder before trying again", what, err))
 	}
-	return mcp.NewToolResultError(fmt.Sprintf("%s: %v", what, err))
+	var httpErr *nylasHTTPError
+	if errors.As(err, &httpErr) && httpErr.Status >= 500 {
+		return mcp.NewToolResultError(fmt.Sprintf("%s: unclear whether sent — Nylas answered HTTP %d (%v); check the Sent folder before trying again", what, httpErr.Status, err))
+	}
+	return mcp.NewToolResultError(fmt.Sprintf("%s: not sent — %v", what, err))
+}
+
+// sentResult shapes a successful send. A 2xx whose body mux could not read
+// (decodeErr) is still a send: Nylas accepted the message, so the result
+// says sent with a warning instead of an error. A 202 means Nylas queued the
+// message and sends it asynchronously.
+func sentResult(status int, decodeErr error, fields map[string]any) (*mcp.CallToolResult, error) {
+	warnings := []string{}
+	if decodeErr != nil {
+		warnings = append(warnings, fmt.Sprintf("sent, but Nylas' answer could not be read (%v) — message id unknown", decodeErr))
+	}
+	if status == 202 {
+		fields["queued"] = true
+		warnings = append(warnings, "Nylas queued the message and sends it asynchronously (HTTP 202)")
+	}
+	fields["sent"] = true
+	fields["warnings"] = warnings
+	return jsonResult(fields)
 }
 
 func (n *Nylas) handleSendDraft(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -319,40 +422,66 @@ func (n *Nylas) handleSendDraft(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 	grantID, _, _ := n.grant()
 	var sent sentMessage
-	if _, err := n.callJSON(ctx, "draft.send", map[string]string{"grant_id": grantID, "draft_id": draftID}, nil, map[string]any{}, &sent); err != nil {
+	env, err := n.callJSON(ctx, "draft.send", map[string]string{"grant_id": grantID, "draft_id": draftID}, nil, map[string]any{}, &sent)
+	var decodeErr *nylasDecodeError
+	if err != nil && !errors.As(err, &decodeErr) {
 		var httpErr *nylasHTTPError
 		if errors.As(err, &httpErr) && httpErr.Status == 404 {
 			return mcp.NewToolResultError(fmt.Sprintf("draft %s not found — it may have been sent or deleted already; nothing was sent now", draftID)), nil
 		}
 		return sendError("send draft "+draftID, err), nil
 	}
-	return jsonResult(map[string]any{
-		"sent":       true,
+	status := 200
+	if env != nil {
+		status = env.Status
+	} else if decodeErr != nil {
+		status = decodeErr.Status
+	}
+	return sentResult(status, err, map[string]any{
 		"draft_id":   draftID,
 		"message_id": sent.ID,
 		"to":         nylasAddresses(sent.To),
 		"cc":         nylasAddresses(sent.CC),
 		"subject":    sent.Subject,
-		"warnings":   []string{},
 	})
 }
 
-// sendComposed submits m through POST /messages/send.
-func (n *Nylas) sendComposed(ctx context.Context, m nylasOutgoing) (*mcp.CallToolResult, error) {
+// sendComposed submits m through POST /messages/send with an Idempotency-Key
+// derived from the payload: should the same message be submitted again within
+// Nylas' one-hour window, Nylas returns the first answer instead of sending
+// twice. convID is the conversation a reply belongs to; a message Nylas filed
+// in another thread is reported as a warning.
+func (n *Nylas) sendComposed(ctx context.Context, convID string, m nylasOutgoing) (*mcp.CallToolResult, error) {
 	grantID, _, _ := n.grant()
+	payload := n.payload(m)
+	headers := map[string]string{"Idempotency-Key": idempotencyKey(grantID, payload)}
 	var sent sentMessage
-	if _, err := n.callJSON(ctx, "messages.send", map[string]string{"grant_id": grantID}, nil, n.payload(m), &sent); err != nil {
+	env, err := n.callJSONHeaders(ctx, "messages.send", map[string]string{"grant_id": grantID}, nil, headers, payload, &sent)
+	var decodeErr *nylasDecodeError
+	if err != nil && !errors.As(err, &decodeErr) {
 		return sendError("send", err), nil
 	}
-	messageID := sent.ID
-	return jsonResult(map[string]any{
-		"sent":       true,
-		"message_id": messageID,
+	status := 200
+	if env != nil {
+		status = env.Status
+	} else if decodeErr != nil {
+		status = decodeErr.Status
+	}
+	fields := map[string]any{
+		"message_id": sent.ID,
 		"to":         nylasAddresses(m.To),
 		"cc":         nylasAddresses(m.Cc),
 		"subject":    m.Subject,
-		"warnings":   []string{},
-	})
+	}
+	res, resErr := sentResult(status, err, fields)
+	if sent.ThreadID != "" {
+		fields["thread_id"] = sent.ThreadID
+		if m.ReplyToMessageID != "" && convID != "" && sent.ThreadID != convID {
+			fields["warnings"] = append(fields["warnings"].([]string), fmt.Sprintf("Nylas filed the message in thread %s, not in conversation %s — the reply may not be threaded", sent.ThreadID, convID))
+		}
+		return jsonResult(fields)
+	}
+	return res, resErr
 }
 
 func (n *Nylas) handleReplySend(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -372,7 +501,7 @@ func (n *Nylas) handleReplySend(ctx context.Context, req mcp.CallToolRequest) (*
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return n.sendComposed(ctx, m)
+	return n.sendComposed(ctx, convID, m)
 }
 
 func (n *Nylas) handleForwardSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -392,5 +521,5 @@ func (n *Nylas) handleForwardSend(ctx context.Context, req mcp.CallToolRequest) 
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return n.sendComposed(ctx, m)
+	return n.sendComposed(ctx, convID, m)
 }

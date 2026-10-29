@@ -10,8 +10,10 @@ name: Nylas API drift
 #
 # The second job exercises the type against a real test grant — read, draft,
 # delete the draft — when the repository secrets NYLAS_LIVE_KEY and
-# NYLAS_LIVE_GRANT are set (an IAM key bound to that grant, with an expiry).
-# Without them the job is skipped, not failed.
+# NYLAS_LIVE_GRANT are set (an IAM key bound to that grant, with an expiry) and,
+# for a grant in the EU region, the repository variable NYLAS_LIVE_REGION=eu.
+# Without the secrets the job is skipped, not failed. The test logs counts and
+# ids only — the Actions log of a public repository is public.
 
 on:
   schedule:
@@ -35,12 +37,13 @@ jobs:
       - name: Check the endpoints, parameters and fields mux uses against the live document
         run: NYLAS_OPENAPI=/tmp/nylas-openapi.json go test -tags notray ./internal/tools -run 'TestNylas_Spec' -count=1 -v
 
+      # Also after a failed spec test — that is when the report matters.
       - name: Report what changed since the vendored snapshot
-        if: steps.fetch.outcome == 'success'
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
         run: scripts/nylas-openapi-report.sh /tmp/nylas-openapi.json internal/tools/testdata/nylas-openapi.json
 
       - uses: actions/upload-artifact@v4
-        if: steps.fetch.outcome == 'success'
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
         with:
           name: nylas-openapi-live
           path: /tmp/nylas-openapi.json
@@ -54,17 +57,17 @@ jobs:
       NYLAS_LIVE_REGION: ${{ vars.NYLAS_LIVE_REGION }}
     steps:
       - uses: actions/checkout@v5
-        if: env.NYLAS_LIVE_KEY != ''
+        if: env.NYLAS_LIVE_KEY != '' && env.NYLAS_LIVE_GRANT != ''
 
       - uses: actions/setup-go@v6
-        if: env.NYLAS_LIVE_KEY != ''
+        if: env.NYLAS_LIVE_KEY != '' && env.NYLAS_LIVE_GRANT != ''
         with:
           go-version-file: go.mod
 
       - name: Exercise the type against the test grant (read, draft, delete the draft)
-        if: env.NYLAS_LIVE_KEY != ''
-        run: go test -tags 'notray live' ./internal/tools -run 'TestNylasLive' -count=1 -v -timeout 10m
+        if: env.NYLAS_LIVE_KEY != '' && env.NYLAS_LIVE_GRANT != ''
+        run: go test -tags notray,live ./internal/tools -run 'TestNylasLive' -count=1 -v -timeout 10m
 
       - name: Skipped
-        if: env.NYLAS_LIVE_KEY == ''
-        run: echo "NYLAS_LIVE_KEY is not set — live contract test skipped"
+        if: env.NYLAS_LIVE_KEY == '' || env.NYLAS_LIVE_GRANT == ''
+        run: echo "NYLAS_LIVE_KEY or NYLAS_LIVE_GRANT is not set — live contract test skipped"

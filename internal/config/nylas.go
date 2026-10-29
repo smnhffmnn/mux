@@ -43,7 +43,7 @@ func NylasBaseURL(region string) string {
 // ValidateNylas checks the fields of a nylas connection that are wrong before
 // any request is made: the region must exist, and the grant must be
 // addressable — by id, or by the mailbox address in user, which mux resolves
-// through the grants API at startup.
+// through the grants API on first use.
 func ValidateNylas(c Connection) error {
 	if c.Type != TypeNylas {
 		return nil // other types never read these fields
@@ -52,7 +52,7 @@ func ValidateNylas(c Connection) error {
 		return fmt.Errorf("region %q is not a Nylas region (%s or %s)", c.Region, NylasRegionUS, NylasRegionEU)
 	}
 	if strings.TrimSpace(c.GrantID) == "" && strings.TrimSpace(c.User) == "" {
-		return fmt.Errorf("nylas needs grant_id, or user set to the mailbox address so the grant can be looked up")
+		return fmt.Errorf("needs grant_id, or user set to the mailbox address so the grant can be looked up")
 	}
 	if u := strings.TrimSpace(c.User); u != "" && !isMailAddress(u) {
 		return fmt.Errorf("user must be the mailbox address (local@domain), got %q", c.User)

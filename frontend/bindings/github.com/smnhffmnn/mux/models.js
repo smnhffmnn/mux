@@ -821,6 +821,7 @@ export class SaveConnectionRequest {
         }
         if (/** @type {any} */(false)) {
             /**
+             * nylas connection type. FromName and AllowSend above are shared with imap.
              * @member
              * @type {string | undefined}
              */

@@ -3,12 +3,15 @@ package tools
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -55,10 +58,11 @@ const (
 // DefaultNylasInstructions provides guidance for LLMs using nylas tools.
 const DefaultNylasInstructions = `Mailbox behind the Nylas API — Gmail, Microsoft 365 and IMAP accounts look the same here.
 Conversations are Nylas threads and include this account's own replies (Sent), so each conversation carries ball: "me" when the other side wrote last and a reply is due, "them" when this account wrote last and waits; lastFromMe is the underlying fact.
-list_conversations reads one folder (default: the inbox) newest first, 20 per page; pass its nextPageToken as page_token to continue; list_mailboxes shows folders with message and unread counts.
-Each message has an id — use it in message_id of the reply, forward and attachment tools; a conversation id is the thread id.
+list_conversations reads one folder (default: the inbox), 20 per page in Nylas' order (newest first, not guaranteed on Gmail); pass its nextPageToken as page_token to continue; list_mailboxes shows folders with message and unread counts.
+Each message has an id — use it in message_id of the reply, forward and attachment tools; a conversation id is the thread id. When latestMessage.isDraft is true, its id is a pending draft, not a message: take message ids from get_conversation.
+search_messages returns conversations with ball; only with live=true (IMAP server search) it returns the matching messages grouped by thread, marked scope: "matches", without ball.
 IMAP-backed accounts: Nylas keeps a rolling 90-day cache, and conversations and threads see only that window; search_messages with live=true asks the IMAP server directly (slow, one folder at a time) and reaches older mail.
-archive/delete/move act on the conversation's messages in the inbox (or source_folder); delete moves to Trash.
+archive/delete/move act on the conversation's messages in the inbox (or source_folder); delete moves to Trash. On Gmail, archive removes the INBOX label and move swaps labels; other labels stay.
 Draft creation saves to the mailbox's Drafts folder and returns a draft_id — it does NOT send.`
 
 // NylasSendInstructions are appended to DefaultNylasInstructions when the
@@ -128,9 +132,10 @@ func (n *Nylas) SendEnabled() bool {
 // Nylas' OpenAPI document, so a renamed path, a dropped parameter or a removed
 // field fails a test instead of a user's call.
 type nylasEndpoint struct {
-	Method string
-	Path   string
-	Params []string
+	Method  string
+	Path    string
+	Params  []string
+	Headers []string // request headers beyond auth and content type the call may send
 }
 
 // nylasEndpoints is the complete list of REST calls the type can make through
@@ -151,7 +156,7 @@ var nylasEndpoints = map[string]nylasEndpoint{
 	"drafts.create":       {Method: http.MethodPost, Path: "/v3/grants/{grant_id}/drafts"},
 	"draft.send":          {Method: http.MethodPost, Path: "/v3/grants/{grant_id}/drafts/{draft_id}"},
 	"draft.delete":        {Method: http.MethodDelete, Path: "/v3/grants/{grant_id}/drafts/{draft_id}"},
-	"messages.send":       {Method: http.MethodPost, Path: "/v3/grants/{grant_id}/messages/send"},
+	"messages.send":       {Method: http.MethodPost, Path: "/v3/grants/{grant_id}/messages/send", Headers: []string{"Idempotency-Key"}},
 }
 
 // nylasSchemaFields lists, per OpenAPI component schema, the properties the
@@ -176,7 +181,21 @@ type nylasEnvelope struct {
 	Data       json.RawMessage `json:"data"`
 	NextCursor string          `json:"next_cursor"`
 	Error      *nylasAPIError  `json:"error"`
+	Status     int             `json:"-"` // HTTP status of the answer, set by callJSON
 }
+
+// nylasDecodeError is a 2xx answer whose body mux could not read as the
+// envelope. The request was carried out; only the answer is lost. The send
+// tools report it as sent, so an agent does not send twice.
+type nylasDecodeError struct {
+	Status int
+	Err    error
+}
+
+func (e *nylasDecodeError) Error() string {
+	return fmt.Sprintf("decode Nylas response (HTTP %d): %v", e.Status, e.Err)
+}
+func (e *nylasDecodeError) Unwrap() error { return e.Err }
 
 type nylasAPIError struct {
 	Type          string `json:"type"`
@@ -221,12 +240,23 @@ func (e *nylasTransportError) Unwrap() error { return e.Err }
 // endpoint's path template; query carries the parameters listed in Params.
 // The registry is the only way to reach the API.
 func (n *Nylas) call(ctx context.Context, key string, pathParams map[string]string, query url.Values, body any) (*http.Response, error) {
+	return n.callHeaders(ctx, key, pathParams, query, nil, body)
+}
+
+// callHeaders is call with extra request headers; each must be listed in the
+// endpoint's Headers.
+func (n *Nylas) callHeaders(ctx context.Context, key string, pathParams map[string]string, query url.Values, headers map[string]string, body any) (*http.Response, error) {
 	ep, ok := nylasEndpoints[key]
 	if !ok {
 		return nil, fmt.Errorf("nylas: endpoint %q is not registered", key)
 	}
 	path := ep.Path
 	for k, v := range pathParams {
+		// Ids come from the API, but they travel through an agent before they
+		// come back: a value that would change the path's shape is refused.
+		if v == "" || v == "." || v == ".." || strings.ContainsAny(v, "/?#") {
+			return nil, fmt.Errorf("nylas: %s %q is not a valid id", k, v)
+		}
 		path = strings.ReplaceAll(path, "{"+k+"}", url.PathEscape(v))
 	}
 	if strings.Contains(path, "{") {
@@ -239,6 +269,15 @@ func (n *Nylas) call(ctx context.Context, key string, pathParams map[string]stri
 	for k := range query {
 		if !allowed[k] {
 			return nil, fmt.Errorf("nylas: endpoint %q does not take query parameter %q", key, k)
+		}
+	}
+	allowedHeaders := map[string]bool{}
+	for _, h := range ep.Headers {
+		allowedHeaders[strings.ToLower(h)] = true
+	}
+	for k := range headers {
+		if !allowedHeaders[strings.ToLower(k)] {
+			return nil, fmt.Errorf("nylas: endpoint %q does not take header %q", key, k)
 		}
 	}
 	u := n.baseURL + path
@@ -263,6 +302,9 @@ func (n *Nylas) call(ctx context.Context, key string, pathParams map[string]stri
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	resp, err := n.client.Do(req)
 	if err != nil {
 		return nil, &nylasTransportError{Err: fmt.Errorf("%s %s: %w", ep.Method, path, err)}
@@ -274,33 +316,54 @@ func (n *Nylas) call(ctx context.Context, key string, pathParams map[string]stri
 // envelope's data into out (nil out discards it). It returns the envelope for
 // the cursor.
 func (n *Nylas) callJSON(ctx context.Context, key string, pathParams map[string]string, query url.Values, body, out any) (*nylasEnvelope, error) {
-	resp, err := n.call(ctx, key, pathParams, query, body)
+	return n.callJSONHeaders(ctx, key, pathParams, query, nil, body, out)
+}
+
+// callJSONHeaders is callJSON with extra request headers.
+func (n *Nylas) callJSONHeaders(ctx context.Context, key string, pathParams map[string]string, query url.Values, headers map[string]string, body, out any) (*nylasEnvelope, error) {
+	resp, err := n.callHeaders(ctx, key, pathParams, query, headers, body)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, nylasMaxBody))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, nylasMaxBody+1))
 	if err != nil {
 		return nil, &nylasTransportError{Err: fmt.Errorf("read response: %w", err)}
 	}
-	var env nylasEnvelope
+	ok := resp.StatusCode >= 200 && resp.StatusCode < 300
+	if len(data) > nylasMaxBody {
+		if !ok {
+			return nil, &nylasHTTPError{Status: resp.StatusCode, Body: trimForError(data)}
+		}
+		return nil, &nylasDecodeError{Status: resp.StatusCode, Err: fmt.Errorf("answer exceeds %d bytes", nylasMaxBody)}
+	}
+	env := nylasEnvelope{Status: resp.StatusCode}
 	if len(bytes.TrimSpace(data)) > 0 {
 		if err := json.Unmarshal(data, &env); err != nil {
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			if !ok {
 				return nil, &nylasHTTPError{Status: resp.StatusCode, Body: trimForError(data)}
 			}
-			return nil, fmt.Errorf("decode Nylas response: %w", err)
+			return nil, &nylasDecodeError{Status: resp.StatusCode, Err: err}
 		}
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if !ok {
 		return nil, &nylasHTTPError{Status: resp.StatusCode, RequestID: env.RequestID, API: env.Error, Body: trimForError(data)}
 	}
 	if out != nil && len(env.Data) > 0 {
 		if err := json.Unmarshal(env.Data, out); err != nil {
-			return nil, fmt.Errorf("decode Nylas data: %w", err)
+			return nil, &nylasDecodeError{Status: resp.StatusCode, Err: fmt.Errorf("data: %w", err)}
 		}
 	}
 	return &env, nil
+}
+
+// idempotencyKey derives the Idempotency-Key for a send from the grant and
+// the payload: an identical retry within Nylas' one-hour window returns the
+// first answer instead of sending again.
+func idempotencyKey(grantID string, payload any) string {
+	b, _ := json.Marshal(payload)
+	sum := sha256.Sum256(append([]byte(grantID+"\n"), b...))
+	return hex.EncodeToString(sum[:])
 }
 
 func trimForError(b []byte) string {
@@ -397,11 +460,17 @@ type nylasConversation struct {
 	HasAttachments bool              `json:"hasAttachments"`
 	// Ball is "me" when the other side wrote last (a reply is due) and
 	// "them" when this account wrote last; LastFromMe is the fact behind it.
-	Ball           string   `json:"ball"`
+	// Both are absent on conversations built from matching messages only
+	// (Scope "matches"), where the whole thread is not known.
+	Ball           string   `json:"ball,omitempty"`
 	LastFromMe     bool     `json:"lastFromMe"`
 	LatestReceived string   `json:"latestReceived,omitempty"`
 	LatestSent     string   `json:"latestSent,omitempty"`
 	Folders        []string `json:"folders"`
+	DraftIDs       []string `json:"draftIds,omitempty"`
+	// Scope is "matches" when messageIds, messageCount and latestMessage
+	// cover only the messages a search matched, not the whole conversation.
+	Scope string `json:"scope,omitempty"`
 }
 
 type nylasMessageBrief struct {
@@ -415,6 +484,9 @@ type nylasMessageBrief struct {
 	Subject    string   `json:"subject"`
 	Snippet    string   `json:"snippet"`
 	FromMe     bool     `json:"fromMe"`
+	// IsDraft marks a pending draft as the newest item of a thread: its id
+	// is a draft id, not a message id.
+	IsDraft bool `json:"isDraft,omitempty"`
 }
 
 type nylasMessageFull struct {
@@ -450,7 +522,7 @@ func (n *Nylas) Tools() []ToolDef {
 	tools := []ToolDef{
 		{
 			Tool: mcp.NewTool("list_conversations",
-				mcp.WithDescription("List conversations (Nylas threads) of a folder, newest first, with this account's own replies included. Each conversation carries ball (\"me\": the other side wrote last, a reply is due; \"them\": this account wrote last) and lastFromMe. Returns {conversations, nextPageToken}; pass nextPageToken as page_token to continue."),
+				mcp.WithDescription("List conversations (Nylas threads) of a folder in Nylas' order (newest first; not guaranteed on Gmail), with this account's own replies included. Each conversation carries ball (\"me\": the other side wrote last, a reply is due; \"them\": this account wrote last) and lastFromMe. latestMessage.id is a message id unless latestMessage.isDraft is set. Returns {folder, conversations, nextPageToken}; pass nextPageToken as page_token to continue, an empty token is the last page."),
 				mcp.WithNumber("limit", mcp.Description("Max conversations per page (default: 20, max: 50)")),
 				mcp.WithString("page_token", mcp.Description("nextPageToken of the previous page")),
 				mcp.WithString("folder", mcp.Description("Folder name or id (default: the inbox); see list_mailboxes")),
@@ -467,7 +539,7 @@ func (n *Nylas) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("search_messages",
-				mcp.WithDescription("Search messages; results are grouped by conversation like list_conversations. The query is plain text: on IMAP-backed accounts mux wraps it in IMAP SEARCH (TEXT \"…\") unless native is set; Gmail and Microsoft accounts take their own search syntax as is."),
+				mcp.WithDescription("Search conversations. The query is plain text: on IMAP-backed accounts mux wraps it in IMAP SEARCH (TEXT \"…\") unless native is set; Gmail and Microsoft accounts take their own search syntax as is. Results are conversations as in list_conversations, with ball. Only with live=true (IMAP server search beyond Nylas' cache) the result is the matching messages grouped by thread, marked scope: \"matches\" and without ball."),
 				mcp.WithString("query", mcp.Required(), mcp.Description("Search text (or provider-native query with native=true)")),
 				mcp.WithNumber("limit", mcp.Description("Max conversations to return (default: 25)")),
 				mcp.WithString("folder", mcp.Description("Folder name or id to search in (default: the inbox when live is set, else all folders)")),
@@ -484,7 +556,7 @@ func (n *Nylas) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("archive_conversation",
-				mcp.WithDescription("Archive a conversation: move its inbox messages to the Archive folder (or Trash when the mailbox has none)."),
+				mcp.WithDescription("Archive a conversation: move its inbox messages to the Archive folder (Gmail: remove the INBOX label; other providers without an Archive folder: move to Trash — the result names the folder)."),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
 			),
 			Handler: n.handleArchiveConversation,
@@ -498,7 +570,7 @@ func (n *Nylas) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("move_conversation",
-				mcp.WithDescription("Move the messages of a conversation from one folder to another (default source: the inbox). Use it to file mail or to bring it back from Trash."),
+				mcp.WithDescription("Move the messages of a conversation from one folder to another (default source: the inbox; on Gmail the source label is swapped for the target label, other labels stay). Use it to file mail or to bring it back from Trash."),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
 				mcp.WithString("folder", mcp.Required(), mcp.Description("Target folder name or id")),
 				mcp.WithString("source_folder", mcp.Description("Folder to move from, name or id (default: the inbox)")),
@@ -534,7 +606,7 @@ func (n *Nylas) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("create_forward_draft",
-				mcp.WithDescription("Create a forward draft of a message of a conversation (default: the latest). Saved to Drafts, does NOT send. The message's attachments are forwarded with it unless include_attachments is false. Returns draft_id."),
+				mcp.WithDescription("Create a forward draft of a message of a conversation (default: the latest). Saved to Drafts, does NOT send. The message's attachments (up to 3 MB in total) are downloaded and attached unless include_attachments is false. Returns draft_id."),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
 				mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address(es), comma-separated for multiple")),
 				mcp.WithString("body", mcp.Description("Optional comment to include above the forwarded message")),
@@ -623,12 +695,52 @@ func (n *Nylas) ensureGrant(ctx context.Context) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.grantID = g.ID
+	grantEmail := strings.ToLower(strings.TrimSpace(g.Email))
 	if n.email == "" {
-		n.email = strings.ToLower(strings.TrimSpace(g.Email))
+		n.email = grantEmail
+	} else if grantEmail != "" && n.email != grantEmail {
+		// The configured address wins (it may be an alias Nylas does not
+		// report), but a mismatch is worth a line in the log: it drives
+		// fromMe, the reply recipients and the From header.
+		log.Printf("[nylas] %s: configured address %s differs from the grant's %s", n.name, n.email, grantEmail)
 	}
 	n.provider = g.Provider
-	log.Printf("[nylas] %s: grant %s (%s, %s)", n.name, g.ID, n.email, g.Provider)
+	log.Printf("[nylas] %s: grant %s (%s)", n.name, g.ID, g.Provider)
 	return nil
+}
+
+// multiLabel reports whether the provider keeps a message in several folders
+// at once (Gmail labels). There, folders are a set to edit, not a location to
+// replace.
+func (n *Nylas) multiLabel() bool {
+	_, _, provider := n.grant()
+	return provider == "google"
+}
+
+// newFolders computes the folder list a message gets when it leaves remove
+// and enters add. On single-folder providers that is just the target; on
+// Gmail the other labels stay. An empty add on Gmail removes the label only
+// (archiving: the message stays in All Mail).
+func (n *Nylas) newFolders(m nylasMessage, remove, add string) []string {
+	if !n.multiLabel() {
+		if add == "" {
+			return nil
+		}
+		return []string{add}
+	}
+	out := make([]string, 0, len(m.Folders)+1)
+	seen := map[string]bool{}
+	for _, f := range m.Folders {
+		if f == remove || seen[f] {
+			continue
+		}
+		seen[f] = true
+		out = append(out, f)
+	}
+	if add != "" && !seen[add] {
+		out = append(out, add)
+	}
+	return out
 }
 
 // grant returns the resolved grant id and the account's address.
@@ -736,16 +848,12 @@ func inboxFolder(folders []nylasFolder) *nylasFolder {
 	return nylasFolderByName(folders, "INBOX", "Inbox")
 }
 
-// archiveFolder returns the Archive folder, or Trash when the mailbox has
-// none — the same fallback the imap type makes.
+// archiveFolder returns the Archive folder when the mailbox has one.
 func archiveFolder(folders []nylasFolder) *nylasFolder {
 	if f := nylasFolderByAttribute(folders, `\Archive`); f != nil {
 		return f
 	}
-	if f := nylasFolderByName(folders, "Archive", "Archives", "Archiv", "All Mail", "[Gmail]/All Mail"); f != nil {
-		return f
-	}
-	return trashFolder(folders)
+	return nylasFolderByName(folders, "Archive", "Archives", "Archiv")
 }
 
 // trashFolder returns the Trash folder.
@@ -869,12 +977,13 @@ func (n *Nylas) messageFull(m nylasMessage, folders []nylasFolder) nylasMessageF
 // outgoing message separately. When both fall on the same second, the sender
 // of the latest message decides.
 func (n *Nylas) conversationFromThread(t nylasThread, folders []nylasFolder) nylasConversation {
+	latestIsDraft := t.LatestDraftOrMessage != nil && t.LatestDraftOrMessage.Object == "draft"
 	lastFromMe := false
 	switch {
 	case t.LatestMessageSentDate > 0 && t.LatestMessageReceivedDate > 0:
 		if t.LatestMessageSentDate != t.LatestMessageReceivedDate {
 			lastFromMe = t.LatestMessageSentDate > t.LatestMessageReceivedDate
-		} else if t.LatestDraftOrMessage != nil && len(t.LatestDraftOrMessage.From) > 0 {
+		} else if !latestIsDraft && t.LatestDraftOrMessage != nil && len(t.LatestDraftOrMessage.From) > 0 {
 			lastFromMe = n.isMe(t.LatestDraftOrMessage.From[0].Email)
 		}
 	case t.LatestMessageSentDate > 0:
@@ -899,6 +1008,7 @@ func (n *Nylas) conversationFromThread(t nylasThread, folders []nylasFolder) nyl
 
 	subject := t.Subject
 	latest := n.messageBrief(t.LatestDraftOrMessage)
+	latest.IsDraft = latestIsDraft
 	if latest.Subject == "" {
 		latest.Subject = subject
 	}
@@ -924,12 +1034,14 @@ func (n *Nylas) conversationFromThread(t nylasThread, folders []nylasFolder) nyl
 		LatestReceived: nylasTime(t.LatestMessageReceivedDate),
 		LatestSent:     nylasTime(t.LatestMessageSentDate),
 		Folders:        folderNames(folders, t.Folders),
+		DraftIDs:       t.DraftIDs,
 	}
 }
 
-// conversationsFromMessages groups messages by thread — the shape search
-// results take, where Nylas returns messages, not threads. The ball position
-// comes from the sender of the newest message in the group.
+// conversationsFromMessages groups messages by thread — the shape a live
+// search takes, where Nylas returns the matching messages, not threads. The
+// groups are marked scope "matches" and carry no ball: without the whole
+// thread, who wrote last is unknown.
 func (n *Nylas) conversationsFromMessages(msgs []nylasMessage, folders []nylasFolder, limit int) []nylasConversation {
 	groups := map[string][]nylasMessage{}
 	var order []string
@@ -996,24 +1108,18 @@ func (n *Nylas) conversationsFromMessages(msgs []nylasMessage, folders []nylasFo
 			participants = append(participants, p)
 		}
 		sort.Strings(participants)
-		brief := n.messageBrief(&latest)
-		ball := "me"
-		if brief.FromMe {
-			ball = "them"
-		}
 		result = append(result, nylasConversation{
 			ConversationID: e.id,
 			Subject:        group[0].Subject,
 			MessageCount:   len(group),
 			MessageIDs:     ids,
 			Participants:   participants,
-			LatestMessage:  brief,
+			LatestMessage:  n.messageBrief(&latest),
 			IsRead:         allRead,
 			IsFlagged:      anyFlagged,
 			HasAttachments: anyAttach,
-			Ball:           ball,
-			LastFromMe:     brief.FromMe,
 			Folders:        folderNames(folders, folderIDs),
+			Scope:          "matches",
 		})
 	}
 	return result
@@ -1022,20 +1128,25 @@ func (n *Nylas) conversationsFromMessages(msgs []nylasMessage, folders []nylasFo
 // --- Body text ---
 
 var (
-	reHTMLComment  = regexp.MustCompile(`(?s)<!--.*?-->`)
-	reHTMLDropElem = regexp.MustCompile(`(?is)<(script|style|head|title)\b[^>]*>.*?</(script|style|head|title)\s*>`)
-	reHTMLParaEnd  = regexp.MustCompile(`(?i)<\s*(/p|/div|/h[1-6]|/blockquote|/pre|/table|/ul|/ol|/section|/article|/header|/footer)\b[^>]*>`)
-	reHTMLLineEnd  = regexp.MustCompile(`(?i)<\s*(br|hr|/li|/tr)\b[^>]*>`)
-	reHTMLAnyTag   = regexp.MustCompile(`<[^>]*>`)
-	reBlankLines   = regexp.MustCompile(`\n[ \t]*\n[ \t\n]*`)
-	reLineSpace    = regexp.MustCompile(`[ \t\x{00a0}]+`)
+	// reHTMLStructural decides whether a body is HTML: a known tag followed by
+	// whitespace, a slash or the closing bracket. A bare "<word" is not enough
+	// — plain-text mail carries "<https://…>" and "Bob <bob@example.net>".
+	reHTMLStructural = regexp.MustCompile(`(?i)<(!doctype|html|head|body|div|p|br|table|tr|td|th|span|a|font|img|ul|ol|li|h[1-6]|blockquote|pre|style|meta|center)(\s|/?>)`)
+	reHTMLLink       = regexp.MustCompile(`(?is)<a\b[^>]*?href\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a\s*>`)
+	reHTMLComment    = regexp.MustCompile(`(?s)<!--.*?-->`)
+	reHTMLDropElem   = regexp.MustCompile(`(?is)<(script|style|head|title)\b[^>]*>.*?</(script|style|head|title)\s*>`)
+	reHTMLParaEnd    = regexp.MustCompile(`(?i)<\s*/?(p|div|h[1-6]|blockquote|pre|table|ul|ol|section|article|header|footer)\b[^>]*>`)
+	reHTMLLineEnd    = regexp.MustCompile(`(?i)<\s*(br|hr|/li|/tr)\b[^>]*>`)
+	reHTMLAnyTag     = regexp.MustCompile(`<[^>]*>`)
+	reBlankLines     = regexp.MustCompile(`\n[ \t]*\n[ \t\n]*`)
+	reLineSpace      = regexp.MustCompile(`[ \t\x{00a0}]+`)
 )
 
 // nylasBodyText turns a message body into plain text: Nylas hands most bodies
 // over as HTML (the provider's rendering), plain-text mail as is.
 func nylasBodyText(body string) string {
 	s := body
-	if reHTMLTag.MatchString(s) {
+	if reHTMLStructural.MatchString(s) {
 		s = htmlToText(s)
 	}
 	s = strings.ReplaceAll(s, "\r\n", "\n")
@@ -1047,13 +1158,28 @@ func nylasBodyText(body string) string {
 }
 
 // htmlToText is a reading conversion, not a renderer: scripts, styles and
-// the head go, paragraph ends become blank lines, line breaks and list or
-// table rows newlines, the remaining tags are stripped and entities decoded.
+// the head go, block elements (paragraphs, divs, lists, tables) are set off
+// by blank lines, line breaks and list or table rows become newlines, the
+// remaining tags are stripped and entities decoded.
 // Good enough for an agent to read a mail; layout tables and images are not
 // reconstructed.
 func htmlToText(s string) string {
 	s = reHTMLComment.ReplaceAllString(s, "")
 	s = reHTMLDropElem.ReplaceAllString(s, "")
+	// Links keep their target: "text (url)", or just the url when the text
+	// is the url already.
+	s = reHTMLLink.ReplaceAllStringFunc(s, func(a string) string {
+		m := reHTMLLink.FindStringSubmatch(a)
+		if len(m) < 3 {
+			return a
+		}
+		href := html.UnescapeString(strings.TrimSpace(m[1]))
+		text := strings.TrimSpace(html.UnescapeString(reHTMLAnyTag.ReplaceAllString(m[2], "")))
+		if text == "" || text == href || strings.HasPrefix(href, "mailto:") && strings.EqualFold(strings.TrimPrefix(href, "mailto:"), text) {
+			return href
+		}
+		return text + " (" + href + ")"
+	})
 	s = reHTMLParaEnd.ReplaceAllString(s, "\n\n")
 	s = reHTMLLineEnd.ReplaceAllString(s, "\n")
 	s = reHTMLAnyTag.ReplaceAllString(s, "")
@@ -1097,6 +1223,21 @@ func (n *Nylas) threadMessages(ctx context.Context, threadID, folderID string) (
 	return all, nil
 }
 
+// limitArg reads a positive whole-number argument, falling back to def and
+// capped at max (0: no cap). Fractions and out-of-range numbers fall back
+// rather than being truncated to something else.
+func limitArg(req mcp.CallToolRequest, key string, def, max int) int {
+	v, ok := req.GetArguments()[key].(float64)
+	if !ok || v != math.Trunc(v) || v < 1 || v > math.MaxInt32 {
+		return def
+	}
+	n := int(v)
+	if max > 0 && n > max {
+		return max
+	}
+	return n
+}
+
 // pickNylasMessage returns the index of the message with the given id in a
 // conversation, the latest when messageID is empty.
 func pickNylasMessage(msgs []nylasMessage, convID, messageID string) (int, error) {
@@ -1117,13 +1258,7 @@ func pickNylasMessage(msgs []nylasMessage, convID, messageID string) (int, error
 // --- Handlers ---
 
 func (n *Nylas) handleListConversations(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	limit := nylasDefaultListLimit
-	if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
-		limit = int(v)
-	}
-	if limit > nylasThreadPage {
-		limit = nylasThreadPage
-	}
+	limit := limitArg(req, "limit", nylasDefaultListLimit, nylasThreadPage)
 	if err := n.ensureGrant(ctx); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1183,7 +1318,7 @@ func (n *Nylas) handleGetConversation(ctx context.Context, req mcp.CallToolReque
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if len(msgs) == 0 {
-		return mcp.NewToolResultError(fmt.Sprintf("conversation %s has no messages — it may be outside Nylas' 90-day window for IMAP accounts", convID)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("conversation %s has no messages — wrong id (a message id is not a conversation id), or outside Nylas' 90-day window for IMAP accounts", convID)), nil
 	}
 	out := make([]nylasMessageFull, 0, len(msgs))
 	for _, m := range msgs {
@@ -1197,11 +1332,15 @@ func (n *Nylas) handleGetConversation(ctx context.Context, req mcp.CallToolReque
 var nylasIMAPProviders = map[string]bool{"imap": true, "icloud": true, "yahoo": true}
 
 // imapSearchText wraps plain text as an IMAP SEARCH criterion on the
-// message text. Quoted strings escape backslash and double quote.
-func imapSearchText(q string) string {
+// message text. Quoted strings escape backslash and double quote and cannot
+// carry line breaks or NUL.
+func imapSearchText(q string) (string, error) {
+	if strings.ContainsAny(q, "\r\n\x00") {
+		return "", fmt.Errorf("query must not contain line breaks")
+	}
 	q = strings.ReplaceAll(q, `\`, `\\`)
 	q = strings.ReplaceAll(q, `"`, `\"`)
-	return `TEXT "` + q + `"`
+	return `TEXT "` + q + `"`, nil
 }
 
 func (n *Nylas) handleSearchMessages(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1209,10 +1348,7 @@ func (n *Nylas) handleSearchMessages(ctx context.Context, req mcp.CallToolReques
 	if strings.TrimSpace(query) == "" {
 		return mcp.NewToolResultError("query is required"), nil
 	}
-	limit := nylasDefaultSearchLimit
-	if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
-		limit = int(v)
-	}
+	limit := limitArg(req, "limit", nylasDefaultSearchLimit, 0)
 	live := req.GetBool("live", false)
 	native := req.GetBool("native", false)
 	if err := n.ensureGrant(ctx); err != nil {
@@ -1226,11 +1362,14 @@ func (n *Nylas) handleSearchMessages(ctx context.Context, req mcp.CallToolReques
 
 	q := url.Values{}
 	if nylasIMAPProviders[provider] && !native {
-		q.Set("search_query_native", imapSearchText(query))
+		wrapped, err := imapSearchText(query)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		q.Set("search_query_native", wrapped)
 	} else {
 		q.Set("search_query_native", query)
 	}
-	q.Set("limit", fmt.Sprint(nylasMessagePage))
 	if ref := req.GetString("folder", ""); ref != "" || live {
 		var folder *nylasFolder
 		if ref != "" {
@@ -1243,12 +1382,36 @@ func (n *Nylas) handleSearchMessages(ctx context.Context, req mcp.CallToolReques
 		}
 		q.Set("in", folder.ID)
 	}
-	if live {
-		if !nylasIMAPProviders[provider] {
-			return mcp.NewToolResultError(fmt.Sprintf("live applies to IMAP-backed accounts; this grant's provider is %s", provider)), nil
+
+	if !live {
+		// Threads carry both sides of each conversation, so the result has
+		// the same shape and the same ball position as list_conversations.
+		page := limit
+		if page > nylasThreadPage {
+			page = nylasThreadPage
 		}
-		q.Set("query_imap", "true")
+		q.Set("limit", fmt.Sprint(page))
+		var threads []nylasThread
+		if _, err := n.callJSON(ctx, "threads", map[string]string{"grant_id": grantID}, q, nil, &threads); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		conversations := make([]nylasConversation, 0, len(threads))
+		for _, t := range threads {
+			if len(conversations) >= limit {
+				break
+			}
+			conversations = append(conversations, n.conversationFromThread(t, folders))
+		}
+		return jsonResult(conversations)
 	}
+
+	// Live: the IMAP server searches, Nylas returns the matching messages
+	// (threads have no query_imap). Grouped by thread, marked as matches.
+	if !nylasIMAPProviders[provider] {
+		return mcp.NewToolResultError(fmt.Sprintf("live applies to IMAP-backed accounts; this grant's provider is %s", provider)), nil
+	}
+	q.Set("query_imap", "true")
+	q.Set("limit", fmt.Sprint(nylasMessagePage))
 	var msgs []nylasMessage
 	if _, err := n.callJSON(ctx, "messages", map[string]string{"grant_id": grantID}, q, nil, &msgs); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
@@ -1288,14 +1451,19 @@ func (n *Nylas) handleListMailboxes(ctx context.Context, _ mcp.CallToolRequest) 
 	return jsonResult(result)
 }
 
-// moveMessages puts every message into the target folder and returns how
-// many moved; the first failure stops the loop and is returned with the count
-// so far, because a half-moved conversation must be reported as such.
-func (n *Nylas) moveMessages(ctx context.Context, msgs []nylasMessage, targetFolderID string) (int, error) {
+// moveMessages takes every message out of the source folder and into the
+// target (see newFolders) and returns how many moved; the first failure stops
+// the loop and is returned with the count so far, because a half-moved
+// conversation must be reported as such.
+func (n *Nylas) moveMessages(ctx context.Context, msgs []nylasMessage, sourceFolderID, targetFolderID string) (int, error) {
 	grantID, _, _ := n.grant()
 	moved := 0
 	for _, m := range msgs {
-		body := map[string]any{"folders": []string{targetFolderID}}
+		folders := n.newFolders(m, sourceFolderID, targetFolderID)
+		if folders == nil {
+			return moved, fmt.Errorf("move message %s: no target folder", m.ID)
+		}
+		body := map[string]any{"folders": folders}
 		if _, err := n.callJSON(ctx, "message.update", map[string]string{"grant_id": grantID, "message_id": m.ID}, nil, body, nil); err != nil {
 			return moved, fmt.Errorf("move message %s: %w", m.ID, err)
 		}
@@ -1320,22 +1488,40 @@ func (n *Nylas) handleArchiveConversation(ctx context.Context, req mcp.CallToolR
 	if inbox == nil {
 		return mcp.NewToolResultError("no inbox folder found"), nil
 	}
+	// Where to: the Archive folder when there is one. Gmail has none — there
+	// archiving means removing the INBOX label, the message stays in All
+	// Mail. Other providers without an Archive folder fall back to Trash,
+	// like the imap type, and the result names the folder.
 	target := archiveFolder(folders)
-	if target == nil {
-		return mcp.NewToolResultError("no Archive or Trash folder found"), nil
+	targetID, targetName := "", ""
+	switch {
+	case target != nil:
+		targetID, targetName = target.ID, target.Name
+	case n.multiLabel():
+		targetName = "" // label removed, nothing added
+	default:
+		trash := trashFolder(folders)
+		if trash == nil {
+			return mcp.NewToolResultError("no Archive or Trash folder found"), nil
+		}
+		targetID, targetName = trash.ID, trash.Name
 	}
 	msgs, err := n.threadMessages(ctx, convID, inbox.ID)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if len(msgs) == 0 {
-		return mcp.NewToolResultError(fmt.Sprintf("no inbox messages found for conversation %s", convID)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("no inbox messages found for conversation %s (wrong id, or already archived)", convID)), nil
 	}
-	moved, err := n.moveMessages(ctx, msgs, target.ID)
+	moved, err := n.moveMessages(ctx, msgs, inbox.ID, targetID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("%v (%d of %d moved to %s)", err, moved, len(msgs), target.Name)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("%v (%d of %d archived)", err, moved, len(msgs))), nil
 	}
-	return jsonResult(map[string]any{"archived": moved, "folder": target.Name})
+	result := map[string]any{"archived": moved, "folder": targetName, "removedFrom": inbox.Name}
+	if targetID == "" {
+		result["note"] = "label removed; the messages stay in All Mail"
+	}
+	return jsonResult(result)
 }
 
 func (n *Nylas) handleDeleteConversation(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1359,7 +1545,7 @@ func (n *Nylas) handleDeleteConversation(ctx context.Context, req mcp.CallToolRe
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if len(msgs) == 0 {
-		return mcp.NewToolResultError(fmt.Sprintf("no inbox messages found for conversation %s", convID)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("no inbox messages found for conversation %s (wrong id, or already removed)", convID)), nil
 	}
 	grantID, _, _ := n.grant()
 	deleted := 0
@@ -1399,10 +1585,21 @@ func (n *Nylas) handleMoveConversation(ctx context.Context, req mcp.CallToolRequ
 		return mcp.NewToolResultError("no inbox folder found"), nil
 	}
 	dest := resolveFolder(folders, target)
+	if dest == nil && !req.GetBool("create", false) {
+		return mcp.NewToolResultError(fmt.Sprintf("folder %q not found — pass create=true to create it, or see list_mailboxes", target)), nil
+	}
+	if dest != nil && dest.ID == source.ID {
+		return mcp.NewToolResultError(fmt.Sprintf("source and target are both %s", dest.Name)), nil
+	}
+	msgs, err := n.threadMessages(ctx, convID, source.ID)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if len(msgs) == 0 {
+		return mcp.NewToolResultError(fmt.Sprintf("no messages of conversation %s in %s (wrong id, or not in that folder)", convID, source.Name)), nil
+	}
 	if dest == nil {
-		if !req.GetBool("create", false) {
-			return mcp.NewToolResultError(fmt.Sprintf("folder %q not found — pass create=true to create it, or see list_mailboxes", target)), nil
-		}
+		// Created only now that there is something to move into it.
 		grantID, _, _ := n.grant()
 		var created nylasFolder
 		if _, err := n.callJSON(ctx, "folders.create", map[string]string{"grant_id": grantID}, nil, map[string]any{"name": strings.TrimSpace(target)}, &created); err != nil {
@@ -1413,17 +1610,7 @@ func (n *Nylas) handleMoveConversation(ctx context.Context, req mcp.CallToolRequ
 		n.mu.Unlock()
 		dest = &created
 	}
-	if dest.ID == source.ID {
-		return mcp.NewToolResultError(fmt.Sprintf("conversation is already in %s", dest.Name)), nil
-	}
-	msgs, err := n.threadMessages(ctx, convID, source.ID)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	if len(msgs) == 0 {
-		return mcp.NewToolResultError(fmt.Sprintf("no messages of conversation %s in %s", convID, source.Name)), nil
-	}
-	moved, err := n.moveMessages(ctx, msgs, dest.ID)
+	moved, err := n.moveMessages(ctx, msgs, source.ID, dest.ID)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("%v (%d of %d moved to %s)", err, moved, len(msgs), dest.Name)), nil
 	}
