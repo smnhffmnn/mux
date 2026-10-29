@@ -209,4 +209,8 @@ type SaveConnectionRequest struct {
 
 	// supabase connection type.
 	ProjectRef string `json:"projectRef,omitempty"`
+
+	// nylas connection type. FromName and AllowSend above are shared with imap.
+	Region  string `json:"region,omitempty"`
+	GrantID string `json:"grantId,omitempty"`
 }

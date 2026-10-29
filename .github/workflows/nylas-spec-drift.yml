@@ -1,0 +1,70 @@
+name: Nylas API drift
+
+# The nylas connection type is a hand-written adapter over the Nylas REST API
+# v3. Its endpoints, parameters and the fields it decodes are listed in a
+# registry (internal/tools/nylas.go) and checked against Nylas' published
+# OpenAPI document by the spec tests. CI runs them against the vendored
+# snapshot; this workflow runs them against the live document every week, so
+# an upstream rename or removal fails here before it fails a user, and new API
+# surface shows up in the report as "not built yet".
+#
+# The second job exercises the type against a real test grant — read, draft,
+# delete the draft — when the repository secrets NYLAS_LIVE_KEY and
+# NYLAS_LIVE_GRANT are set (an IAM key bound to that grant, with an expiry).
+# Without them the job is skipped, not failed.
+
+on:
+  schedule:
+    - cron: "37 6 * * 1" # Mondays 06:37 UTC
+  workflow_dispatch:
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Fetch the live OpenAPI document
+        id: fetch
+        run: curl -fsSL --max-time 120 https://developer.nylas.com/openapi.json -o /tmp/nylas-openapi.json
+
+      - name: Check the endpoints, parameters and fields mux uses against the live document
+        run: NYLAS_OPENAPI=/tmp/nylas-openapi.json go test -tags notray ./internal/tools -run 'TestNylas_Spec' -count=1 -v
+
+      - name: Report what changed since the vendored snapshot
+        if: steps.fetch.outcome == 'success'
+        run: scripts/nylas-openapi-report.sh /tmp/nylas-openapi.json internal/tools/testdata/nylas-openapi.json
+
+      - uses: actions/upload-artifact@v4
+        if: steps.fetch.outcome == 'success'
+        with:
+          name: nylas-openapi-live
+          path: /tmp/nylas-openapi.json
+          retention-days: 30
+
+  live:
+    runs-on: ubuntu-latest
+    env:
+      NYLAS_LIVE_KEY: ${{ secrets.NYLAS_LIVE_KEY }}
+      NYLAS_LIVE_GRANT: ${{ secrets.NYLAS_LIVE_GRANT }}
+      NYLAS_LIVE_REGION: ${{ vars.NYLAS_LIVE_REGION }}
+    steps:
+      - uses: actions/checkout@v5
+        if: env.NYLAS_LIVE_KEY != ''
+
+      - uses: actions/setup-go@v6
+        if: env.NYLAS_LIVE_KEY != ''
+        with:
+          go-version-file: go.mod
+
+      - name: Exercise the type against the test grant (read, draft, delete the draft)
+        if: env.NYLAS_LIVE_KEY != ''
+        run: go test -tags 'notray live' ./internal/tools -run 'TestNylasLive' -count=1 -v -timeout 10m
+
+      - name: Skipped
+        if: env.NYLAS_LIVE_KEY == ''
+        run: echo "NYLAS_LIVE_KEY is not set — live contract test skipped"

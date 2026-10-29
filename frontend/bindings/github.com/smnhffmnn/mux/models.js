@@ -819,6 +819,20 @@ export class SaveConnectionRequest {
              */
             this["projectRef"] = undefined;
         }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["region"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["grantId"] = undefined;
+        }
 
         Object.assign(this, $$source);
     }

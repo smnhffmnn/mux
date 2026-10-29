@@ -201,6 +201,9 @@ export interface SaveConnectionRequest {
   smtpSavesSent?: boolean
   // supabase
   projectRef?: string
+  // nylas (fromName and allowSend are shared with imap)
+  region?: string
+  grantId?: string
 }
 
 // API functions
