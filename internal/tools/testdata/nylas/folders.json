@@ -1,0 +1,8 @@
+{"request_id":"req-folders","data":[
+{"id":"v0:grant-1:INBOX","grant_id":"grant-1","name":"INBOX","object":"folder","attributes":["\\HasChildren","\\Inbox"],"total_count":65,"unread_count":27,"system_folder":true},
+{"id":"v0:grant-1:INBOX.Sent","grant_id":"grant-1","name":"INBOX.Sent","object":"folder","attributes":["\\HasNoChildren","\\Sent"],"total_count":8,"unread_count":0,"system_folder":true},
+{"id":"v0:grant-1:INBOX.Drafts","grant_id":"grant-1","name":"INBOX.Drafts","object":"folder","attributes":["\\HasNoChildren","\\Drafts"],"total_count":1,"unread_count":0,"system_folder":true},
+{"id":"v0:grant-1:INBOX.Trash","grant_id":"grant-1","name":"INBOX.Trash","object":"folder","attributes":["\\HasNoChildren","\\Trash"],"total_count":348,"unread_count":194,"system_folder":true},
+{"id":"v0:grant-1:INBOX.Archive","grant_id":"grant-1","name":"INBOX.Archive","object":"folder","attributes":["\\HasNoChildren"],"total_count":0,"unread_count":0,"system_folder":false},
+{"id":"v0:grant-1:INBOX.Later","grant_id":"grant-1","name":"INBOX.Later","object":"folder","attributes":["\\HasNoChildren"],"total_count":0,"unread_count":0,"system_folder":false}
+]}

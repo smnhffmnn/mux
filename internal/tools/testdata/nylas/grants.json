@@ -1,0 +1,1 @@
+{"request_id":"req-grants","data":[{"id":"grant-old","grant_status":"invalid","provider":"imap","email":"jane@example.com","created_at":1790000000,"updated_at":1790000000},{"id":"grant-1","grant_status":"valid","provider":"imap","email":"jane@example.com","created_at":1793184000,"updated_at":1793184000}]}

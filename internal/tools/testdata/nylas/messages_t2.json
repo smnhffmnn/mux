@@ -1,0 +1,4 @@
+{"request_id":"req-messages-t2","data":[
+{"id":"m-t2-a","object":"message","grant_id":"grant-1","thread_id":"t2","subject":"Project update — interim status","snippet":"Hi Jane","body":"Hi Jane, here is the current status.","date":1792998000,"unread":false,"starred":false,"folders":["v0:grant-1:INBOX"],"from":[{"email":"dana@example.org","name":"Dana Example"}],"to":[{"email":"jane@example.com","name":"Jane"}],"cc":[],"bcc":[],"reply_to":[],"attachments":[]},
+{"id":"m-t2-b","object":"message","grant_id":"grant-1","thread_id":"t2","subject":"Re: Project update — interim status","snippet":"Thanks, that works","body":"Thanks, that works.","date":1793003400,"unread":false,"starred":true,"folders":["v0:grant-1:INBOX.Sent"],"from":[{"email":"jane@example.com","name":"Jane"}],"to":[{"email":"dana@example.org","name":"Dana Example"}],"cc":[],"bcc":[],"reply_to":[],"attachments":[]}
+]}

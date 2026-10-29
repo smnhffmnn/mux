@@ -14,10 +14,28 @@ const (
 	ImplicitTLSSMTPPort = 465
 )
 
-// IMAPSendFields are the config keys that only the imap type reads. Set on
+// IMAPOnlyFields are the config keys that only the imap type reads. Set on
 // another type they would be stored and never used, which hides a typo in the
 // type.
-var IMAPSendFields = []string{"smtp_host", "smtp_port", "allow_send", "smtp_saves_sent", "from_name"}
+var IMAPOnlyFields = []string{"smtp_host", "smtp_port", "smtp_saves_sent"}
+
+// MailSendFields are the config keys the mail types that can send share:
+// imap (over SMTP) and nylas (over the Nylas API).
+var MailSendFields = []string{"allow_send", "from_name"}
+
+// MailSendTypes are the connection types that read MailSendFields.
+var MailSendTypes = []string{TypeIMAP, TypeNylas}
+
+// ReadsMailSendFields reports whether a connection type reads allow_send
+// and from_name.
+func ReadsMailSendFields(typ string) bool {
+	for _, t := range MailSendTypes {
+		if t == typ {
+			return true
+		}
+	}
+	return false
+}
 
 // ValidateIMAPSending checks the sending fields of an imap connection.
 // AllowSend is the switch and SMTPHost its precondition: sending enabled
@@ -48,7 +66,15 @@ func isMailAddress(s string) bool {
 	return err == nil && a.Name == "" && a.Address == strings.TrimSpace(s) && strings.Contains(a.Address, "@")
 }
 
-// SendEnabled reports whether an imap connection registers its send tools.
+// SendEnabled reports whether a mail connection registers its send tools.
+// For imap, allow_send needs its precondition smtp_host; for nylas the API
+// sends, so allow_send alone decides.
 func (c *Connection) SendEnabled() bool {
-	return c.Type == TypeIMAP && c.AllowSend && c.SMTPHost != ""
+	switch c.Type {
+	case TypeIMAP:
+		return c.AllowSend && c.SMTPHost != ""
+	case TypeNylas:
+		return c.AllowSend
+	}
+	return false
 }

@@ -153,9 +153,11 @@ All fields use **camelCase** JSON keys.
 | `passphrase` | string | no | ssh: passphrase of an encrypted `privateKey`. If omitted, mux checks the secret store for `{name}-private-key-passphrase`. |
 | `smtpHost` | string | no | imap: SMTP submission server for sending; signs in with `user` and `password` |
 | `smtpPort` | integer | no | imap: SMTP port (default 587 with STARTTLS; 465 is implicit TLS) |
-| `allowSend` | boolean | no | imap: register the send tools (default: false). Requires `smtpHost` and a `user` that is an email address — `smtpHost` alone does not enable sending. |
+| `allowSend` | boolean | no | imap, nylas: register the send tools (default: false). imap requires `smtpHost` and a `user` that is an email address — `smtpHost` alone does not enable sending; nylas sends through the API. |
 | `smtpSavesSent` | boolean | no | imap: the provider files mail submitted over SMTP in Sent itself, so mux stores no copy (default: false) |
-| `fromName` | string | no | imap: display name in the From header of drafts and sent mail |
+| `fromName` | string | no | imap, nylas: display name in the From header of drafts and sent mail |
+| `region` | string | no | nylas: data-residency region of the Nylas application, `"us"` (default) or `"eu"` |
+| `grantId` | string | no | nylas: id of the connected mailbox (grant). Alternatively set `user` to the mailbox address and mux looks the grant up. The API key is `token` or the secret `{name}-token`. |
 
 ### Tunnel Object
 

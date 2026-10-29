@@ -163,6 +163,18 @@ read_only = true
 # smtp_saves_sent = false                       # true when the provider files SMTP mail in Sent itself (Gmail)
 # Password stored as secret (key: "mail-password")
 
+# Nylas: a mailbox behind the Nylas API (Gmail, Microsoft 365, IMAP — one type).
+# Conversations are Nylas threads with the account's own replies, each with a ball position.
+# [[connections]]
+# name = "mailbox"
+# type = "nylas"
+# region = "eu"                                 # us (default) | eu — the region of the Nylas application
+# grant_id = "00000000-0000-0000-0000-000000000000"  # the connected mailbox; or set user to its address and mux looks it up
+# user = "jane@example.com"                     # optional: mailbox address (own address for replies; read from the grant otherwise)
+# from_name = "Jane Doe"                        # optional: display name in From
+# allow_send = true                             # registers send_draft, reply_send, forward_send (Nylas sends; no SMTP needed)
+# API key stored as secret (key: "mailbox-token") — an IAM key bound to the grant, with an expiry
+
 # --- Tunnels ---
 # Connections can reference tunnels by name to route traffic through WireGuard or SSH.
 

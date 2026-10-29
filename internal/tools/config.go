@@ -96,7 +96,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("Port (defaults applied per type if omitted; ssh: 22)."),
 			),
 			mcp.WithString("user",
-				mcp.Description("User (for mariadb, postgresql, clickhouse, imap, git, ssh)."),
+				mcp.Description("User (for mariadb, postgresql, clickhouse, imap, git, ssh; nylas: the mailbox address, optional when grant_id is set)."),
 			),
 			mcp.WithString("database",
 				mcp.Description("Database name (for mariadb, postgresql, clickhouse)."),
@@ -150,13 +150,19 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("imap: SMTP port. Default 587 (STARTTLS); 465 is implicit TLS."),
 			),
 			mcp.WithBoolean("allow_send",
-				mcp.Description("imap: register the send tools (send_draft, reply_send, forward_send). Requires smtp_host and a user that is an email address. Default false — a configured smtp_host alone does not enable sending."),
+				mcp.Description("imap, nylas: register the send tools (send_draft, reply_send, forward_send). imap requires smtp_host and a user that is an email address — a configured smtp_host alone does not enable sending. Default false."),
 			),
 			mcp.WithBoolean("smtp_saves_sent",
 				mcp.Description("imap: the provider files mail submitted over SMTP in the Sent folder itself (Gmail does), so mux skips its own copy. Default false."),
 			),
 			mcp.WithString("from_name",
-				mcp.Description("imap: display name in the From header of drafts and sent mail (e.g. 'Jane Doe')."),
+				mcp.Description("imap, nylas: display name in the From header of drafts and sent mail (e.g. 'Jane Doe')."),
+			),
+			mcp.WithString("region",
+				mcp.Description("nylas: data-residency region of the Nylas application, 'us' (default) or 'eu'."),
+			),
+			mcp.WithString("grant_id",
+				mcp.Description("nylas: id of the connected mailbox (grant). Alternatively set user to the mailbox address and mux looks the grant up."),
 			),
 		),
 		Handler: ct.handleConnectionAdd,
@@ -373,6 +379,18 @@ func (ct *ConfigTools) handleConnectionList(_ context.Context, _ mcp.CallToolReq
 				entry["from_name"] = c.FromName
 			}
 		}
+		if c.Type == config.TypeNylas {
+			entry["region"] = c.Region
+			if c.GrantID != "" {
+				entry["grant_id"] = c.GrantID
+			}
+			if c.AllowSend {
+				entry["allow_send"] = true
+			}
+			if c.FromName != "" {
+				entry["from_name"] = c.FromName
+			}
+		}
 		entry["secrets_set"] = secrets
 		conns = append(conns, entry)
 	}
@@ -552,14 +570,29 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 		}
 	}
 
-	// imap-only fields: on another type their mere presence is an error (a
+	// Mail fields: on another type their mere presence is an error (a
 	// boolean switch has no empty value to ignore), stricter than the ssh
-	// check above.
+	// check above. smtp_* belong to imap alone, allow_send and from_name to
+	// the types that send (imap, nylas), region and grant_id to nylas.
 	args := req.GetArguments()
 	if typ != config.TypeIMAP {
-		for _, key := range config.IMAPSendFields {
+		for _, key := range config.IMAPOnlyFields {
 			if _, ok := args[key]; ok {
 				return mcp.NewToolResultError(fmt.Sprintf("%s applies to type %q only, not %q", key, config.TypeIMAP, typ)), nil
+			}
+		}
+	}
+	if !config.ReadsMailSendFields(typ) {
+		for _, key := range config.MailSendFields {
+			if _, ok := args[key]; ok {
+				return mcp.NewToolResultError(fmt.Sprintf("%s applies to type %q or %q only, not %q", key, config.TypeIMAP, config.TypeNylas, typ)), nil
+			}
+		}
+	}
+	if typ != config.TypeNylas {
+		for _, key := range config.NylasFields {
+			if _, ok := args[key]; ok {
+				return mcp.NewToolResultError(fmt.Sprintf("%s applies to type %q only, not %q", key, config.TypeNylas, typ)), nil
 			}
 		}
 	}
@@ -579,6 +612,15 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 		conn.FromName = v
 	}
 	if err := config.ValidateIMAPSending(conn); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if v := strings.ToLower(strings.TrimSpace(req.GetString("region", ""))); v != "" {
+		conn.Region = v
+	}
+	if v := strings.TrimSpace(req.GetString("grant_id", "")); v != "" {
+		conn.GrantID = v
+	}
+	if err := config.ValidateNylas(conn); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 

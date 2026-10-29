@@ -187,6 +187,16 @@ type Connection struct {
 	SMTPSavesSent bool   `toml:"smtp_saves_sent,omitempty" json:"smtpSavesSent,omitempty"`
 	FromName      string `toml:"from_name,omitempty" json:"fromName,omitempty"`
 
+	// Nylas connection type (TypeNylas): a mailbox behind the Nylas API.
+	// Region selects the API host ("us", the default, or "eu" — the region
+	// of the Nylas application that owns the grant). GrantID names the
+	// connected mailbox; when it is empty, User must carry the mailbox
+	// address and mux looks the grant up by it. User is also the account's
+	// own address for the reply logic; left empty, it is read from the grant.
+	// AllowSend and FromName are shared with the imap type.
+	Region  string `toml:"region,omitempty" json:"region,omitempty"`
+	GrantID string `toml:"grant_id,omitempty" json:"grantId,omitempty"`
+
 	// SSH connection type (TypeSSH). Auth selects the key source: "key"
 	// (default — the secret {name}-private-key or key_file) or "agent" (the
 	// user's ssh-agent, no key in mux). HostKey pins the server's public key;
@@ -227,6 +237,10 @@ func (c *Connection) Enabled() bool {
 		return c.Host != "" && c.Database != ""
 	case c.Type == TypeIMAP:
 		return c.Host != "" && c.User != "" && c.Password != ""
+	case c.Type == TypeNylas:
+		// The grant is addressed by id or, failing that, by the mailbox
+		// address mux resolves on first use.
+		return c.Token != "" && (c.GrantID != "" || c.User != "")
 	case c.Type == TypeGit:
 		// Token is fetched from vault at request time, not at startup.
 		// Only require host and user for the connection to be considered enabled.
@@ -874,6 +888,10 @@ func ApplyConnectionDefaults(c *Connection) {
 	case TypeMeilisearch:
 		if c.Port == 0 {
 			c.Port = 7700
+		}
+	case TypeNylas:
+		if c.Region == "" {
+			c.Region = NylasRegionUS
 		}
 	case TypeSSH:
 		if c.Port == 0 {

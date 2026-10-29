@@ -153,6 +153,15 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		if err == nil {
 			toolDefs = im.Tools()
 		}
+	case config.TypeNylas:
+		// Same rule as imap: the send tools depend on the configuration, so
+		// they are removed before every registration.
+		s.DeleteTools(nylasSendToolNames(conn.Name)...)
+		var ny *Nylas
+		ny, err = NewNylas(conn, dialer)
+		if err == nil {
+			toolDefs = ny.Tools()
+		}
 	case config.TypeMeilisearch:
 		var ms *Meilisearch
 		ms, err = NewMeilisearch(conn, dialer)
@@ -252,6 +261,11 @@ func DefaultInstructions(conn config.Connection) string {
 			return DefaultIMAPInstructions + "\n" + IMAPSendInstructions
 		}
 		return DefaultIMAPInstructions
+	case config.TypeNylas:
+		if conn.SendEnabled() {
+			return DefaultNylasInstructions + "\n" + NylasSendInstructions
+		}
+		return DefaultNylasInstructions
 	case config.TypeGoogleWorkspace:
 		return DefaultGoogleWorkspaceInstructions
 	case config.TypeHyperbrowser:

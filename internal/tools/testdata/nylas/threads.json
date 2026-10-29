@@ -1,0 +1,318 @@
+{
+"request_id": "req-threads",
+"next_cursor": "cursor-2",
+"data": [
+{
+"id": "t1",
+"object": "thread",
+"grant_id": "grant-1",
+"subject": "Fwd: Token expires",
+"snippet": "Reply from the other side",
+"unread": false,
+"starred": false,
+"has_attachments": true,
+"has_drafts": false,
+"earliest_message_date": 1793181729,
+"latest_message_received_date": 1793182117,
+"latest_message_sent_date": 1793182026,
+"folders": [
+"v0:grant-1:INBOX",
+"v0:grant-1:INBOX.Sent"
+],
+"message_ids": [
+"m-sent-1",
+"m-recv-1"
+],
+"draft_ids": [],
+"participants": [
+{
+"email": "bob@example.net",
+"name": "Bob Roe"
+},
+{
+"email": "jane@example.com",
+"name": "Jane Doe"
+}
+],
+"latest_draft_or_message": {
+"id": "m-recv-1",
+"object": "message",
+"grant_id": "grant-1",
+"thread_id": "t1",
+"subject": "Re: Fwd: Token expires",
+"snippet": "Reply from the other side",
+"date": 1793182117,
+"unread": false,
+"starred": false,
+"folders": [
+"v0:grant-1:INBOX"
+],
+"from": [
+{
+"email": "bob@example.net",
+"name": "Bob Roe"
+}
+],
+"to": [
+{
+"email": "jane@example.com"
+}
+],
+"cc": [],
+"bcc": [],
+"reply_to": [
+{
+"email": "bob@example.net",
+"name": "Bob Roe"
+}
+],
+"attachments": []
+}
+},
+{
+"id": "t2",
+"object": "thread",
+"grant_id": "grant-1",
+"subject": "Project update — interim status",
+"snippet": "Thanks, that works",
+"unread": false,
+"starred": true,
+"has_attachments": false,
+"has_drafts": false,
+"earliest_message_date": 1792998000,
+"latest_message_received_date": 1792998000,
+"latest_message_sent_date": 1793003400,
+"folders": [
+"v0:grant-1:INBOX",
+"v0:grant-1:INBOX.Sent"
+],
+"message_ids": [
+"m-t2-a",
+"m-t2-b"
+],
+"draft_ids": [],
+"participants": [
+{
+"email": "dana@example.org",
+"name": "Dana Example"
+},
+{
+"email": "jane@example.com",
+"name": "Jane"
+}
+],
+"latest_draft_or_message": {
+"id": "m-t2-b",
+"object": "message",
+"grant_id": "grant-1",
+"thread_id": "t2",
+"subject": "Re: Project update — interim status",
+"snippet": "Thanks, that works",
+"date": 1793003400,
+"unread": false,
+"starred": true,
+"folders": [
+"v0:grant-1:INBOX.Sent"
+],
+"from": [
+{
+"email": "jane@example.com",
+"name": "Jane"
+}
+],
+"to": [
+{
+"email": "dana@example.org",
+"name": "Dana Example"
+}
+],
+"cc": [],
+"bcc": [],
+"reply_to": [],
+"attachments": []
+}
+},
+{
+"id": "t3",
+"object": "thread",
+"grant_id": "grant-1",
+"subject": "Action Required: API key expiring",
+"snippet": "We wanted to remind you",
+"unread": true,
+"starred": false,
+"has_attachments": false,
+"has_drafts": false,
+"earliest_message_date": 1793183526,
+"latest_message_received_date": 1793183526,
+"folders": [
+"v0:grant-1:INBOX"
+],
+"message_ids": [
+"m-t3"
+],
+"draft_ids": [],
+"participants": [
+{
+"email": "reminder@notifications.example.com"
+},
+{
+"email": "jane@example.com",
+"name": "jane"
+}
+],
+"latest_draft_or_message": {
+"id": "m-t3",
+"object": "message",
+"grant_id": "grant-1",
+"thread_id": "t3",
+"subject": "Action Required: API key expiring",
+"snippet": "We wanted to remind you",
+"date": 1793183526,
+"unread": true,
+"starred": false,
+"folders": [
+"v0:grant-1:INBOX"
+],
+"from": [
+{
+"email": "reminder@notifications.example.com"
+}
+],
+"to": [
+{
+"email": "jane@example.com",
+"name": "jane"
+}
+],
+"cc": [],
+"bcc": [],
+"reply_to": [
+{
+"email": "reminder@notifications.example.com"
+}
+],
+"attachments": []
+}
+},
+{
+"id": "t4",
+"object": "thread",
+"grant_id": "grant-1",
+"subject": "Same second",
+"snippet": "tie",
+"unread": false,
+"starred": false,
+"has_attachments": false,
+"has_drafts": false,
+"earliest_message_date": 1793000000,
+"latest_message_received_date": 1793000000,
+"latest_message_sent_date": 1793000000,
+"folders": [
+"v0:grant-1:INBOX"
+],
+"message_ids": [
+"m-t4"
+],
+"draft_ids": [],
+"participants": [
+{
+"email": "jane@example.com"
+},
+{
+"email": "carol@example.net"
+}
+],
+"latest_draft_or_message": {
+"id": "m-t4",
+"object": "message",
+"grant_id": "grant-1",
+"thread_id": "t4",
+"subject": "Same second",
+"snippet": "tie",
+"date": 1793000000,
+"unread": false,
+"starred": false,
+"folders": [
+"v0:grant-1:INBOX"
+],
+"from": [
+{
+"email": "Jane@Example.com",
+"name": "Jane"
+}
+],
+"to": [
+{
+"email": "carol@example.net"
+}
+],
+"cc": [],
+"bcc": [],
+"reply_to": [],
+"attachments": []
+}
+},
+{
+"id": "t5",
+"object": "thread",
+"grant_id": "grant-1",
+"subject": "Quote request",
+"snippet": "my draft",
+"unread": false,
+"starred": false,
+"has_attachments": false,
+"has_drafts": true,
+"earliest_message_date": 1793100000,
+"latest_message_received_date": 1793100000,
+"folders": [
+"v0:grant-1:INBOX",
+"v0:grant-1:INBOX.Drafts"
+],
+"message_ids": [
+"m-t5"
+],
+"draft_ids": [
+"draft-t5"
+],
+"participants": [
+{
+"email": "erin@example.net",
+"name": "Erin"
+},
+{
+"email": "jane@example.com"
+}
+],
+"latest_draft_or_message": {
+"id": "draft-t5",
+"object": "draft",
+"grant_id": "grant-1",
+"thread_id": "t5",
+"subject": "Re: Quote request",
+"snippet": "my draft",
+"date": 1793100900,
+"unread": false,
+"starred": false,
+"folders": [
+"v0:grant-1:INBOX.Drafts"
+],
+"from": [
+{
+"email": "jane@example.com",
+"name": "Jane Doe"
+}
+],
+"to": [
+{
+"email": "erin@example.net",
+"name": "Erin"
+}
+],
+"cc": [],
+"bcc": [],
+"reply_to": [],
+"attachments": []
+}
+}
+]
+}
