@@ -199,6 +199,9 @@ export interface SaveConnectionRequest {
   fromName?: string
   allowSend?: boolean
   smtpSavesSent?: boolean
+  // nylas (fromName and allowSend are shared with imap)
+  region?: string
+  grantId?: string
 }
 
 // API functions

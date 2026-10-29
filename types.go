@@ -206,4 +206,8 @@ type SaveConnectionRequest struct {
 	FromName      string `json:"fromName,omitempty"`
 	AllowSend     bool   `json:"allowSend,omitempty"`
 	SMTPSavesSent bool   `json:"smtpSavesSent,omitempty"`
+
+	// nylas connection type. FromName and AllowSend above are shared with imap.
+	Region  string `json:"region,omitempty"`
+	GrantID string `json:"grantId,omitempty"`
 }

@@ -40,6 +40,7 @@
     from_name: 'fromName',
     allow_send: 'allowSend',
     smtp_saves_sent: 'smtpSavesSent',
+    grant_id: 'grantId',
   }
 
   async function handleSave() {
