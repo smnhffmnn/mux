@@ -670,13 +670,15 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 			next := *conn
 			next.Region = strings.ToLower(strings.TrimSpace(fields.Region))
 			next.GrantID = strings.TrimSpace(fields.GrantID)
+			next.User = strings.TrimSpace(fields.User) // the mailbox address; cleared, it is read from the grant again
 			next.FromName = strings.TrimSpace(fields.FromName)
 			next.AllowSend = fields.AllowSend
 			config.ApplyConnectionDefaults(&next)
 			if err := config.ValidateNylas(next); err != nil {
 				return nil, err
 			}
-			conn.Region, conn.GrantID, conn.FromName, conn.AllowSend = next.Region, next.GrantID, next.FromName, next.AllowSend
+			conn.Region, conn.GrantID, conn.User = next.Region, next.GrantID, next.User
+			conn.FromName, conn.AllowSend = next.FromName, next.AllowSend
 		}
 	}
 

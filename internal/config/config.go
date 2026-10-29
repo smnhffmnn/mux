@@ -239,7 +239,7 @@ func (c *Connection) Enabled() bool {
 		return c.Host != "" && c.User != "" && c.Password != ""
 	case c.Type == TypeNylas:
 		// The grant is addressed by id or, failing that, by the mailbox
-		// address mux resolves at startup.
+		// address mux resolves on first use.
 		return c.Token != "" && (c.GrantID != "" || c.User != "")
 	case c.Type == TypeGit:
 		// Token is fetched from vault at request time, not at startup.

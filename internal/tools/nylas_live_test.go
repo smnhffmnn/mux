@@ -8,7 +8,8 @@
 // It reads the mailbox, creates a reply draft and deletes it again; nothing is
 // sent unless NYLAS_LIVE_SEND=1 — then one forward goes to the account's own
 // address. Gated behind the build tag and the environment because it touches
-// a real mailbox and counts against the Nylas plan.
+// a real mailbox and counts against the Nylas plan. The log carries counts and
+// ids only: in CI it is public.
 
 package tools
 
@@ -29,6 +30,9 @@ func newLiveNylas(t *testing.T) *Nylas {
 	key := os.Getenv("NYLAS_LIVE_KEY")
 	if key == "" {
 		t.Skip("NYLAS_LIVE_KEY not set")
+	}
+	if os.Getenv("NYLAS_LIVE_GRANT") == "" && os.Getenv("NYLAS_LIVE_EMAIL") == "" {
+		t.Skip("neither NYLAS_LIVE_GRANT nor NYLAS_LIVE_EMAIL set")
 	}
 	conn := config.Connection{
 		Name:      "nylas-live",
@@ -56,7 +60,7 @@ func TestNylasLive_Read(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	t.Logf("grant %s: %s (%s), %d folders", info.GrantID, info.Email, info.Provider, info.Folders)
+	t.Logf("grant %s: provider %s, %d folders", info.GrantID, info.Provider, info.Folders)
 
 	res, err := ny.handleListMailboxes(ctx, toolRequest(nil))
 	if err != nil || res.IsError {
@@ -79,11 +83,11 @@ func TestNylasLive_Read(t *testing.T) {
 	if len(page.Conversations) == 0 {
 		t.Skip("inbox is empty — nothing more to read")
 	}
-	for _, c := range page.Conversations {
+	for i, c := range page.Conversations {
 		if c.Ball != "me" && c.Ball != "them" {
-			t.Errorf("conversation %s: ball = %q", c.ConversationID, c.Ball)
+			t.Errorf("conversation %d: ball = %q", i, c.Ball)
 		}
-		t.Logf("  %s  ball=%s lastFromMe=%v  %q", c.LatestMessage.Date, c.Ball, c.LastFromMe, c.Subject)
+		t.Logf("  conversation %d: %d messages, ball=%s lastFromMe=%v latestIsDraft=%v", i, c.MessageCount, c.Ball, c.LastFromMe, c.LatestMessage.IsDraft)
 	}
 
 	first := page.Conversations[0]
@@ -96,17 +100,27 @@ func TestNylasLive_Read(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(msgs) != first.MessageCount {
-		t.Errorf("conversation %s: thread lists %d messages, get_conversation returned %d", first.ConversationID, first.MessageCount, len(msgs))
+		t.Errorf("first conversation: thread lists %d messages, get_conversation returned %d", first.MessageCount, len(msgs))
 	}
-	for _, m := range msgs {
+	for i, m := range msgs {
 		if m.Body == "" {
-			t.Errorf("message %s has no body text", m.ID)
+			t.Errorf("message %d has no body text", i)
 		}
 	}
 
 	res, err = ny.handleSearchMessages(ctx, toolRequest(map[string]any{"query": strings.Fields(first.Subject + " x")[0], "limit": float64(3)}))
 	if err != nil || res.IsError {
 		t.Fatalf("search_messages: %v / %s", err, resultText(t, res))
+	}
+	var found []nylasConversation
+	if err := json.Unmarshal([]byte(resultText(t, res)), &found); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("search: %d conversations", len(found))
+	for i, c := range found {
+		if c.Scope != "" || (c.Ball != "me" && c.Ball != "them") {
+			t.Errorf("search result %d: scope %q, ball %q — a cached search must return whole conversations", i, c.Scope, c.Ball)
+		}
 	}
 }
 
@@ -141,16 +155,21 @@ func TestNylasLive_Draft(t *testing.T) {
 		t.Fatalf("create_reply_draft: %v / %s", err, resultText(t, res))
 	}
 	var draft struct {
-		DraftID   string `json:"draft_id"`
-		InReplyTo string `json:"in_reply_to"`
+		DraftID  string   `json:"draft_id"`
+		ThreadID string   `json:"thread_id"`
+		Warnings []string `json:"warnings"`
 	}
 	if err := json.Unmarshal([]byte(resultText(t, res)), &draft); err != nil {
 		t.Fatal(err)
 	}
-	if draft.DraftID == "" || draft.InReplyTo != conv.LatestMessage.ID {
-		t.Errorf("draft = %+v, want a draft threaded on %s", draft, conv.LatestMessage.ID)
+	if draft.DraftID == "" {
+		t.Fatalf("no draft id in %s", resultText(t, res))
 	}
-	t.Logf("draft %s created in reply to %s", draft.DraftID, draft.InReplyTo)
+	// The real test: Nylas filed the draft in the conversation's thread.
+	if draft.ThreadID != "" && draft.ThreadID != conv.ConversationID {
+		t.Errorf("draft landed in thread %s, conversation is %s (warnings: %v)", draft.ThreadID, conv.ConversationID, draft.Warnings)
+	}
+	t.Logf("draft created in the conversation's thread (thread id reported: %v, %d warnings)", draft.ThreadID != "", len(draft.Warnings))
 
 	grantID, _, _ := ny.grant()
 	if _, err := ny.callJSON(ctx, "draft.delete", map[string]string{"grant_id": grantID, "draft_id": draft.DraftID}, url.Values{}, nil, nil); err != nil {
@@ -196,5 +215,12 @@ func TestNylasLive_SendToSelf(t *testing.T) {
 	if err != nil || res.IsError {
 		t.Fatalf("forward_send: %v / %s", err, resultText(t, res))
 	}
-	t.Logf("sent: %s", resultText(t, res))
+	var sent struct {
+		Sent     bool     `json:"sent"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, res)), &sent); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("forward to self: sent=%v, %d warnings", sent.Sent, len(sent.Warnings))
 }

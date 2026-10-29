@@ -247,6 +247,27 @@ export class Connection {
         }
         if (/** @type {any} */(false)) {
             /**
+             * Nylas connection type (TypeNylas): a mailbox behind the Nylas API.
+             * Region selects the API host ("us", the default, or "eu" — the region
+             * of the Nylas application that owns the grant). GrantID names the
+             * connected mailbox; when it is empty, User must carry the mailbox
+             * address and mux looks the grant up by it. User is also the account's
+             * own address for the reply logic; left empty, it is read from the grant.
+             * AllowSend and FromName are shared with the imap type.
+             * @member
+             * @type {string | undefined}
+             */
+            this["region"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["grantId"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
              * SSH connection type (TypeSSH). Auth selects the key source: "key"
              * (default — the secret {name}-private-key or key_file) or "agent" (the
              * user's ssh-agent, no key in mux). HostKey pins the server's public key;

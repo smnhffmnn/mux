@@ -11,8 +11,11 @@ import (
 )
 
 // The spec tests hold the nylas type against Nylas' own OpenAPI document:
-// every registered endpoint must exist with its method and query parameters,
-// and every field the type decodes must be a property of the schema it reads.
+// every registered endpoint must exist with its method, query parameters and
+// request headers, and every field the type decodes from the component schemas
+// listed in nylasSchemaFields must be a property of that schema. (Request
+// bodies and inline response schemas are not checked here; the live test and
+// the fixtures cover those.)
 // The document is Nylas' published https://developer.nylas.com/openapi.json,
 // vendored (prose and examples stripped) under testdata by
 // scripts/nylas-openapi-snapshot.sh. The drift workflow runs the same tests
@@ -117,9 +120,9 @@ func (s *nylasSpec) resolveParam(p nylasSpecParam) nylasSpecParam {
 	return p
 }
 
-// queryParams returns the documented query parameters of an operation,
-// path-level parameters included.
-func (s *nylasSpec) queryParams(t *testing.T, where string, pathItem map[string]json.RawMessage, rawOp json.RawMessage) map[string]bool {
+// params returns the documented parameters of an operation in the given
+// location ("query" or "header"), path-level parameters included.
+func (s *nylasSpec) params(t *testing.T, where, in string, pathItem map[string]json.RawMessage, rawOp json.RawMessage) map[string]bool {
 	params := map[string]bool{}
 	collect := func(raw json.RawMessage) {
 		var list []nylasSpecParam
@@ -129,8 +132,8 @@ func (s *nylasSpec) queryParams(t *testing.T, where string, pathItem map[string]
 		}
 		for _, p := range list {
 			p = s.resolveParam(p)
-			if p.In == "query" {
-				params[p.Name] = true
+			if p.In == in {
+				params[strings.ToLower(p.Name)] = true
 			}
 		}
 	}
@@ -172,10 +175,16 @@ func TestNylas_SpecEndpoints(t *testing.T) {
 			t.Errorf("%s: method not offered on this path (has %s)", where, pathMethods(pathItem))
 			continue
 		}
-		params := spec.queryParams(t, where, pathItem, rawOp)
+		params := spec.params(t, where, "query", pathItem, rawOp)
 		for _, p := range ep.Params {
-			if !params[p] {
+			if !params[strings.ToLower(p)] {
 				t.Errorf("%s: query parameter %q is not documented for this operation", where, p)
+			}
+		}
+		headers := spec.params(t, where, "header", pathItem, rawOp)
+		for _, h := range ep.Headers {
+			if !headers[strings.ToLower(h)] {
+				t.Errorf("%s: request header %q is not documented for this operation", where, h)
 			}
 		}
 	}

@@ -27,7 +27,6 @@ fi
 # The result is a structural snapshot for the Go tests, not a valid OpenAPI
 # document (required prose such as responses.*.description is gone). Written
 # via a temp file so a failed fetch or filter never leaves a truncated snapshot.
-# shellcheck source=scripts/nylas-openapi-normalize.jq
 jq -S --indent 1 -f "$root/scripts/nylas-openapi-normalize.jq" "$tmp" > "$tmp.out"
 mv "$tmp.out" "$out"
 echo "snapshot: $(jq -r '.info.version' "$out"), $(jq '.paths | length' "$out") paths, $(jq '.components.schemas | length' "$out") schemas → $out"
