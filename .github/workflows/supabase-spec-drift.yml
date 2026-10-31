@@ -1,0 +1,73 @@
+name: Supabase API drift
+
+# The supabase connection type is a hand-written adapter over the Supabase
+# Management API. Its endpoints, parameters and the fields it reads and
+# writes are listed in a registry (internal/tools/supabase.go) and checked
+# against Supabase's published OpenAPI document by the spec tests. CI runs
+# them against the vendored snapshot; this workflow runs them against the
+# live document every week, so an upstream rename or removal fails here
+# before it fails a user, and new API surface shows up in the report as
+# "not built yet".
+#
+# The second job exercises the type against a real project — read only:
+# project, functions, one function's files, secret names, a harmless query,
+# the last hour of logs — when the repository secrets SUPABASE_LIVE_TOKEN
+# (a fine-grained access token scoped to that project) and SUPABASE_LIVE_REF
+# are set. Without them the job is skipped, not failed. The test logs counts
+# and names only — the Actions log of a public repository is public.
+
+on:
+  schedule:
+    - cron: "47 6 * * 1" # Mondays 06:47 UTC
+  workflow_dispatch:
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Fetch the live OpenAPI document
+        id: fetch
+        run: curl -fsSL --max-time 120 https://api.supabase.com/api/v1-json -o /tmp/supabase-openapi.json
+
+      - name: Check the endpoints, parameters and fields mux uses against the live document
+        run: SUPABASE_OPENAPI=/tmp/supabase-openapi.json go test -tags notray ./internal/tools -run 'TestSupabase_Spec' -count=1 -v
+
+      # Also after a failed spec test — that is when the report matters.
+      - name: Report what changed since the vendored snapshot
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
+        run: scripts/supabase-openapi-report.sh /tmp/supabase-openapi.json internal/tools/testdata/supabase-openapi.json
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
+        with:
+          name: supabase-openapi-live
+          path: /tmp/supabase-openapi.json
+          retention-days: 30
+
+  live:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_LIVE_TOKEN: ${{ secrets.SUPABASE_LIVE_TOKEN }}
+      SUPABASE_LIVE_REF: ${{ secrets.SUPABASE_LIVE_REF }}
+    steps:
+      - uses: actions/checkout@v5
+        if: env.SUPABASE_LIVE_TOKEN != '' && env.SUPABASE_LIVE_REF != ''
+
+      - uses: actions/setup-go@v6
+        if: env.SUPABASE_LIVE_TOKEN != '' && env.SUPABASE_LIVE_REF != ''
+        with:
+          go-version-file: go.mod
+
+      - name: Exercise the type against the project (read only)
+        if: env.SUPABASE_LIVE_TOKEN != '' && env.SUPABASE_LIVE_REF != ''
+        run: go test -tags notray,live ./internal/tools -run 'TestSupabaseLive_Read' -count=1 -v -timeout 10m
+
+      - name: Skipped
+        if: env.SUPABASE_LIVE_TOKEN == '' || env.SUPABASE_LIVE_REF == ''
+        run: echo "SUPABASE_LIVE_TOKEN or SUPABASE_LIVE_REF is not set — live contract test skipped"

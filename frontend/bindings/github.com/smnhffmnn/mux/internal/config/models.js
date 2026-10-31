@@ -247,6 +247,17 @@ export class Connection {
         }
         if (/** @type {any} */(false)) {
             /**
+             * Supabase connection type (TypeSupabase): one project behind the
+             * Supabase Management API. ProjectRef is the project's reference (the
+             * 20-letter id in the dashboard URL); URL is the API host and defaults to
+             * https://api.supabase.com. The access token is Token / {name}-token.
+             * @member
+             * @type {string | undefined}
+             */
+            this["projectRef"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
              * SSH connection type (TypeSSH). Auth selects the key source: "key"
              * (default — the secret {name}-private-key or key_file) or "agent" (the
              * user's ssh-agent, no key in mux). HostKey pins the server's public key;

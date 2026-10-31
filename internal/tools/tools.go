@@ -184,6 +184,12 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 			toolDefs = sh.Tools()
 			closer = sh
 		}
+	case config.TypeSupabase:
+		var sb *Supabase
+		sb, err = NewSupabase(conn, dialer)
+		if err == nil {
+			toolDefs = sb.Tools()
+		}
 	case config.TypeGit:
 		// Passive connection type — no MCP tools.
 		// Used by the git credential helper (mux git-credential) to look up
@@ -260,6 +266,8 @@ func DefaultInstructions(conn config.Connection) string {
 		return DefaultYouTrackRESTInstructions
 	case config.TypeSSH:
 		return DefaultSSHInstructions
+	case config.TypeSupabase:
+		return DefaultSupabaseInstructions
 	default:
 		return ""
 	}

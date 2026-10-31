@@ -156,6 +156,7 @@ All fields use **camelCase** JSON keys.
 | `allowSend` | boolean | no | imap: register the send tools (default: false). Requires `smtpHost` and a `user` that is an email address — `smtpHost` alone does not enable sending. |
 | `smtpSavesSent` | boolean | no | imap: the provider files mail submitted over SMTP in Sent itself, so mux stores no copy (default: false) |
 | `fromName` | string | no | imap: display name in the From header of drafts and sent mail |
+| `projectRef` | string | supabase | supabase: the project reference (20 lowercase letters). The access token is `token` or the secret `{name}-token`; `url` defaults to `https://api.supabase.com`. |
 
 ### Tunnel Object
 

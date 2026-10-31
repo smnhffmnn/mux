@@ -206,4 +206,7 @@ type SaveConnectionRequest struct {
 	FromName      string `json:"fromName,omitempty"`
 	AllowSend     bool   `json:"allowSend,omitempty"`
 	SMTPSavesSent bool   `json:"smtpSavesSent,omitempty"`
+
+	// supabase connection type.
+	ProjectRef string `json:"projectRef,omitempty"`
 }

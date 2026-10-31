@@ -264,6 +264,13 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 				summary += fmt.Sprintf(" · sends via %s", conn.SMTPHost)
 			}
 		}
+	case conn.Type == config.TypeSupabase:
+		if conn.ProjectRef != "" {
+			summary = "Supabase " + conn.ProjectRef
+			if conn.ReadOnly {
+				summary += " · read-only"
+			}
+		}
 	default:
 		if conn.Host != "" {
 			summary = fmt.Sprintf("%s:%d/%s", conn.Host, conn.Port, conn.Database)
@@ -334,6 +341,8 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 					fi.Value = checkboxValue(conn.AllowSend)
 				case "smtp_saves_sent":
 					fi.Value = checkboxValue(conn.SMTPSavesSent)
+				case "project_ref":
+					fi.Value = conn.ProjectRef
 				}
 			}
 			if fd.Secret {
@@ -648,6 +657,17 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 			}
 			conn.SMTPHost, conn.SMTPPort, conn.FromName = next.SMTPHost, next.SMTPPort, next.FromName
 			conn.AllowSend, conn.SMTPSavesSent = next.AllowSend, next.SMTPSavesSent
+		}
+		if conn.Type == config.TypeSupabase {
+			// Written as sent: a cleared URL falls back to the default host.
+			next := *conn
+			next.ProjectRef = strings.TrimSpace(fields.ProjectRef)
+			next.URL = strings.TrimSpace(fields.URL)
+			config.ApplyConnectionDefaults(&next)
+			if err := config.ValidateSupabase(next); err != nil {
+				return nil, err
+			}
+			conn.ProjectRef, conn.URL = next.ProjectRef, next.URL
 		}
 	}
 
@@ -996,6 +1016,8 @@ func (a *App) TestConnection(name string) *TestResult {
 	switch conn.Type {
 	case config.TypeSSH:
 		result = a.testSSH(*conn)
+	case config.TypeSupabase:
+		result = a.testSupabase(*conn)
 	case config.TypeMariaDB:
 		result = a.testMariaDB(*conn)
 	case config.TypeClickHouse:
@@ -2180,6 +2202,40 @@ func (a *App) testYouTrackAgile(conn config.Connection) testResponse {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Board %q not found (HTTP 404) — check the board ID", conn.Database)}
 	}
 	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: YouTrack Agile board %s (HTTP %d)", conn.Database, status)}
+}
+
+// testSupabase reads the project the way every tool does — same token, same
+// host, same tunnel routing — so a token without access to the project, a
+// wrong ref or a paused project is reported here.
+func (a *App) testSupabase(conn config.Connection) testResponse {
+	if conn.Token == "" || conn.ProjectRef == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "Not configured (project ref or access token missing)"}
+	}
+	var dialer tools.Dialer
+	if conn.Tunnel != "" {
+		t := a.tm.Get(conn.Tunnel)
+		if t == nil {
+			return tunnelUnavailable(conn)
+		}
+		testLog(conn.Name, "routing through tunnel %q", conn.Tunnel)
+		dialer = t
+	}
+	sb, err := tools.NewSupabase(conn, dialer)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: err.Error()}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	testLog(conn.Name, "GET /v1/projects/%s", conn.ProjectRef)
+	p, err := sb.Verify(ctx)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Supabase check failed: %v", err)}
+	}
+	msg := fmt.Sprintf("Connected: project %s (%s, %s, %s)", p.Name, p.Ref, p.Region, p.Status)
+	if conn.ReadOnly {
+		msg += " — read-only"
+	}
+	return testResponse{Connection: conn.Name, Connected: true, Message: msg}
 }
 
 func (a *App) testYouTrackREST(conn config.Connection) testResponse {

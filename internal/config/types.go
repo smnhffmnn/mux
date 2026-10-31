@@ -165,6 +165,11 @@ var AllTypes = []TypeDef{
 	{Type: TypeHiggsfield, Label: "Higgsfield", Fields: []TypeField{
 		{Key: "url", Label: "MCP URL", Placeholder: "https://mcp.higgsfield.ai/mcp (default)"},
 	}},
+	{Type: TypeSupabase, Label: "Supabase (Management API)", Fields: []TypeField{
+		{Key: "project_ref", Label: "Project Ref", Placeholder: "20 lowercase letters — the project id in the dashboard URL and in supabase/config.toml"},
+		{Key: "token", Label: "Access Token", Placeholder: "sbp_… — a fine-grained token scoped to this project (Dashboard → Account → Access Tokens)", Secret: true},
+		{Key: "url", Label: "API URL", Placeholder: "https://api.supabase.com (default)"},
+	}},
 	{Type: TypeSSH, Label: "SSH (commands & files)", Fields: []TypeField{
 		{Key: "host", Label: "Host", Placeholder: "server.example.com"},
 		{Key: "port", Label: "Port", Placeholder: "22", Small: true},
