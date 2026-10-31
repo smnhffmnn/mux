@@ -99,6 +99,7 @@ func NewSupabase(conn config.Connection, dialer Dialer) (*Supabase, error) {
 			return dialer.DialContext(ctx, network, addr)
 		}
 	}
+	apiHost := strings.ToLower(strings.TrimPrefix(strings.TrimPrefix(baseURL, "https://"), "http://"))
 	return &Supabase{
 		name:         conn.Name,
 		baseURL:      baseURL,
@@ -106,9 +107,24 @@ func NewSupabase(conn config.Connection, dialer Dialer) (*Supabase, error) {
 		projectRef:   strings.TrimSpace(conn.ProjectRef),
 		readOnly:     conn.ReadOnly,
 		instructions: conn.Instructions,
-		client:       &http.Client{Transport: transport, Timeout: sbRequestTimeout},
-		now:          time.Now,
-		sleep:        sbSleep,
+		client: &http.Client{
+			Transport: transport,
+			Timeout:   sbRequestTimeout,
+			// A redirect to another host would replay the request body —
+			// secret values, a function's source — there. The API has no
+			// reason to redirect at all; refuse anything off-host.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if strings.ToLower(req.URL.Host) != apiHost {
+					return fmt.Errorf("refusing redirect to %s", req.URL.Host)
+				}
+				if len(via) >= 3 {
+					return errors.New("too many redirects")
+				}
+				return nil
+			},
+		},
+		now:   time.Now,
+		sleep: sbSleep,
 	}, nil
 }
 
@@ -599,12 +615,13 @@ func (s *Supabase) handleSecretsSet(ctx context.Context, req mcp.CallToolRequest
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	secrets := map[string]string{}
-	var fromFile []string
+	var fromFile, skipped []string
 	if envFile != "" {
-		parsed, err := sbReadEnvFile(envFile)
+		parsed, skip, err := sbReadEnvFile(envFile)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
+		skipped = skip
 		for k, v := range parsed {
 			secrets[k] = v
 			fromFile = append(fromFile, k)
@@ -614,6 +631,15 @@ func (s *Supabase) handleSecretsSet(ctx context.Context, req mcp.CallToolRequest
 		str, ok := v.(string)
 		if !ok {
 			return mcp.NewToolResultError(fmt.Sprintf("secrets.%s must be a string, got %T", k, v)), nil
+		}
+		if _, dup := secrets[k]; dup {
+			// The call wins; the name is no longer "from the file".
+			for i, name := range fromFile {
+				if name == k {
+					fromFile = append(fromFile[:i], fromFile[i+1:]...)
+					break
+				}
+			}
 		}
 		secrets[k] = str
 	}
@@ -642,6 +668,10 @@ func (s *Supabase) handleSecretsSet(ctx context.Context, req mcp.CallToolRequest
 	if len(fromFile) > 0 {
 		sortStrings(fromFile)
 		result["fromEnvFile"] = fromFile
+	}
+	if len(skipped) > 0 {
+		result["skipped"] = skipped
+		result["skippedReason"] = "names starting with SUPABASE_ are reserved by Supabase and not set"
 	}
 	return sbResultJSON(result)
 }
@@ -746,7 +776,7 @@ func (s *Supabase) handleSQLQuery(ctx context.Context, req mcp.CallToolRequest) 
 // shows). function_logs is the console output of Edge Functions,
 // function_edge_logs the requests that reached them.
 var sbLogSources = map[string][]string{
-	"function_logs":      {"severity_text", "level", "event_type", "function_id", "execution_id", "deployment_id", "version"},
+	"function_logs":      {"level", "event_type", "function_id", "execution_id", "deployment_id", "version"},
 	"function_edge_logs": {"response.status_code", "request.method", "request.url", "function_id", "execution_time_ms", "deployment_id", "version"},
 	"edge_logs":          {"identifier", "request.method", "request.path", "response.status_code"},
 	"postgres_logs":      {"identifier", "parsed.error_severity"},
@@ -792,21 +822,34 @@ func (s *Supabase) handleLogs(ctx context.Context, req mcp.CallToolRequest) (*mc
 		return mcp.NewToolResultError(fmt.Sprintf("the window %s – %s is longer than 24 hours, the API's limit — narrow it", start.Format(time.RFC3339), end.Format(time.RFC3339))), nil
 	}
 	limit := sbLogsDefaultRows
-	if v, ok := args["limit"].(float64); ok && v > 0 {
-		limit = int(v)
-		if limit > sbLogsMaxRows {
+	if v, ok := args["limit"]; ok && v != nil {
+		n, ok := v.(float64)
+		if !ok {
+			return mcp.NewToolResultError(fmt.Sprintf("limit must be a number, got %T", v)), nil
+		}
+		switch {
+		case n >= sbLogsMaxRows:
 			limit = sbLogsMaxRows
+		case n >= 1:
+			limit = int(n)
+		default:
+			return mcp.NewToolResultError("limit must be at least 1"), nil
 		}
 	}
 
 	var sql string
-	if raw, _ := stringArg(req, "sql"); strings.TrimSpace(raw) != "" {
+	rawSQL, err := stringArg(req, "sql")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	ownSQL := strings.TrimSpace(rawSQL) != ""
+	if ownSQL {
 		for _, k := range []string{"function", "search"} {
 			if v := strings.TrimSpace(req.GetString(k, "")); v != "" {
 				return mcp.NewToolResultError(fmt.Sprintf("sql replaces the built query — %s cannot be combined with it", k)), nil
 			}
 		}
-		sql = strings.TrimSpace(raw)
+		sql = strings.TrimSpace(rawSQL)
 	} else {
 		where := []string{fmt.Sprintf("%s = '%s'", sbLogsSourceColumn, source)}
 		if slug := strings.TrimSpace(req.GetString("function", "")); slug != "" {
@@ -836,6 +879,9 @@ func (s *Supabase) handleLogs(ctx context.Context, req mcp.CallToolRequest) (*mc
 			where = append(where, fmt.Sprintf("positionCaseInsensitive(event_message, '%s') > 0", sbSQLString(search)))
 		}
 		cols := []string{"timestamp", "event_message"}
+		if source == "function_logs" {
+			cols = append(cols, "severity_text")
+		}
 		for _, a := range attrs {
 			cols = append(cols, fmt.Sprintf("log_attributes['%s'] AS \"%s\"", a, a))
 		}
@@ -866,15 +912,17 @@ func (s *Supabase) handleLogs(ctx context.Context, req mcp.CallToolRequest) (*mc
 	}
 	result := map[string]any{
 		"project":  s.projectRef,
-		"source":   source,
 		"start":    start.UTC().Format(time.RFC3339),
 		"end":      end.UTC().Format(time.RFC3339),
 		"rowCount": len(raw.Result),
 		"rows":     raw.Result,
 		"sql":      sql,
 	}
-	if len(raw.Result) >= limit {
-		result["note"] = fmt.Sprintf("the limit of %d rows is full — narrow the window or raise limit (max %d)", limit, sbLogsMaxRows)
+	if !ownSQL {
+		result["source"] = source
+		if len(raw.Result) >= limit {
+			result["note"] = fmt.Sprintf("the limit of %d rows is full — narrow the window or raise limit (max %d)", limit, sbLogsMaxRows)
+		}
 	}
 	return sbResultJSON(result)
 }

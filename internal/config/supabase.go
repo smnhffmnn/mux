@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"strings"
@@ -44,7 +45,18 @@ func SupabaseBaseURL(raw string) (string, error) {
 	if path != "" {
 		return "", fmt.Errorf("url %q must be the bare API host — the type adds /v1/… itself", raw)
 	}
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		return "", fmt.Errorf("url %q: plain http is allowed for loopback hosts only — the access token would travel in clear text", raw)
+	}
 	return u.Scheme + "://" + u.Host, nil
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ValidateSupabase checks the fields of a supabase connection that are wrong

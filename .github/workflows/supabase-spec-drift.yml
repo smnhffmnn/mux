@@ -14,12 +14,16 @@ name: Supabase API drift
 # the last hour of logs — when the repository secrets SUPABASE_LIVE_TOKEN
 # (a fine-grained access token scoped to that project) and SUPABASE_LIVE_REF
 # are set. Without them the job is skipped, not failed. The test logs counts
-# and names only — the Actions log of a public repository is public.
+# only (names and paths only with SUPABASE_LIVE_VERBOSE=1, which CI never
+# sets) — the Actions log of a public repository is public.
 
 on:
   schedule:
     - cron: "47 6 * * 1" # Mondays 06:47 UTC
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   drift:

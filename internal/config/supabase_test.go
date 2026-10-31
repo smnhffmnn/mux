@@ -21,6 +21,8 @@ func TestSupabase_Validate(t *testing.T) {
 		{"uppercase ref", Connection{Type: TypeSupabase, ProjectRef: "ABCDEFGHIJKLMNOPQRST"}, "not a project reference"},
 		{"url with path", Connection{Type: TypeSupabase, ProjectRef: ref, URL: "https://api.supabase.com/v1"}, "bare API host"},
 		{"url without scheme", Connection{Type: TypeSupabase, ProjectRef: ref, URL: "api.supabase.com"}, "http(s)://host"},
+		{"plain http off loopback", Connection{Type: TypeSupabase, ProjectRef: ref, URL: "http://api.example.com"}, "loopback"},
+		{"plain http on localhost", Connection{Type: TypeSupabase, ProjectRef: ref, URL: "http://localhost:54321"}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

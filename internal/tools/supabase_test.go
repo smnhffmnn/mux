@@ -68,7 +68,7 @@ func newSBFake(t *testing.T) *sbFake {
 			jsonOK(w, 401, `{"message":"Unauthorized"}`)
 			return
 		}
-		jsonOK(w, 200, `{"id":"`+sbTestRef+`","ref":"`+sbTestRef+`","organization_id":"o","organization_slug":"org-x","name":"addgai","region":"eu-central-1","created_at":"2026-01-01T00:00:00Z","status":"ACTIVE_HEALTHY","database":{"host":"db.`+sbTestRef+`.supabase.co","version":"17.4"}}`)
+		jsonOK(w, 200, `{"id":"`+sbTestRef+`","ref":"`+sbTestRef+`","organization_id":"o","organization_slug":"org-x","name":"demo-project","region":"eu-central-1","created_at":"2026-01-01T00:00:00Z","status":"ACTIVE_HEALTHY","database":{"host":"db.`+sbTestRef+`.supabase.co","version":"17.4"}}`)
 	})
 	mux.HandleFunc(base+"/functions", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
@@ -113,6 +113,14 @@ func newSBFake(t *testing.T) *sbFake {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Write([]byte("ESZIP-bytes"))
 	})
+	mux.HandleFunc(base+"/functions/jsonbody", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		jsonOK(w, 200, `{"id":"fid-4","slug":"jsonbody","name":"jsonbody","status":"ACTIVE","version":1,"created_at":1,"updated_at":2}`)
+	})
+	mux.HandleFunc(base+"/functions/jsonbody/body", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		jsonOK(w, 200, `{"unexpected":true}`)
+	})
 	mux.HandleFunc(base+"/functions/missing", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
 		jsonOK(w, 404, `{"message":"Function not found","statusCode":404}`)
@@ -137,7 +145,7 @@ func newSBFake(t *testing.T) *sbFake {
 		record(r)
 		switch r.Method {
 		case http.MethodGet:
-			jsonOK(w, 200, `[{"name":"OPENAI_API_KEY","value":"sk-secret","updated_at":"2026-10-30T10:00:00Z"},{"name":"TWILIO_TOKEN","value":"tw-secret"}]`)
+			jsonOK(w, 200, `[{"name":"OPENAI_API_KEY","value":"sk-secret","updated_at":"2026-10-30T10:00:00Z"},{"name":"MAIL_API_KEY","value":"tw-secret"}]`)
 		case http.MethodPost:
 			jsonOK(w, 201, ``)
 		case http.MethodDelete:
@@ -249,8 +257,8 @@ func TestSupabase_NewAndTools(t *testing.T) {
 	if strings.Join(ro, ",") != strings.Join(want[:6], ",") {
 		t.Errorf("read-only tools = %v", ro)
 	}
-	s := newTestSupabase(t, f, func(c *config.Connection) { c.Instructions = "addgai production" })
-	if d := s.Tools()[0].Tool.Description; !strings.HasSuffix(d, "addgai production") {
+	s := newTestSupabase(t, f, func(c *config.Connection) { c.Instructions = "production project of the app" })
+	if d := s.Tools()[0].Tool.Description; !strings.HasSuffix(d, "production project of the app") {
 		t.Errorf("instructions not appended to project: %q", d)
 	}
 }
@@ -262,7 +270,7 @@ func TestSupabase_ProjectAndList(t *testing.T) {
 	if errText != "" {
 		t.Fatal(errText)
 	}
-	if out["name"] != "addgai" || out["region"] != "eu-central-1" || out["organization"] != "org-x" || out["readOnly"] != false {
+	if out["name"] != "demo-project" || out["region"] != "eu-central-1" || out["organization"] != "org-x" || out["readOnly"] != false {
 		t.Errorf("project = %v", out)
 	}
 	req, _ := f.last("GET", "/v1/projects/"+sbTestRef)
@@ -355,6 +363,12 @@ func TestSupabase_FunctionGet(t *testing.T) {
 	}
 	if b, ok := out["bundle"].(map[string]any); !ok || b["format"] != "eszip" || b["size"] != float64(11) {
 		t.Errorf("bundle = %v", out)
+	}
+	if _, errText := sbCall(t, s, s.handleFunctionGet, map[string]any{"slug": "bundled", "file": "index.ts"}); !strings.Contains(errText, "pre-built bundle") {
+		t.Errorf("file on a bundle: %q", errText)
+	}
+	if _, errText := sbCall(t, s, s.handleFunctionGet, map[string]any{"slug": "jsonbody"}); !strings.Contains(errText, "expected the function's files as multipart") {
+		t.Errorf("json body: %q", errText)
 	}
 	if _, errText := sbCall(t, s, s.handleFunctionGet, map[string]any{"slug": "missing"}); !strings.Contains(errText, "not deployed") {
 		t.Errorf("missing: %q", errText)
@@ -470,6 +484,13 @@ func TestSupabase_Deploy(t *testing.T) {
 	if _, errText := sbCall(t, s, s.handleFunctionDeploy, map[string]any{"path": root, "slug": "hook", "verify_jwt": "yes"}); !strings.Contains(errText, "boolean") {
 		t.Errorf("verify_jwt type: %q", errText)
 	}
+	before := f.count("POST", "/functions/deploy")
+	if _, errText := sbCall(t, s, s.handleFunctionDeploy, map[string]any{"path": root, "slug": "hook", "dry_run": "yes"}); !strings.Contains(errText, "boolean") {
+		t.Errorf("dry_run type: %q", errText)
+	}
+	if f.count("POST", "/functions/deploy") != before {
+		t.Error("a non-boolean dry_run deployed")
+	}
 }
 
 func TestSupabase_DeployNewFunction(t *testing.T) {
@@ -529,12 +550,12 @@ func TestSupabase_Secrets(t *testing.T) {
 	}
 
 	env := filepath.Join(t.TempDir(), ".env")
-	os.WriteFile(env, []byte("FROM_FILE=one\nSHARED=file\n"), 0o600)
+	os.WriteFile(env, []byte("FROM_FILE=one\nSHARED=file\nSUPABASE_ANON_KEY=x\n"), 0o600)
 	out, errText = sbCall(t, s, s.handleSecretsSet, map[string]any{"env_file": env, "secrets": map[string]any{"SHARED": "call", "DIRECT": "two"}})
 	if errText != "" {
 		t.Fatal(errText)
 	}
-	if fmt.Sprint(out["set"]) != "[DIRECT FROM_FILE SHARED]" || fmt.Sprint(out["fromEnvFile"]) != "[FROM_FILE SHARED]" {
+	if fmt.Sprint(out["set"]) != "[DIRECT FROM_FILE SHARED]" || fmt.Sprint(out["fromEnvFile"]) != "[FROM_FILE]" || fmt.Sprint(out["skipped"]) != "[SUPABASE_ANON_KEY]" {
 		t.Errorf("set = %v", out)
 	}
 	req, _ := f.last("POST", "/secrets")
@@ -557,12 +578,12 @@ func TestSupabase_Secrets(t *testing.T) {
 		t.Errorf("non-string: %q", errText)
 	}
 
-	out, errText = sbCall(t, s, s.handleSecretsDelete, map[string]any{"names": []any{"TWILIO_TOKEN"}})
+	out, errText = sbCall(t, s, s.handleSecretsDelete, map[string]any{"names": []any{"MAIL_API_KEY"}})
 	if errText != "" {
 		t.Fatal(errText)
 	}
 	req, _ = f.last("DELETE", "/secrets")
-	if string(req.Body) != `["TWILIO_TOKEN"]` {
+	if string(req.Body) != `["MAIL_API_KEY"]` {
 		t.Errorf("delete body = %s", req.Body)
 	}
 	if _, errText := sbCall(t, s, s.handleSecretsDelete, nil); !strings.Contains(errText, "names is required") {
@@ -610,7 +631,7 @@ func TestSupabase_Logs(t *testing.T) {
 		t.Fatal(errText)
 	}
 	sql := out["sql"].(string)
-	for _, want := range []string{"FROM logs", "source = 'function_logs'", "log_attributes['function_id'] = 'fid-1'", `positionCaseInsensitive(event_message, 'it\'s') > 0`, "ORDER BY timestamp DESC LIMIT 5", `log_attributes['level'] AS "level"`} {
+	for _, want := range []string{"FROM logs", "source = 'function_logs'", "log_attributes['function_id'] = 'fid-1'", `positionCaseInsensitive(event_message, 'it\'s') > 0`, "ORDER BY timestamp DESC LIMIT 5", `log_attributes['level'] AS "level"`, "event_message, severity_text,"} {
 		if !strings.Contains(sql, want) {
 			t.Errorf("sql lacks %q:\n%s", want, sql)
 		}
@@ -654,9 +675,25 @@ func TestSupabase_Logs(t *testing.T) {
 	}
 
 	// Raw SQL passes through; the API's error envelope becomes a tool error.
-	out, _ = sbCall(t, s, s.handleLogs, map[string]any{"sql": "select 1 from logs"})
+	out, _ = sbCall(t, s, s.handleLogs, map[string]any{"sql": "select 1 from logs", "limit": float64(1)})
 	if out["sql"] != "select 1 from logs" {
 		t.Errorf("raw sql = %v", out["sql"])
+	}
+	if _, ok := out["source"]; ok {
+		t.Error("source reported although the query is the caller's")
+	}
+	if _, ok := out["note"]; ok {
+		t.Error("limit note although limit does not apply to the caller's SQL")
+	}
+	if _, errText := sbCall(t, s, s.handleLogs, map[string]any{"limit": "50"}); !strings.Contains(errText, "must be a number") {
+		t.Errorf("string limit: %q", errText)
+	}
+	if _, errText := sbCall(t, s, s.handleLogs, map[string]any{"limit": float64(0.5)}); !strings.Contains(errText, "at least 1") {
+		t.Errorf("tiny limit: %q", errText)
+	}
+	out, _ = sbCall(t, s, s.handleLogs, map[string]any{"limit": float64(1e300)})
+	if !strings.Contains(out["sql"].(string), fmt.Sprintf("LIMIT %d", sbLogsMaxRows)) {
+		t.Errorf("huge limit not capped: %v", out["sql"])
 	}
 	if _, errText := sbCall(t, s, s.handleLogs, map[string]any{"sql": "select 1", "function": "hook"}); !strings.Contains(errText, "cannot be combined") {
 		t.Errorf("sql + function: %q", errText)
@@ -706,5 +743,23 @@ func TestSupabase_Errors(t *testing.T) {
 	}
 	if len(f.requests) != 0 {
 		t.Errorf("%d requests went out", len(f.requests))
+	}
+
+	// A redirect to another host is refused, so a body is never replayed
+	// elsewhere.
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("request followed to the other host: %s", r.URL)
+	}))
+	defer elsewhere.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+	rs, err := NewSupabase(config.Connection{Name: "r", Type: config.TypeSupabase, URL: redirector.URL, Token: "sbp_test", ProjectRef: sbTestRef}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rs.Verify(context.Background()); err == nil || !strings.Contains(err.Error(), "refusing redirect") {
+		t.Errorf("cross-host redirect: %v", err)
 	}
 }

@@ -159,7 +159,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("imap: display name in the From header of drafts and sent mail (e.g. 'Jane Doe')."),
 			),
 			mcp.WithString("project_ref",
-				mcp.Description("supabase: the project's reference (20 lowercase letters, the id in the dashboard URL). The access token is token or the secret {name}-token; url defaults to https://api.supabase.com."),
+				mcp.Description("supabase: the project's reference (20 lowercase letters, the id in the dashboard URL). Store the access token with secret_set as {name}-token; url defaults to https://api.supabase.com."),
 			),
 		),
 		Handler: ct.handleConnectionAdd,
@@ -615,6 +615,9 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 	}
 
 	msg := fmt.Sprintf("connection %q (%s) created", name, typ)
+	if typ == config.TypeSupabase && conn.Token == "" {
+		msg += fmt.Sprintf(". Next: store the access token with secret_set %q; the connection registers once the token is there.", name+"-token")
+	}
 	if typ == config.TypeSSH && conn.Auth != sshclient.AuthAgent && conn.KeyFile == "" {
 		if conn.PrivateKey != "" {
 			msg += fmt.Sprintf(" with the stored key %q", name+"-private-key")

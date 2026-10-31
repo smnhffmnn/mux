@@ -11,8 +11,9 @@
 // a project root and SUPABASE_LIVE_SLUG a function — then that function is
 // deployed from that checkout (the version advances). Gated behind the build
 // tag and the environment because it touches a real project and counts
-// against the API's rate limit. The log carries counts and names only: in CI
-// it is public.
+// against the API's rate limit. The log carries counts only; names, paths
+// and metadata appear with SUPABASE_LIVE_VERBOSE=1 (a local run) — in CI the
+// log is public.
 
 package tools
 
@@ -25,6 +26,14 @@ import (
 
 	"github.com/smnhffmnn/mux/internal/config"
 )
+
+// liveLogf logs details only when the run is local and asked for them.
+func liveLogf(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv("SUPABASE_LIVE_VERBOSE") == "1" {
+		t.Logf(format, args...)
+	}
+}
 
 func newLiveSupabase(t *testing.T) *Supabase {
 	t.Helper()
@@ -49,7 +58,8 @@ func TestSupabaseLive_Read(t *testing.T) {
 	if err != nil {
 		t.Fatalf("project: %v", err)
 	}
-	t.Logf("project %s (%s, %s, %s)", p.Name, p.Ref, p.Region, p.Status)
+	t.Logf("project read: status %s", p.Status)
+	liveLogf(t, "project %s (%s, %s)", p.Name, p.Ref, p.Region)
 
 	res, err := s.handleFunctionsList(ctx, toolRequest(nil))
 	if err != nil || res.IsError {
@@ -64,7 +74,7 @@ func TestSupabaseLive_Read(t *testing.T) {
 	}
 	t.Logf("%d functions", list.Count)
 	for _, f := range list.Functions {
-		t.Logf("  %s v%d %s updated %s", f.Slug, f.Version, f.Status, f.Updated)
+		liveLogf(t, "  %s v%d %s updated %s", f.Slug, f.Version, f.Status, f.Updated)
 	}
 
 	if len(list.Functions) > 0 {
@@ -86,11 +96,12 @@ func TestSupabaseLive_Read(t *testing.T) {
 			t.Fatal(err)
 		}
 		if got.Bundle != nil {
-			t.Logf("%s: pre-built bundle, %v bytes", slug, got.Bundle["size"])
+			t.Logf("one function read back: pre-built bundle, %v bytes", got.Bundle["size"])
 		} else {
-			t.Logf("%s: %d files, metadata %v", slug, got.FileCount, got.Metadata)
+			t.Logf("one function read back: %d files", got.FileCount)
+			liveLogf(t, "%s: metadata %v", slug, got.Metadata)
 			for _, f := range got.Files {
-				t.Logf("  %s (%d bytes)", f.Path, f.Size)
+				liveLogf(t, "  %s (%d bytes)", f.Path, f.Size)
 			}
 		}
 	}
@@ -109,7 +120,8 @@ func TestSupabaseLive_Read(t *testing.T) {
 	if err != nil || res.IsError {
 		t.Fatalf("sql_query: %v / %s", err, resultText(t, res))
 	}
-	t.Logf("sql_query: %s", resultText(t, res))
+	t.Logf("sql_query: ok")
+	liveLogf(t, "sql_query: %s", resultText(t, res))
 
 	res, err = s.handleLogs(ctx, toolRequest(map[string]any{"source": "function_edge_logs", "limit": float64(5)}))
 	if err != nil || res.IsError {
@@ -120,7 +132,8 @@ func TestSupabaseLive_Read(t *testing.T) {
 		SQL      string `json:"sql"`
 	}
 	json.Unmarshal([]byte(resultText(t, res)), &logs)
-	t.Logf("logs: %d rows in the last hour (%s)", logs.RowCount, logs.SQL)
+	t.Logf("logs: %d rows in the last hour", logs.RowCount)
+	liveLogf(t, "logs sql: %s", logs.SQL)
 }
 
 func TestSupabaseLive_Deploy(t *testing.T) {
@@ -137,7 +150,7 @@ func TestSupabaseLive_Deploy(t *testing.T) {
 	if err != nil || res.IsError {
 		t.Fatalf("dry run: %v / %s", err, resultText(t, res))
 	}
-	t.Logf("plan: %s", resultText(t, res))
+	liveLogf(t, "plan: %s", resultText(t, res))
 
 	res, err = s.handleFunctionDeploy(ctx, toolRequest(map[string]any{"path": root, "slug": slug}))
 	if err != nil || res.IsError {
@@ -150,7 +163,7 @@ func TestSupabaseLive_Deploy(t *testing.T) {
 		Warning  string     `json:"warning"`
 	}
 	json.Unmarshal([]byte(resultText(t, res)), &out)
-	t.Logf("deployed %s: version %d → %d %s", slug, out.Before.Version, out.Function.Version, out.Warning)
+	t.Logf("deployed: version %d → %d %s", out.Before.Version, out.Function.Version, out.Warning)
 	if !out.Deployed || out.Function.Version <= out.Before.Version {
 		t.Errorf("version did not advance")
 	}

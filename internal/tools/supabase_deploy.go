@@ -154,8 +154,10 @@ func sbGitRoot(dir string) (string, bool) {
 
 // sbReadFunctionConfig reads supabase/config.toml for one function. A missing
 // file or table yields the defaults. Relative paths are relative to the
-// supabase/ directory, as the CLI resolves them.
-func sbReadFunctionConfig(projectRoot, slug string) (sbFunctionConfig, error) {
+// supabase/ directory, as the CLI resolves them. A [remotes.<name>] block
+// whose project_id is the connection's project overlays the base table, as
+// the CLI's config loader does for the linked project.
+func sbReadFunctionConfig(projectRoot, slug, projectRef string) (sbFunctionConfig, error) {
 	supabaseDir := filepath.Join(projectRoot, "supabase")
 	cfg := sbFunctionConfig{
 		Enabled:    true,
@@ -174,6 +176,32 @@ func sbReadFunctionConfig(projectRoot, slug string) (sbFunctionConfig, error) {
 	}
 	functions, _ := doc["functions"].(map[string]any)
 	table, _ := functions[slug].(map[string]any)
+	if remotes, ok := doc["remotes"].(map[string]any); ok && projectRef != "" {
+		names := make([]string, 0, len(remotes))
+		for name := range remotes {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			remote, _ := remotes[name].(map[string]any)
+			if id, _ := remote["project_id"].(string); id != projectRef {
+				continue
+			}
+			rfns, _ := remote["functions"].(map[string]any)
+			override, _ := rfns[slug].(map[string]any)
+			if override == nil {
+				continue
+			}
+			merged := map[string]any{}
+			for k, v := range table {
+				merged[k] = v
+			}
+			for k, v := range override {
+				merged[k] = v
+			}
+			table = merged
+		}
+	}
 	if table == nil {
 		return cfg, nil
 	}
@@ -265,31 +293,34 @@ func sbIsFile(p string) bool {
 
 // --- Import maps ---
 
-// sbStripJSONComments removes // and /* */ comments and trailing commas,
-// enough for deno.jsonc. Strings are left alone.
+// sbStripJSONComments removes a byte-order mark, // and /* */ comments and
+// trailing commas, enough for deno.jsonc. Strings are left alone.
 func sbStripJSONComments(s string) string {
-	var out strings.Builder
+	s = strings.TrimPrefix(s, "\ufeff")
+	out := make([]byte, 0, len(s))
 	inStr := false
+	pendingComma := -1 // index in out of a comma that may turn out trailing
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
 		case inStr:
-			out.WriteByte(c)
+			out = append(out, c)
 			if c == '\\' && i+1 < len(s) {
 				i++
-				out.WriteByte(s[i])
+				out = append(out, s[i])
 			} else if c == '"' {
 				inStr = false
 			}
 		case c == '"':
 			inStr = true
-			out.WriteByte(c)
+			pendingComma = -1
+			out = append(out, c)
 		case c == '/' && i+1 < len(s) && s[i+1] == '/':
 			for i < len(s) && s[i] != '\n' {
 				i++
 			}
 			if i < len(s) {
-				out.WriteByte('\n')
+				out = append(out, '\n')
 			}
 		case c == '/' && i+1 < len(s) && s[i+1] == '*':
 			i += 2
@@ -297,13 +328,23 @@ func sbStripJSONComments(s string) string {
 				i++
 			}
 			i++
+		case c == ',':
+			pendingComma = len(out)
+			out = append(out, c)
+		case c == '}' || c == ']':
+			if pendingComma >= 0 {
+				out = append(out[:pendingComma], out[pendingComma+1:]...)
+			}
+			pendingComma = -1
+			out = append(out, c)
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			out = append(out, c)
 		default:
-			out.WriteByte(c)
+			pendingComma = -1
+			out = append(out, c)
 		}
 	}
-	// Trailing commas before } or ].
-	re := regexp.MustCompile(`,(\s*[}\]])`)
-	return re.ReplaceAllString(out.String(), "$1")
+	return string(out)
 }
 
 // sbParseImportMap reads an import map (or deno.json) and resolves its
@@ -370,7 +411,7 @@ func sbParseImportMap(file string, data []byte) (*sbImportMap, error) {
 // sbIsRemote reports whether a specifier or target has a URL scheme
 // (https:, npm:, jsr:, node:, …).
 func sbIsRemote(target string) bool {
-	if strings.HasPrefix(target, "/") {
+	if strings.HasPrefix(target, "/") || sbWindowsAbs(target) {
 		return false
 	}
 	u, err := url.Parse(target)
@@ -527,6 +568,10 @@ func (c *sbCollector) add(p string) error {
 	if fi.IsDir() {
 		return fmt.Errorf("file path is a directory: %s", p)
 	}
+	if !fi.Mode().IsRegular() {
+		// A FIFO or device would block the upload with no timeout in play.
+		return fmt.Errorf("%s is not a regular file", p)
+	}
 	rel, err := filepath.Rel(c.workdir, filepath.Clean(p))
 	if err != nil {
 		return err
@@ -538,7 +583,9 @@ func (c *sbCollector) add(p string) error {
 		}
 	}
 	c.seen[real] = true
-	c.plan.Files = append(c.plan.Files, sbDeployFile{Path: filepath.Clean(p), Name: name, Size: fi.Size()})
+	// The real path is what the upload opens later, so a symlink swapped
+	// between plan and send cannot redirect the read.
+	c.plan.Files = append(c.plan.Files, sbDeployFile{Path: real, Name: name, Size: fi.Size()})
 	c.plan.TotalBytes += fi.Size()
 	return nil
 }
@@ -563,7 +610,7 @@ func (c *sbCollector) walkImports(m *sbImportMap, src string, allowedRoots []str
 			c.warn("skipping import path outside source root: %s", current)
 			continue
 		}
-		data, err := os.ReadFile(real)
+		fi, err := os.Stat(real)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				c.warn("failed to read file: open %s: no such file or directory", c.display(current))
@@ -573,6 +620,13 @@ func (c *sbCollector) walkImports(m *sbImportMap, src string, allowedRoots []str
 			if errors.As(err, &pe) && strings.Contains(pe.Err.Error(), "not a directory") {
 				return fmt.Errorf("failed to read file: open %s: not a directory", c.display(current))
 			}
+			return fmt.Errorf("failed to read file: %w", err)
+		}
+		if !fi.Mode().IsRegular() {
+			return fmt.Errorf("failed to read file: %s is not a regular file", c.display(current))
+		}
+		data, err := os.ReadFile(real)
+		if err != nil {
 			return fmt.Errorf("failed to read file: %w", err)
 		}
 		if err := c.add(current); err != nil {
@@ -677,21 +731,46 @@ func (c *sbCollector) collectImportMapTargets(m *sbImportMap) error {
 			}
 			continue
 		}
-		err = filepath.WalkDir(p, func(sub string, d fs.DirEntry, err error) error {
+		// Walk the resolved directory (the target itself may be a symlink,
+		// which the CLI follows too) and name each file under the lexical
+		// target path. Symlinked subdirectories are not descended, as in the
+		// CLI; a symlink to a file counts as that file.
+		err = filepath.WalkDir(real, func(sub string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
+			if sub == real {
+				return nil
+			}
+			rel, err := filepath.Rel(real, sub)
+			if err != nil {
+				return err
+			}
+			lexical := filepath.Join(p, rel)
 			if d.IsDir() {
-				if sub != p && d.Type()&fs.ModeSymlink != 0 {
-					return filepath.SkipDir
+				return nil
+			}
+			if d.Type()&fs.ModeSymlink != 0 {
+				fi, err := os.Stat(sub)
+				if err != nil {
+					c.warn("skipping unreadable import map entry: %s", lexical)
+					return nil
 				}
+				if fi.IsDir() {
+					return nil
+				}
+			}
+			if sbIsEnvFileName(d.Name()) {
+				// A directory mapping would otherwise carry the function's
+				// local .env (the CLI uploads it; mux does not).
+				c.warn("skipping %s: environment files are not uploaded", lexical)
 				return nil
 			}
 			if !sbContainedInAny(c.allowedRoots, sbRealPath(sub)) {
-				c.warn("skipping import path outside source root: %s", sub)
+				c.warn("skipping import path outside source root: %s", lexical)
 				return nil
 			}
-			return c.add(sub)
+			return c.add(lexical)
 		})
 		if err != nil {
 			return err
@@ -725,12 +804,16 @@ func sbExpandStatic(pattern string) ([]string, error) {
 		return nil, err
 	}
 	var matches []string
-	err = filepath.WalkDir(filepath.FromSlash(base), func(p string, d fs.DirEntry, err error) error {
+	root := filepath.FromSlash(base)
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
+		if p == root {
 			return nil
+		}
+		if d.IsDir() && d.Type()&fs.ModeSymlink != 0 {
+			return filepath.SkipDir
 		}
 		if re.MatchString(filepath.ToSlash(p)) {
 			matches = append(matches, p)
@@ -750,39 +833,36 @@ func sbExpandStatic(pattern string) ([]string, error) {
 	return matches, nil
 }
 
-// sbGlobRegexp converts a glob to a regular expression over slash paths:
-// ** any depth, * within a segment, ? one character, [...] a class.
+// sbGlobRegexp converts a glob to a regular expression over slash paths the
+// way the CLI's globToRegExp does: ** matches anything including slashes
+// (so a/**/b.html needs at least one directory between a and b.html), *
+// within a segment, ? one character, [...] a class; a [ without a closing ]
+// is a literal.
 func sbGlobRegexp(glob string) (*regexp.Regexp, error) {
 	var b strings.Builder
 	b.WriteString("^")
 	for i := 0; i < len(glob); i++ {
 		c := glob[i]
-		switch c {
-		case '*':
-			if i+1 < len(glob) && glob[i+1] == '*' {
-				i++
-				if i+1 < len(glob) && glob[i+1] == '/' {
-					i++
-					b.WriteString("(?:.*/)?")
-				} else {
-					b.WriteString(".*")
-				}
-			} else {
-				b.WriteString("[^/]*")
-			}
-		case '?':
+		switch {
+		case c == '*' && i+1 < len(glob) && glob[i+1] == '*':
+			b.WriteString(".*")
+			i++
+		case c == '*':
+			b.WriteString("[^/]*")
+		case c == '?':
 			b.WriteString("[^/]")
-		case '[':
-			end := strings.IndexByte(glob[i:], ']')
-			if end < 0 {
-				return nil, fmt.Errorf("invalid static_files pattern %q: unclosed [", glob)
+		case c == '[':
+			end := strings.IndexByte(glob[i+1:], ']')
+			if end > 0 {
+				class := glob[i+1 : i+1+end]
+				if strings.HasPrefix(class, "!") {
+					class = "^" + class[1:]
+				}
+				b.WriteString("[" + strings.ReplaceAll(class, `\`, `\\`) + "]")
+				i += end + 1
+			} else {
+				b.WriteString(regexp.QuoteMeta("["))
 			}
-			class := glob[i+1 : i+end]
-			if strings.HasPrefix(class, "!") {
-				class = "^" + class[1:]
-			}
-			b.WriteString("[" + strings.ReplaceAll(class, `\`, `\\`) + "]")
-			i += end
 		default:
 			b.WriteString(regexp.QuoteMeta(string(c)))
 		}
@@ -794,8 +874,8 @@ func sbGlobRegexp(glob string) (*regexp.Regexp, error) {
 // sbPlanDeploy computes the plan for one function: config, import map,
 // files and metadata. remoteVerifyJWT is the deployed function's setting,
 // used when config.toml and the call do not say — the CLI keeps it as well.
-func sbPlanDeploy(projectRoot, slug string, verifyOverride *bool, remoteVerifyJWT *bool) (*sbDeployPlan, error) {
-	cfg, err := sbReadFunctionConfig(projectRoot, slug)
+func sbPlanDeploy(projectRoot, slug, projectRef string, verifyOverride *bool, remoteVerifyJWT *bool) (*sbDeployPlan, error) {
+	cfg, err := sbReadFunctionConfig(projectRoot, slug, projectRef)
 	if err != nil {
 		return nil, err
 	}
@@ -814,27 +894,20 @@ func sbPlanDeploy(projectRoot, slug string, verifyOverride *bool, remoteVerifyJW
 	}
 	plan := &sbDeployPlan{Slug: slug, ProjectRoot: projectRoot, SourceRoot: sourceRoot, Config: cfg}
 	realSource := sbRealPath(sourceRoot)
+	// The source root is the only boundary. The CLI also admits the
+	// directory of an import map outside it (and of a map that map
+	// references); since every uploaded name must lie under the project
+	// root, that wider boundary only ever admits symlinks pointing out of
+	// the checkout — a deno.json with "importMap": "../../../../" and a
+	// symlink to ~/.ssh/id_rsa would upload the key. mux keeps the boundary
+	// at the source root; a map outside it is refused instead.
 	c := &sbCollector{plan: plan, workdir: projectRoot, sourceRoot: realSource, allowedRoots: []string{realSource}, seen: map[string]bool{}}
 
-	// Roots the import map may reach beyond the source root: its own
-	// directory, and the directory of a map it references.
 	var importMap *sbImportMap
 	if cfg.ImportMap != "" {
-		realMap := sbRealPath(cfg.ImportMap)
-		if !sbContained(realSource, realMap) {
-			c.allowedRoots = append(c.allowedRoots, filepath.Dir(realMap))
-		}
-		if data, err := os.ReadFile(cfg.ImportMap); err == nil {
-			if m, err := sbParseImportMap(cfg.ImportMap, data); err == nil && m.Reference != "" {
-				ref := sbRealPath(filepath.Join(filepath.Dir(cfg.ImportMap), filepath.FromSlash(m.Reference)))
-				if !sbContained(realSource, ref) {
-					c.allowedRoots = append(c.allowedRoots, filepath.Dir(ref))
-				}
-			}
-		}
 		importMap, err = sbLoadImportMap(cfg.ImportMap, func(file string) error {
-			if !sbContainedInAny(c.allowedRoots, sbRealPath(file)) {
-				return fmt.Errorf("refusing to upload import map outside allowed roots: %s", file)
+			if !sbContained(realSource, sbRealPath(file)) {
+				return fmt.Errorf("refusing to upload import map outside the source root %s: %s", sourceRoot, file)
 			}
 			return c.add(file)
 		})
@@ -968,7 +1041,15 @@ func (s *Supabase) handleFunctionDeploy(ctx context.Context, req mcp.CallToolReq
 		}
 		verifyOverride = &b
 	}
-	dryRun := req.GetBool("dry_run", false)
+	dryRun := false
+	if v, ok := args["dry_run"]; ok && v != nil {
+		b, ok := v.(bool)
+		if !ok {
+			// A "yes" read as false would deploy for real.
+			return mcp.NewToolResultError(fmt.Sprintf("dry_run must be a boolean, got %T", v)), nil
+		}
+		dryRun = b
+	}
 
 	// What is deployed now: its verify_jwt is kept when neither config.toml
 	// nor the call says otherwise, and its version tells the caller what
@@ -981,7 +1062,7 @@ func (s *Supabase) handleFunctionDeploy(ctx context.Context, req mcp.CallToolReq
 	if before != nil {
 		remoteVerify = before.VerifyJWT
 	}
-	plan, err := sbPlanDeploy(projectRoot, slug, verifyOverride, remoteVerify)
+	plan, err := sbPlanDeploy(projectRoot, slug, s.projectRef, verifyOverride, remoteVerify)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1070,6 +1151,12 @@ func (s *Supabase) sbFunctionBody(ctx context.Context, slug string) (files []sbB
 	mediaType, params, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	limited := io.LimitReader(resp.Body, sbMaxBundleBody+1)
 	if !strings.HasPrefix(mediaType, "multipart/") || params["boundary"] == "" {
+		// Without source files the API hands out the bundle itself as a
+		// binary stream. A JSON or text answer is neither — report it.
+		if strings.Contains(mediaType, "json") || strings.HasPrefix(mediaType, "text/") {
+			data, _ := io.ReadAll(io.LimitReader(limited, 2048))
+			return nil, nil, nil, fmt.Errorf("expected the function's files as multipart/form-data, got %s: %s", mediaType, strings.TrimSpace(string(data)))
+		}
 		data, err := io.ReadAll(limited)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("read function body: %w", err)
@@ -1100,9 +1187,7 @@ func (s *Supabase) sbFunctionBody(ctx context.Context, slug string) (files []sbB
 		}
 		name := part.Header.Get("Supabase-Path")
 		if name == "" {
-			if _, p, err := mime.ParseMediaType(part.Header.Get("Content-Disposition")); err == nil {
-				name = p["filename"]
-			}
+			name = sbPartFilename(part.Header.Get("Content-Disposition"))
 		}
 		if name != "" {
 			files = append(files, sbBodyFile{Path: name, Size: len(data), content: data})
@@ -1117,6 +1202,22 @@ func (s *Supabase) sbFunctionBody(ctx context.Context, slug string) (files []sbB
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	return files, metadata, nil, nil
+}
+
+// sbPartFilename reads the filename of a Content-Disposition header: the
+// RFC 2231 form (filename*) through the standard parser, an unquoted
+// filename=… token (which the parser rejects when it carries slashes) by hand.
+func sbPartFilename(header string) string {
+	if _, p, err := mime.ParseMediaType(header); err == nil && p["filename"] != "" {
+		return p["filename"]
+	}
+	for _, field := range strings.Split(header, ";") {
+		field = strings.TrimSpace(field)
+		if strings.HasPrefix(strings.ToLower(field), "filename=") {
+			return strings.Trim(strings.TrimSpace(field[len("filename="):]), `"`)
+		}
+	}
+	return ""
 }
 
 func (s *Supabase) handleFunctionGet(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1162,6 +1263,9 @@ func (s *Supabase) handleFunctionGet(ctx context.Context, req mcp.CallToolReques
 		result["metadata"] = metadata
 	}
 	if eszip != nil {
+		if file != "" {
+			return mcp.NewToolResultError(fmt.Sprintf("function %s was deployed as a pre-built bundle — the API has no source files, so %q cannot be read; output_dir writes the bundle", slug, file)), nil
+		}
 		result["bundle"] = map[string]any{"format": "eszip", "size": len(eszip), "note": "the function was deployed as a pre-built bundle; the API has no source files for it"}
 		if outputDir != "" {
 			dest := filepath.Join(outRoot, slug+".eszip")
@@ -1206,6 +1310,9 @@ func (s *Supabase) handleFunctionGet(ctx context.Context, req mcp.CallToolReques
 		var written []string
 		for _, f := range files {
 			rel := filepath.FromSlash(path.Clean("/" + f.Path))[1:]
+			if rel == "" {
+				return mcp.NewToolResultError(fmt.Sprintf("refusing to write a file named %q", f.Path)), nil
+			}
 			dest := filepath.Join(outRoot, rel)
 			if !sbContained(outRoot, dest) {
 				return mcp.NewToolResultError(fmt.Sprintf("refusing to write %s outside %s", f.Path, outRoot)), nil
@@ -1244,25 +1351,61 @@ func sbWriteNew(dest string, data []byte) error {
 
 // --- Env files ---
 
+// sbEnvFileMax bounds an env file; a dotenv file is a few kilobytes.
+const sbEnvFileMax = 1 << 20
+
+// sbIsEnvFileName reports whether a file name has the dotenv form — .env,
+// .env.local, production.env. The env_file argument and the directory walk
+// of the deploy both use it: the one to admit a file, the other to skip it.
+func sbIsEnvFileName(name string) bool {
+	name = strings.ToLower(name)
+	return name == ".env" || strings.HasPrefix(name, ".env.") || strings.HasSuffix(name, ".env")
+}
+
 // sbReadEnvFile reads KEY=VALUE lines (dotenv form: comments, export
 // prefix, single or double quotes) from an absolute path on this machine.
-// The values never enter the tool call.
-func sbReadEnvFile(raw string) (map[string]string, error) {
+// The file's contents never enter a tool result or an error: the arguments
+// come from a model, and a model that names ~/.ssh/id_rsa or
+// /proc/self/environ here must learn nothing from the answer. Hence the
+// rules — a regular file with the dotenv name form, no NUL bytes, every
+// name an environment variable name — and errors that carry a line number
+// but never the line. Names starting with SUPABASE_ (the project's own
+// .env has them) are skipped and reported by name, since the prefix is
+// Supabase's, not a secret.
+func sbReadEnvFile(raw string) (values map[string]string, skipped []string, err error) {
 	clean := filepath.Clean(config.ExpandHome(raw))
 	if !filepath.IsAbs(clean) {
-		return nil, fmt.Errorf("env_file must be an absolute path: %s", raw)
+		return nil, nil, fmt.Errorf("env_file must be an absolute path: %s", raw)
 	}
-	f, err := os.Open(clean)
+	if !sbIsEnvFileName(filepath.Base(clean)) {
+		return nil, nil, fmt.Errorf("env_file must be a dotenv file (.env, .env.<name> or <name>.env): %s", clean)
+	}
+	// Stat before Open, as every file-reading tool here does: a FIFO or
+	// /dev/stdin would block with no timeout in play, /proc files report
+	// size 0.
+	fi, err := os.Stat(clean)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("env_file not found: %s (resolved on the machine running mux)", clean)
+			return nil, nil, fmt.Errorf("env_file not found: %s (resolved on the machine running mux)", clean)
 		}
-		return nil, fmt.Errorf("env_file is not readable: %w", err)
+		return nil, nil, fmt.Errorf("env_file is not usable: %w", err)
 	}
-	defer f.Close()
-	out := map[string]string{}
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	if !fi.Mode().IsRegular() || fi.Size() == 0 {
+		return nil, nil, fmt.Errorf("env_file is not a regular, non-empty file: %s", clean)
+	}
+	if fi.Size() > sbEnvFileMax {
+		return nil, nil, fmt.Errorf("env_file is larger than %d KB: %s", sbEnvFileMax>>10, clean)
+	}
+	data, err := os.ReadFile(clean)
+	if err != nil {
+		return nil, nil, fmt.Errorf("env_file is not readable: %w", err)
+	}
+	if bytes.IndexByte(data, 0) >= 0 {
+		return nil, nil, fmt.Errorf("env_file is not a text file: %s", clean)
+	}
+	values = map[string]string{}
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	sc.Buffer(make([]byte, 0, 64*1024), sbEnvFileMax+1)
 	line := 0
 	for sc.Scan() {
 		line++
@@ -1273,38 +1416,71 @@ func sbReadEnvFile(raw string) (map[string]string, error) {
 		text = strings.TrimPrefix(text, "export ")
 		eq := strings.IndexByte(text, '=')
 		if eq <= 0 {
-			return nil, fmt.Errorf("env_file line %d is not KEY=VALUE", line)
+			return nil, nil, fmt.Errorf("env_file line %d is not KEY=VALUE", line)
 		}
 		key := strings.TrimSpace(text[:eq])
-		val := strings.TrimSpace(text[eq+1:])
-		switch {
-		case len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"':
-			unq, err := sbUnquoteDouble(val)
-			if err != nil {
-				return nil, fmt.Errorf("env_file line %d: %v", line, err)
+		if err := sbValidSecretName(key); err != nil {
+			if strings.HasPrefix(key, "SUPABASE_") {
+				skipped = append(skipped, key)
+				continue
 			}
-			val = unq
-		case len(val) >= 2 && val[0] == '\'' && val[len(val)-1] == '\'':
-			val = val[1 : len(val)-1]
-		default:
-			if i := strings.Index(val, " #"); i >= 0 {
-				val = strings.TrimSpace(val[:i])
-			}
+			return nil, nil, fmt.Errorf("env_file line %d: the name is not an environment variable name", line)
 		}
-		out[key] = val
+		val, err := sbEnvValue(strings.TrimSpace(text[eq+1:]))
+		if err != nil {
+			return nil, nil, fmt.Errorf("env_file line %d: %v", line, err)
+		}
+		values[key] = val
 	}
 	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("read env_file: %w", err)
+		return nil, nil, fmt.Errorf("read env_file: %w", err)
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("env_file %s holds no KEY=VALUE lines", clean)
+	if len(values) == 0 && len(skipped) == 0 {
+		return nil, nil, fmt.Errorf("env_file %s holds no KEY=VALUE lines", clean)
 	}
-	return out, nil
+	sort.Strings(skipped)
+	return values, skipped, nil
+}
+
+// sbEnvValue reads the value part of a dotenv line: a double-quoted value
+// with the usual escapes, a single-quoted value verbatim, or a bare value up
+// to a " #" comment. Text after a closing quote may only be a comment.
+func sbEnvValue(val string) (string, error) {
+	if val == "" {
+		return "", nil
+	}
+	if q := val[0]; q == '"' || q == '\'' {
+		end := -1
+		for i := 1; i < len(val); i++ {
+			if val[i] == '\\' && q == '"' {
+				i++
+				continue
+			}
+			if val[i] == q {
+				end = i
+				break
+			}
+		}
+		if end < 0 {
+			return "", errors.New("unterminated quoted value")
+		}
+		if rest := strings.TrimSpace(val[end+1:]); rest != "" && !strings.HasPrefix(rest, "#") {
+			return "", errors.New("unexpected text after the closing quote")
+		}
+		inner := val[1:end]
+		if q == '\'' {
+			return inner, nil
+		}
+		return sbUnquoteDouble(inner)
+	}
+	if i := strings.Index(val, " #"); i >= 0 {
+		val = strings.TrimSpace(val[:i])
+	}
+	return val, nil
 }
 
 // sbUnquoteDouble handles the escapes dotenv files use in double quotes.
 func sbUnquoteDouble(s string) (string, error) {
-	s = s[1 : len(s)-1]
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
 		if s[i] != '\\' || i+1 >= len(s) {
@@ -1322,7 +1498,7 @@ func sbUnquoteDouble(s string) (string, error) {
 		case '"', '\\', '$':
 			b.WriteByte(s[i])
 		default:
-			return "", fmt.Errorf("unknown escape \\%c in a double-quoted value", s[i])
+			return "", errors.New("unknown escape in a double-quoted value")
 		}
 	}
 	return b.String(), nil
