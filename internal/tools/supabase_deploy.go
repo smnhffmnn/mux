@@ -1109,11 +1109,9 @@ func (s *Supabase) handleFunctionDeploy(ctx context.Context, req mcp.CallToolReq
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	client := *s.client
-	client.Timeout = uploadTimeout
 	q := url.Values{}
 	q.Set("slug", slug)
-	resp, err := s.call(ctx, "function.deploy", nil, q, body, "", &client)
+	resp, err := s.call(ctx, "function.deploy", nil, q, body, "", s.longClient)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("deploy failed: %v", err)), nil
 	}
@@ -1160,22 +1158,36 @@ func sbComparePlan(plan *sbDeployPlan, deployed []sbBodyFile, deployedEntrypoint
 	common := sbCommonSuffix(localEntry, deployedEntry)
 	localPrefix := strings.TrimSuffix(localEntry, common)
 	remotePrefix := strings.TrimSuffix(deployedEntry, common)
-	local := map[string]int64{}
+	local := map[string]sbDeployFile{}
+	collision := false
 	for _, f := range plan.Files {
-		local[strings.TrimPrefix(f.Name, localPrefix)] = f.Size
+		n := strings.TrimPrefix(f.Name, localPrefix)
+		if _, dup := local[n]; dup {
+			collision = true
+		}
+		local[n] = f
 	}
-	remote := map[string]int{}
+	remote := map[string]sbBodyFile{}
 	for _, f := range deployed {
-		remote[strings.TrimPrefix(f.Path, remotePrefix)] = f.Size
+		n := strings.TrimPrefix(f.Path, remotePrefix)
+		if _, dup := remote[n]; dup {
+			collision = true
+		}
+		remote[n] = f
 	}
-	var onlyLocal, onlyDeployed, sizeDiffers []string
-	for n, sz := range local {
-		rs, ok := remote[n]
+	var onlyLocal, onlyDeployed, sizeDiffers, contentDiffers []string
+	for n, lf := range local {
+		rf, ok := remote[n]
 		switch {
 		case !ok:
 			onlyLocal = append(onlyLocal, n)
-		case int64(rs) != sz:
-			sizeDiffers = append(sizeDiffers, fmt.Sprintf("%s (local %d, deployed %d)", n, sz, rs))
+		case rf.Size != int(lf.Size):
+			sizeDiffers = append(sizeDiffers, fmt.Sprintf("%s (local %d, deployed %d)", n, lf.Size, rf.Size))
+		case rf.content != nil:
+			// Same size: compare the bytes, a same-length edit must not pass.
+			if data, err := os.ReadFile(lf.Path); err != nil || !bytes.Equal(data, rf.content) {
+				contentDiffers = append(contentDiffers, n)
+			}
 		}
 	}
 	for n := range remote {
@@ -1186,12 +1198,16 @@ func sbComparePlan(plan *sbDeployPlan, deployed []sbBodyFile, deployedEntrypoint
 	sort.Strings(onlyLocal)
 	sort.Strings(onlyDeployed)
 	sort.Strings(sizeDiffers)
-	same := len(onlyLocal) == 0 && len(onlyDeployed) == 0 && len(sizeDiffers) == 0
+	sort.Strings(contentDiffers)
+	same := !collision && len(onlyLocal) == 0 && len(onlyDeployed) == 0 && len(sizeDiffers) == 0 && len(contentDiffers) == 0
 	out := map[string]any{
 		"sameFiles":     same,
 		"deployedFiles": len(deployed),
 		"plannedFiles":  len(plan.Files),
 		"anchoredAt":    common[:strings.Index(common+"/", "/")],
+	}
+	if collision {
+		out["warning"] = "two files fell onto one name after anchoring — the comparison cannot be trusted"
 	}
 	if len(onlyLocal) > 0 {
 		out["onlyLocal"] = onlyLocal
@@ -1202,8 +1218,11 @@ func sbComparePlan(plan *sbDeployPlan, deployed []sbBodyFile, deployedEntrypoint
 	if len(sizeDiffers) > 0 {
 		out["sizeDiffers"] = sizeDiffers
 	}
+	if len(contentDiffers) > 0 {
+		out["contentDiffers"] = contentDiffers
+	}
 	if same {
-		out["note"] = "the plan carries the same files with the same sizes as the deployed version — contents are not compared"
+		out["note"] = "the plan carries the same files, byte for byte, as the deployed version"
 	}
 	return out
 }

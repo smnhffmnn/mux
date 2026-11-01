@@ -75,6 +75,10 @@ type Supabase struct {
 	readOnly     bool
 	instructions string
 	client       *http.Client
+	// longClient serves calls the server works on for minutes — the deploy
+	// (bundling) and a migration (its SQL): no header timeout, the upload
+	// budget as the overall one.
+	longClient *http.Client
 
 	// now and sleep are swappable for tests (log windows, 429 back-off).
 	now   func() time.Time
@@ -96,12 +100,24 @@ func NewSupabase(conn config.Connection, dialer Dialer) (*Supabase, error) {
 	transport := &http.Transport{
 		ResponseHeaderTimeout: 60 * time.Second,
 	}
+	longTransport := &http.Transport{}
 	if dialer != nil {
-		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return dialer.DialContext(ctx, network, addr)
 		}
+		transport.DialContext = dial
+		longTransport.DialContext = dial
 	}
 	apiHost := strings.ToLower(strings.TrimPrefix(strings.TrimPrefix(baseURL, "https://"), "http://"))
+	checkRedirect := func(req *http.Request, via []*http.Request) error {
+		if strings.ToLower(req.URL.Host) != apiHost {
+			return fmt.Errorf("refusing redirect to %s", req.URL.Host)
+		}
+		if len(via) >= 3 {
+			return errors.New("too many redirects")
+		}
+		return nil
+	}
 	return &Supabase{
 		name:         conn.Name,
 		baseURL:      baseURL,
@@ -109,24 +125,13 @@ func NewSupabase(conn config.Connection, dialer Dialer) (*Supabase, error) {
 		projectRef:   strings.TrimSpace(conn.ProjectRef),
 		readOnly:     conn.ReadOnly,
 		instructions: conn.Instructions,
-		client: &http.Client{
-			Transport: transport,
-			Timeout:   sbRequestTimeout,
-			// A redirect to another host would replay the request body —
-			// secret values, a function's source — there. The API has no
-			// reason to redirect at all; refuse anything off-host.
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if strings.ToLower(req.URL.Host) != apiHost {
-					return fmt.Errorf("refusing redirect to %s", req.URL.Host)
-				}
-				if len(via) >= 3 {
-					return errors.New("too many redirects")
-				}
-				return nil
-			},
-		},
-		now:   time.Now,
-		sleep: sbSleep,
+		// A redirect to another host would replay the request body — secret
+		// values, a function's source — there. The API has no reason to
+		// redirect at all; refuse anything off-host.
+		client:     &http.Client{Transport: transport, Timeout: sbRequestTimeout, CheckRedirect: checkRedirect},
+		longClient: &http.Client{Transport: longTransport, Timeout: uploadTimeout, CheckRedirect: checkRedirect},
+		now:        time.Now,
+		sleep:      sbSleep,
 	}, nil
 }
 
@@ -394,6 +399,12 @@ func (s *Supabase) callJSON(ctx context.Context, key string, pathParams map[stri
 
 // callJSONHeaders is callJSON with extra request headers.
 func (s *Supabase) callJSONHeaders(ctx context.Context, key string, pathParams map[string]string, query url.Values, headers map[string]string, body any, out any) (int, error) {
+	return s.callJSONHeadersWith(ctx, nil, key, pathParams, query, headers, body, out)
+}
+
+// callJSONHeadersWith is callJSONHeaders on a given client (nil: the
+// connection's default one).
+func (s *Supabase) callJSONHeadersWith(ctx context.Context, client *http.Client, key string, pathParams map[string]string, query url.Values, headers map[string]string, body any, out any) (int, error) {
 	var b *sbBody
 	if body != nil {
 		var err error
@@ -401,7 +412,7 @@ func (s *Supabase) callJSONHeaders(ctx context.Context, key string, pathParams m
 			return 0, err
 		}
 	}
-	resp, err := s.callHeaders(ctx, key, pathParams, query, headers, b, "", nil)
+	resp, err := s.callHeaders(ctx, key, pathParams, query, headers, b, "", client)
 	if err != nil {
 		return 0, err
 	}
@@ -423,6 +434,14 @@ func (s *Supabase) callJSONHeaders(ctx context.Context, key string, pathParams m
 		return resp.StatusCode, fmt.Errorf("decode Supabase response (HTTP %d): %w", resp.StatusCode, err)
 	}
 	return resp.StatusCode, nil
+}
+
+// sbAnswered reports whether err carries an answer from the API (a status),
+// as opposed to a request that died without one — after which the server
+// may or may not have acted.
+func sbAnswered(err error) bool {
+	var he *sbHTTPError
+	return errors.As(err, &he)
 }
 
 // sbNotFound reports whether err is the API's 404.

@@ -3,7 +3,6 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -25,30 +24,52 @@ func TestSupabase_MigrationMatching(t *testing.T) {
 	history := []sbRemoteMigration{
 		{Version: "20260710085001", Name: "20260710085001_929350e6-7b35-4f7e-818f-91f6a6c404aa"},
 		{Version: "20260805175905", Name: "8447fd06-6bca-464e-88de-4bad72f7834c"},
-		{Version: "20260901120000", Name: "add_widgets"},
+		{Version: "20260901120000", Name: "remote_schema"},
 	}
-	cases := []struct {
-		file    string
-		applied bool
-	}{
-		{"20260710085001_929350e6-7b35-4f7e-818f-91f6a6c404aa.sql", true}, // version and stem
-		{"20260805175902_8447fd06-6bca-464e-88de-4bad72f7834c.sql", true}, // name part; version shifted by the server
-		{"20260901120000_add_widgets.sql", true},                          // CLI record
-		{"20260901120000.sql", true},                                      // version only
-		{"20261001000000_new_thing.sql", false},
-		{"20260805175902_other.sql", false}, // same timestamp, other name
+	mk := func(file string) sbLocalMigration {
+		m := sbMigrationFile.FindStringSubmatch(file)
+		return sbLocalMigration{Version: m[1], Name: m[2], Stem: strings.TrimSuffix(file, ".sql")}
 	}
-	for _, c := range cases {
-		m := sbMigrationFile.FindStringSubmatch(c.file)
-		l := sbLocalMigration{Version: m[1], Name: m[2], Stem: strings.TrimSuffix(c.file, ".sql")}
-		if _, got := sbMigrationApplied(l, history); got != c.applied {
-			t.Errorf("%s applied = %v, want %v", c.file, got, c.applied)
+	local := []sbLocalMigration{
+		mk("20260710085001_929350e6-7b35-4f7e-818f-91f6a6c404aa.sql"), // version and stem
+		mk("20260805175902_8447fd06-6bca-464e-88de-4bad72f7834c.sql"), // name part; version shifted by the server
+		mk("20260901120000_remote_schema.sql"),                        // CLI record
+		mk("20261001000000_remote_schema.sql"),                        // same name as a CLI record: NOT applied (one-to-one)
+		mk("20261002000000_new_thing.sql"),
+		mk("20260805175902_other.sql"), // same timestamp as a local file, other name
+	}
+	applied, pending, matches := sbMatchMigrations(local, history)
+	stems := func(l []sbLocalMigration) []string {
+		var out []string
+		for _, x := range l {
+			out = append(out, x.Stem)
 		}
+		return out
 	}
-	for name, ok := range map[string]bool{"20260101000000_x.sql": true, "20260101000000.sql": true, "readme.md": false, "x_20260101.sql": false, "20260101000000_x.sql.bak": false} {
+	wantApplied := []string{"20260710085001_929350e6-7b35-4f7e-818f-91f6a6c404aa", "20260805175902_8447fd06-6bca-464e-88de-4bad72f7834c", "20260901120000_remote_schema"}
+	wantPending := []string{"20261001000000_remote_schema", "20261002000000_new_thing", "20260805175902_other"}
+	if !reflect.DeepEqual(stems(applied), wantApplied) || !reflect.DeepEqual(stems(pending), wantPending) {
+		t.Errorf("applied = %v\npending = %v", stems(applied), stems(pending))
+	}
+	if matches["20260805175902_8447fd06-6bca-464e-88de-4bad72f7834c"].Version != "20260805175905" {
+		t.Errorf("matches = %v", matches)
+	}
+	// Two local files on one free name-part entry: the first takes it.
+	twice := []sbLocalMigration{mk("20261101000000_fix_rls.sql"), mk("20261102000000_fix_rls.sql")}
+	a, p, _ := sbMatchMigrations(twice, []sbRemoteMigration{{Version: "20261101000007", Name: "fix_rls"}})
+	if len(a) != 1 || len(p) != 1 || p[0].Stem != "20261102000000_fix_rls" {
+		t.Errorf("one entry, two files: applied %v pending %v", stems(a), stems(p))
+	}
+	for name, ok := range map[string]bool{"20260101000000_x.sql": true, "20260101000000.sql": false, "readme.md": false, "x_20260101.sql": false, "20260101000000_x.sql.bak": false} {
 		if (sbMigrationFile.MatchString(name)) != ok {
 			t.Errorf("file pattern %q = %v", name, !ok)
 		}
+	}
+	if got := sbOlderThanApplied([]sbLocalMigration{mk("20261001000000_a.sql")}, []sbLocalMigration{mk("20260901000000_old.sql"), mk("20261101000000_new.sql")}); !reflect.DeepEqual(got, []string{"20260901000000_old"}) {
+		t.Errorf("older = %v", got)
+	}
+	if strings.TrimSpace(sbStripSQLComments("-- only\n/* a\nb */  \n")) != "" || strings.TrimSpace(sbStripSQLComments("select 1; -- x")) != "select 1;" {
+		t.Errorf("strip = %q / %q", sbStripSQLComments("-- only\n/* a\nb */  \n"), sbStripSQLComments("select 1; -- x"))
 	}
 }
 
@@ -63,6 +84,7 @@ func TestSupabase_MigrationsPendingAndApply(t *testing.T) {
 		"20261001000000_first_new.sql":                            "alter table w add c int; alter table w add d int;",
 		"20261002000000_second_new.sql":                           "create index on w(c);",
 		"notes.md":                                                "not a migration",
+		"20261003000000.sql":                                      "select 1; -- bare version: skipped like the CLI does",
 	})
 
 	out, errText := sbCall(t, s, s.handleMigrationsList, nil)
@@ -89,6 +111,12 @@ func TestSupabase_MigrationsPendingAndApply(t *testing.T) {
 	}
 	if out["historyOnly"] != nil {
 		t.Errorf("historyOnly = %v", out["historyOnly"])
+	}
+	if fmt.Sprint(out["skipped"]) != "[20261003000000.sql notes.md]" {
+		t.Errorf("skipped = %v", out["skipped"])
+	}
+	if _, ok := out["olderThanLatestApplied"]; ok {
+		t.Errorf("nothing out of order here: %v", out["olderThanLatestApplied"])
 	}
 
 	// Dry run: plan, no POST.
@@ -159,8 +187,11 @@ func TestSupabase_MigrationsApplyStopsAndSingle(t *testing.T) {
 	if len(out["applied"].([]any)) != 1 || out["failed"].(map[string]any)["file"] != "20261002000000_b" || fmt.Sprint(out["remaining"]) != "[20261003000000_c]" {
 		t.Errorf("stop at first error = %v", out)
 	}
-	if !strings.Contains(out["failed"].(map[string]any)["error"].(string), "BROKEN") {
-		t.Errorf("error text = %v", out["failed"])
+	if failed := out["failed"].(map[string]any); !strings.Contains(failed["error"].(string), "BROKEN") || failed["state"] != "not applied" {
+		t.Errorf("failed = %v", failed)
+	}
+	if applied := out["applied"].([]any); applied[0].(map[string]any)["historyVersion"] == "" {
+		t.Errorf("applied before the failure lacks its version: %v", applied)
 	}
 	if f.count("POST", "/database/migrations") != 2 {
 		t.Errorf("posts after failure = %d, want 2 (a ok, b failed, c not tried)", f.count("POST", "/database/migrations"))
@@ -187,10 +218,47 @@ func TestSupabase_MigrationsApplyStopsAndSingle(t *testing.T) {
 		t.Errorf("dry_run type: %q", errText)
 	}
 
-	// Empty files and a missing directory are refused before anything runs.
+	// A lost answer: the state is unknown, not "not applied"; the history
+	// read back says it ran.
+	f2 := newSBFake(t)
+	s2 := newTestSupabase(t, f2, nil)
+	root2 := t.TempDir()
+	writeMigrations(t, root2, map[string]string{"20261001000000_slow.sql": "select pg_sleep(1);", "20261002000000_after.sql": "select 2;"})
+	f2.mu.Lock()
+	f2.dropApply = "20261001000000_slow"
+	f2.mu.Unlock()
+	out, errText = sbCall(t, s2, s2.handleMigrationsApply, map[string]any{"path": root2})
+	if errText != "" {
+		t.Fatal(errText)
+	}
+	failed := out["failed"].(map[string]any)
+	if !strings.HasPrefix(fmt.Sprint(failed["state"]), "applied — the history has it") || fmt.Sprint(out["remaining"]) != "[20261002000000_after]" || !strings.Contains(fmt.Sprint(out["note"]), "unknown") {
+		t.Errorf("lost answer = %v", out)
+	}
+	if f2.count("POST", "/database/migrations") != 1 {
+		t.Errorf("the run must stop after a lost answer, posts = %d", f2.count("POST", "/database/migrations"))
+	}
+
+	// Ambiguous file argument, out-of-order warning.
+	root3 := t.TempDir()
+	writeMigrations(t, root3, map[string]string{"20260101000000_a.sql": "select 1;", "20260101000000_b.sql": "select 2;", "20260801000000_old.sql": "select 3;"})
+	if _, errText := sbCall(t, s, s.handleMigrationsApply, map[string]any{"path": root3, "file": "20260101000000", "dry_run": true}); !strings.Contains(errText, "names 2 migrations") {
+		t.Errorf("ambiguous: %q", errText)
+	}
+	out, _ = sbCall(t, s, s.handleMigrationsApply, map[string]any{"path": root3, "dry_run": true})
+	if _, ok := out["olderThanLatestApplied"]; ok {
+		t.Errorf("no applied file, no order warning: %v", out)
+	}
+	writeMigrations(t, root3, map[string]string{"20260901120000_add_widgets.sql": "create table w(id int);"}) // applied in the fake history
+	out, _ = sbCall(t, s, s.handleMigrationsApply, map[string]any{"path": root3, "dry_run": true})
+	if fmt.Sprint(out["olderThanLatestApplied"]) != "[20260101000000_a 20260101000000_b 20260801000000_old]" || out["orderWarning"] == nil {
+		t.Errorf("order warning = %v", out)
+	}
+
+	// Empty or comment-only files and a missing directory are refused before anything runs.
 	empty := t.TempDir()
-	writeMigrations(t, empty, map[string]string{"20261001000000_e.sql": ""})
-	if _, errText := sbCall(t, s, s.handleMigrationsApply, map[string]any{"path": empty}); !strings.Contains(errText, "is empty") {
+	writeMigrations(t, empty, map[string]string{"20261001000000_e.sql": "-- nothing here\n/* nor here */\n"})
+	if _, errText := sbCall(t, s, s.handleMigrationsApply, map[string]any{"path": empty}); !strings.Contains(errText, "holds no SQL") {
 		t.Errorf("empty file: %q", errText)
 	}
 	if _, errText := sbCall(t, s, s.handleMigrationsPending, map[string]any{"path": t.TempDir()}); !strings.Contains(errText, "has no supabase/migrations") {
@@ -214,8 +282,6 @@ func TestSupabase_MigrationsApplyStopsAndSingle(t *testing.T) {
 	if !reflect.DeepEqual(names[len(names)-2:], []string{"migrations_list", "migrations_pending"}) {
 		t.Errorf("read-only tools = %v", names)
 	}
-	_ = os.Remove
-	_ = filepath.Join
 }
 
 func TestSupabase_ComparePlan(t *testing.T) {
@@ -247,5 +313,29 @@ func TestSupabase_ComparePlan(t *testing.T) {
 	}
 	if sbCommonSuffix("supabase/functions/hook/index.ts", "functions/hook/index.ts") != "functions/hook/index.ts" {
 		t.Error("common suffix")
+	}
+
+	// Same size, different bytes: contentDiffers. Two files on one anchored
+	// name: a warning, never sameFiles.
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{"supabase/functions/hook/index.ts": "0123456789", "a.ts": "x"})
+	p2 := &sbDeployPlan{
+		Metadata: map[string]any{"entrypoint_path": "supabase/functions/hook/index.ts"},
+		Files: []sbDeployFile{
+			{Name: "supabase/functions/hook/index.ts", Path: filepath.Join(root, "supabase/functions/hook/index.ts"), Size: 10},
+		},
+	}
+	out = sbComparePlan(p2, []sbBodyFile{{Path: "functions/hook/index.ts", Size: 10, content: []byte("9876543210")}}, "supabase/functions/hook/index.ts")
+	if out["sameFiles"] != false || fmt.Sprint(out["contentDiffers"]) != "[functions/hook/index.ts]" {
+		t.Errorf("content compare = %v", out)
+	}
+	out = sbComparePlan(p2, []sbBodyFile{{Path: "functions/hook/index.ts", Size: 10, content: []byte("0123456789")}}, "supabase/functions/hook/index.ts")
+	if out["sameFiles"] != true || out["anchoredAt"] != "functions" {
+		t.Errorf("byte-equal = %v", out)
+	}
+	p2.Files = append(p2.Files, sbDeployFile{Name: "functions/hook/index.ts", Path: filepath.Join(root, "a.ts"), Size: 1})
+	out = sbComparePlan(p2, []sbBodyFile{{Path: "functions/hook/index.ts", Size: 10, content: []byte("0123456789")}}, "supabase/functions/hook/index.ts")
+	if out["sameFiles"] != false || out["warning"] == nil {
+		t.Errorf("collision = %v", out)
 	}
 }

@@ -42,6 +42,7 @@ type sbFake struct {
 	rateOnce   bool // answer the first deploy with 429, then succeed
 	migrations []map[string]string
 	failApply  string // name of a migration whose apply answers 500
+	dropApply  string // name of a migration whose apply closes the connection without an answer (and still applies)
 }
 
 func newSBFake(t *testing.T) *sbFake {
@@ -180,6 +181,17 @@ func newSBFake(t *testing.T) *sbFake {
 				Name  string `json:"name"`
 			}
 			json.Unmarshal(body, &m)
+			if m.Name == f.dropApply {
+				// The server runs it, the answer is lost.
+				f.migrations = append(f.migrations, map[string]string{"version": fmt.Sprintf("2026110100%04d", len(f.migrations)), "name": m.Name})
+				if hj, ok := w.(http.Hijacker); ok {
+					if conn, _, err := hj.Hijack(); err == nil {
+						conn.Close()
+						return
+					}
+				}
+				panic("no hijacker")
+			}
 			if m.Name == f.failApply {
 				jsonOK(w, 500, `{"message":"failed to run sql query: syntax error at or near \"BROKEN\""}`)
 				return

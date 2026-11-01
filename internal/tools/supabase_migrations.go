@@ -38,9 +38,10 @@ const (
 	sbMigrationMax  = 10 << 20 // one migration file
 )
 
-// sbMigrationFile is the CLI's naming: <version>_<name>.sql, where version
-// is a run of digits (a timestamp) and the name may be empty.
-var sbMigrationFile = regexp.MustCompile(`^(\d+)(?:_(.+))?\.sql$`)
+// sbMigrationFile is the CLI's naming: <version>_<name>.sql, version a run
+// of digits (a timestamp), name required — the CLI skips a bare <version>.sql
+// and so does this.
+var sbMigrationFile = regexp.MustCompile(`^(\d+)_(.+)\.sql$`)
 
 // sbLocalMigration is one file of supabase/migrations/.
 type sbLocalMigration struct {
@@ -75,30 +76,31 @@ func (s *Supabase) handleMigrationsList(ctx context.Context, _ mcp.CallToolReque
 }
 
 // sbLocalMigrations reads the migration files of a project root, in name
-// order (the order the CLI applies them).
-func sbLocalMigrations(projectRoot string) ([]sbLocalMigration, error) {
+// order (the order the CLI applies them). skipped names the entries of the
+// directory that are not migration files (other names, directories,
+// symlinks), so nothing disappears silently.
+func sbLocalMigrations(projectRoot string) (files []sbLocalMigration, skipped []string, err error) {
 	dir := filepath.Join(projectRoot, filepath.FromSlash(sbMigrationsDir))
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("path has no %s directory: %s", sbMigrationsDir, projectRoot)
+			return nil, nil, fmt.Errorf("path has no %s directory: %s", sbMigrationsDir, projectRoot)
 		}
-		return nil, fmt.Errorf("read %s: %w", dir, err)
+		return nil, nil, fmt.Errorf("read %s: %w", dir, err)
 	}
 	var out []sbLocalMigration
 	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
 		m := sbMigrationFile.FindStringSubmatch(e.Name())
-		if m == nil {
-			continue // the CLI ignores files that do not fit <version>_<name>.sql as well
+		if e.IsDir() || m == nil {
+			skipped = append(skipped, e.Name())
+			continue
 		}
 		fi, err := e.Info()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if !fi.Mode().IsRegular() {
+			skipped = append(skipped, e.Name())
 			continue
 		}
 		out = append(out, sbLocalMigration{
@@ -110,36 +112,72 @@ func sbLocalMigrations(projectRoot string) ([]sbLocalMigration, error) {
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Stem < out[j].Stem })
-	return out, nil
+	return out, skipped, nil
 }
 
-// sbMigrationApplied reports whether the history holds the local file: by
-// version (the CLI's record), by the file stem or by the name part (the
-// API's record, both forms seen). Returns the matching entry.
-func sbMigrationApplied(local sbLocalMigration, history []sbRemoteMigration) (sbRemoteMigration, bool) {
-	for _, r := range history {
-		if r.Version == local.Version {
-			return r, true
-		}
-		if r.Name != "" && (r.Name == local.Stem || (local.Name != "" && r.Name == local.Name)) {
-			return r, true
+// sbMatchMigrations pairs local files with history entries one-to-one. Pass
+// one matches on version — the CLI's record — and uses the entry up. Pass two
+// matches the entries still free by name: the file stem, or the part after
+// the timestamp, which is how the API records a migration (the server
+// assigns the version; Lovable's newer entries carry only the name part).
+// One-to-one matters: with the CLI's history a repeated name (every
+// `supabase db pull` writes <ts>_remote_schema.sql) would otherwise mark a
+// new file as applied, and it would never reach the database.
+func sbMatchMigrations(local []sbLocalMigration, history []sbRemoteMigration) (applied, pending []sbLocalMigration, matches map[string]sbRemoteMigration) {
+	matches = map[string]sbRemoteMigration{}
+	used := make([]bool, len(history))
+	matched := make([]bool, len(local))
+	for i, l := range local {
+		for j, r := range history {
+			if !used[j] && r.Version == l.Version {
+				used[j], matched[i] = true, true
+				matches[l.Stem] = r
+				break
+			}
 		}
 	}
-	return sbRemoteMigration{}, false
-}
-
-// sbPendingMigrations splits the local files into applied and pending.
-func sbPendingMigrations(local []sbLocalMigration, history []sbRemoteMigration) (applied, pending []sbLocalMigration, matches map[string]sbRemoteMigration) {
-	matches = map[string]sbRemoteMigration{}
-	for _, l := range local {
-		if r, ok := sbMigrationApplied(l, history); ok {
+	for i, l := range local {
+		if matched[i] {
+			continue
+		}
+		for j, r := range history {
+			if used[j] || r.Name == "" {
+				continue
+			}
+			if r.Name == l.Stem || r.Name == l.Name {
+				used[j], matched[i] = true, true
+				matches[l.Stem] = r
+				break
+			}
+		}
+	}
+	for i, l := range local {
+		if matched[i] {
 			applied = append(applied, l)
-			matches[l.Stem] = r
 		} else {
 			pending = append(pending, l)
 		}
 	}
 	return applied, pending, matches
+}
+
+// sbOlderThanApplied lists the pending files whose version lies before the
+// newest applied one — out of order, which the CLI refuses without
+// --include-all. Reported, not refused: the caller decides.
+func sbOlderThanApplied(applied, pending []sbLocalMigration) []string {
+	newest := ""
+	for _, a := range applied {
+		if a.Version > newest {
+			newest = a.Version
+		}
+	}
+	var out []string
+	for _, p := range pending {
+		if newest != "" && p.Version < newest {
+			out = append(out, p.Stem)
+		}
+	}
+	return out
 }
 
 // sbMigrationsRoot checks the path argument: absolute, a directory, with
@@ -177,7 +215,7 @@ func (s *Supabase) handleMigrationsPending(ctx context.Context, req mcp.CallTool
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	local, err := sbLocalMigrations(root)
+	local, skipped, err := sbLocalMigrations(root)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -185,7 +223,7 @@ func (s *Supabase) handleMigrationsPending(ctx context.Context, req mcp.CallTool
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	applied, pending, matches := sbPendingMigrations(local, history)
+	applied, pending, matches := sbMatchMigrations(local, history)
 	type appliedEntry struct {
 		sbLocalMigration
 		HistoryVersion string `json:"historyVersion"`
@@ -211,7 +249,7 @@ func (s *Supabase) handleMigrationsPending(ctx context.Context, req mcp.CallTool
 			unmatched = append(unmatched, r)
 		}
 	}
-	return sbResultJSON(map[string]any{
+	result := map[string]any{
 		"project":       s.projectRef,
 		"migrationsDir": filepath.Join(root, filepath.FromSlash(sbMigrationsDir)),
 		"localCount":    len(local),
@@ -220,8 +258,15 @@ func (s *Supabase) handleMigrationsPending(ctx context.Context, req mcp.CallTool
 		"pending":       pending,
 		"applied":       ap,
 		"historyOnly":   unmatched,
-		"matchingRule":  "a file counts as applied when the history has its version, its file stem or its name part (the part after the timestamp)",
-	})
+		"matchingRule":  "a file counts as applied when one history entry has its version, else its file stem or its name part (the part after the timestamp); every entry matches at most one file",
+	}
+	if older := sbOlderThanApplied(applied, pending); len(older) > 0 {
+		result["olderThanLatestApplied"] = older
+	}
+	if len(skipped) > 0 {
+		result["skipped"] = skipped
+	}
+	return sbResultJSON(result)
 }
 
 func (s *Supabase) handleMigrationsApply(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -246,7 +291,7 @@ func (s *Supabase) handleMigrationsApply(ctx context.Context, req mcp.CallToolRe
 		}
 		dryRun = b
 	}
-	local, err := sbLocalMigrations(root)
+	local, _, err := sbLocalMigrations(root)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -254,25 +299,32 @@ func (s *Supabase) handleMigrationsApply(ctx context.Context, req mcp.CallToolRe
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	_, pending, _ := sbPendingMigrations(local, history)
+	applied0, pending, matches := sbMatchMigrations(local, history)
 
 	var todo []sbLocalMigration
 	if only != "" {
-		found := false
+		var candidates []sbLocalMigration
 		for _, l := range local {
 			if l.Stem == only || l.Version == only {
-				found = true
-				if r, ok := sbMigrationApplied(l, history); ok {
-					return mcp.NewToolResultError(fmt.Sprintf("%s.sql is already in the history (version %s, name %q) — nothing to apply", l.Stem, r.Version, r.Name)), nil
-				}
-				todo = []sbLocalMigration{l}
+				candidates = append(candidates, l)
 			}
 		}
-		if !found {
+		switch len(candidates) {
+		case 0:
 			return mcp.NewToolResultError(fmt.Sprintf("file %q is not in %s (name it as <version>_<name> or by its version)", only, sbMigrationsDir)), nil
+		case 1:
+		default:
+			names := make([]string, 0, len(candidates))
+			for _, c := range candidates {
+				names = append(names, c.Stem)
+			}
+			return mcp.NewToolResultError(fmt.Sprintf("file %q names %d migrations (%s) — pass the full file name", only, len(candidates), strings.Join(names, ", "))), nil
 		}
-		// A single file out of order is the caller's decision, but it is
-		// said so.
+		l := candidates[0]
+		if r, ok := matches[l.Stem]; ok {
+			return mcp.NewToolResultError(fmt.Sprintf("%s.sql is already in the history (version %s, name %q) — nothing to apply", l.Stem, r.Version, r.Name)), nil
+		}
+		todo = []sbLocalMigration{l}
 	} else {
 		todo = pending
 	}
@@ -285,15 +337,15 @@ func (s *Supabase) handleMigrationsApply(ctx context.Context, req mcp.CallToolRe
 	plan := make([]planned, 0, len(todo))
 	contents := make([][]byte, 0, len(todo))
 	for _, l := range todo {
-		if l.Size == 0 {
-			return mcp.NewToolResultError(fmt.Sprintf("%s.sql is empty — the API refuses an empty query", l.Stem)), nil
-		}
 		if l.Size > sbMigrationMax {
 			return mcp.NewToolResultError(fmt.Sprintf("%s.sql is %d bytes, more than the %d MB a migration may have here", l.Stem, l.Size, sbMigrationMax>>20)), nil
 		}
 		data, err := os.ReadFile(l.Path)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("read %s: %v", l.Path, err)), nil
+		}
+		if len(strings.TrimSpace(sbStripSQLComments(string(data)))) == 0 {
+			return mcp.NewToolResultError(fmt.Sprintf("%s.sql holds no SQL (empty, or only comments) — the API refuses an empty query", l.Stem)), nil
 		}
 		sum := sha256.Sum256(data)
 		plan = append(plan, planned{l, strings.Count(string(data), ";"), hex.EncodeToString(sum[:])})
@@ -305,6 +357,10 @@ func (s *Supabase) handleMigrationsApply(ctx context.Context, req mcp.CallToolRe
 		"pendingCount": len(pending),
 		"planned":      plan,
 		"plannedCount": len(plan),
+	}
+	if older := sbOlderThanApplied(applied0, todo); len(older) > 0 {
+		result["olderThanLatestApplied"] = older
+		result["orderWarning"] = "these files are older than the newest applied migration — the CLI would refuse them without --include-all; applying them is your decision"
 	}
 	if only != "" && len(pending) > 1 {
 		skipped := make([]string, 0, len(pending))
@@ -333,26 +389,12 @@ func (s *Supabase) handleMigrationsApply(ctx context.Context, req mcp.CallToolRe
 		Version string `json:"historyVersion,omitempty"`
 	}
 	var applied []appliedOut
-	for i, l := range todo {
-		body := map[string]any{"query": string(contents[i]), "name": l.Stem}
-		// The idempotency key ties a retry (429, a broken connection) to the
-		// same migration: name and content, nothing else.
-		key := plan[i].SHA256[:32]
-		if _, err := s.callJSONHeaders(ctx, "migrations.apply", nil, nil, map[string]string{"Idempotency-Key": l.Stem + "-" + key}, body, nil); err != nil {
-			result["applied"] = applied
-			result["failed"] = map[string]any{"file": l.Stem, "error": err.Error()}
-			remaining := make([]string, 0)
-			for _, r := range todo[i+1:] {
-				remaining = append(remaining, r.Stem)
-			}
-			result["remaining"] = remaining
-			result["note"] = "stopped at the first error; the migrations before it are applied and recorded, this one is not — fix the file and run again"
-			return sbResultJSON(result)
+	// versionsFromHistory fills in the versions the server assigned.
+	versionsFromHistory := func() {
+		after, err := s.listMigrations(ctx)
+		if err != nil {
+			return
 		}
-		applied = append(applied, appliedOut{File: l.Stem})
-	}
-	// Read the history back for the versions the server assigned.
-	if after, err := s.listMigrations(ctx); err == nil {
 		for i := range applied {
 			for _, r := range after {
 				if r.Name == applied[i].File {
@@ -361,7 +403,73 @@ func (s *Supabase) handleMigrationsApply(ctx context.Context, req mcp.CallToolRe
 			}
 		}
 	}
+	for i, l := range todo {
+		body := map[string]any{"query": string(contents[i]), "name": l.Stem}
+		// The idempotency key names this migration by file and content, so the
+		// 429 retry inside the call repeats the same request. What the server
+		// does with the key beyond that is not documented.
+		key := l.Stem + "-" + plan[i].SHA256[:32]
+		_, err := s.callJSONHeadersWith(ctx, s.longClient, "migrations.apply", nil, nil, map[string]string{"Idempotency-Key": key}, body, nil)
+		if err == nil {
+			applied = append(applied, appliedOut{File: l.Stem})
+			continue
+		}
+		remaining := make([]string, 0)
+		for _, r := range todo[i+1:] {
+			remaining = append(remaining, r.Stem)
+		}
+		result["remaining"] = remaining
+		failed := map[string]any{"file": l.Stem, "error": err.Error()}
+		if sbAnswered(err) {
+			// The server said no: the SQL did not run (the API applies a
+			// migration as one transaction).
+			failed["state"] = "not applied"
+			result["note"] = "stopped at the first error; the migrations before it are applied and recorded, this one is not — fix the file and run again"
+		} else {
+			// No answer: a timeout or a dead connection after the request
+			// went out. The server may still be running the SQL, or may have
+			// finished it. The history decides, not a retry.
+			failed["state"] = "unknown"
+			if after, lerr := s.listMigrations(ctx); lerr == nil {
+				for _, r := range after {
+					if r.Name == l.Stem {
+						failed["state"] = "applied — the history has it (version " + r.Version + ") although the request got no answer"
+					}
+				}
+			}
+			result["note"] = "the request got no answer; whether the migration ran is unknown — check migrations_list (or wait and check again if it is a long one) before running anything else on this project"
+		}
+		result["failed"] = failed
+		versionsFromHistory()
+		result["applied"] = applied
+		result["appliedCount"] = len(applied)
+		return sbResultJSON(result)
+	}
+	versionsFromHistory()
 	result["applied"] = applied
 	result["appliedCount"] = len(applied)
 	return sbResultJSON(result)
+}
+
+// sbStripSQLComments removes -- line comments and /* */ blocks, enough to
+// tell a file with no statements from one with some.
+func sbStripSQLComments(sql string) string {
+	var b strings.Builder
+	for i := 0; i < len(sql); i++ {
+		switch {
+		case strings.HasPrefix(sql[i:], "--"):
+			for i < len(sql) && sql[i] != '\n' {
+				i++
+			}
+		case strings.HasPrefix(sql[i:], "/*"):
+			end := strings.Index(sql[i+2:], "*/")
+			if end < 0 {
+				return b.String()
+			}
+			i += end + 3
+		default:
+			b.WriteByte(sql[i])
+		}
+	}
+	return b.String()
 }
