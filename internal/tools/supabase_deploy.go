@@ -1089,6 +1089,19 @@ func (s *Supabase) handleFunctionDeploy(ctx context.Context, req mcp.CallToolReq
 	if dryRun {
 		result["dryRun"] = true
 		result["deployed"] = false
+		if before != nil {
+			// The acceptance check in one place: the plan against the files
+			// the server holds for the running version, prefix-agnostic.
+			files, _, eszip, err := s.sbFunctionBody(ctx, slug)
+			switch {
+			case err != nil:
+				result["comparison"] = map[string]any{"error": fmt.Sprintf("the deployed files could not be read: %v", err)}
+			case eszip != nil:
+				result["comparison"] = map[string]any{"note": "the deployed version is a pre-built bundle; there are no files to compare"}
+			default:
+				result["comparison"] = sbComparePlan(plan, files, before.Entrypoint)
+			}
+		}
 		return sbResultJSON(result)
 	}
 
@@ -1122,6 +1135,88 @@ func (s *Supabase) handleFunctionDeploy(ctx context.Context, req mcp.CallToolReq
 		result["warning"] = fmt.Sprintf("the version did not advance (%d before, %d after)", before.Version, deployed.Version)
 	}
 	return sbResultJSON(result)
+}
+
+// sbComparePlan holds a deploy plan against the files of the deployed
+// version. The server anchors the files it hands back differently from the
+// upload (functions/x/index.ts for an upload named supabase/functions/x/index.ts
+// — seen live 01.11.2026), so both sides are compared from the functions
+// directory down: the longest common suffix anchoring works out of the
+// entrypoint. Same names and sizes means the deploy would carry what runs.
+func sbComparePlan(plan *sbDeployPlan, deployed []sbBodyFile, deployedEntrypoint string) map[string]any {
+	localEntry, _ := plan.Metadata["entrypoint_path"].(string)
+	// The deployed entrypoint is the file whose path shares the longest
+	// suffix with the local one (the server may anchor it differently from
+	// the metadata it reports).
+	deployedEntry, best := "", -1
+	for _, f := range deployed {
+		if n := len(sbCommonSuffix(localEntry, f.Path)); n > best {
+			deployedEntry, best = f.Path, n
+		}
+	}
+	if deployedEntry == "" {
+		deployedEntry = deployedEntrypoint
+	}
+	common := sbCommonSuffix(localEntry, deployedEntry)
+	localPrefix := strings.TrimSuffix(localEntry, common)
+	remotePrefix := strings.TrimSuffix(deployedEntry, common)
+	local := map[string]int64{}
+	for _, f := range plan.Files {
+		local[strings.TrimPrefix(f.Name, localPrefix)] = f.Size
+	}
+	remote := map[string]int{}
+	for _, f := range deployed {
+		remote[strings.TrimPrefix(f.Path, remotePrefix)] = f.Size
+	}
+	var onlyLocal, onlyDeployed, sizeDiffers []string
+	for n, sz := range local {
+		rs, ok := remote[n]
+		switch {
+		case !ok:
+			onlyLocal = append(onlyLocal, n)
+		case int64(rs) != sz:
+			sizeDiffers = append(sizeDiffers, fmt.Sprintf("%s (local %d, deployed %d)", n, sz, rs))
+		}
+	}
+	for n := range remote {
+		if _, ok := local[n]; !ok {
+			onlyDeployed = append(onlyDeployed, n)
+		}
+	}
+	sort.Strings(onlyLocal)
+	sort.Strings(onlyDeployed)
+	sort.Strings(sizeDiffers)
+	same := len(onlyLocal) == 0 && len(onlyDeployed) == 0 && len(sizeDiffers) == 0
+	out := map[string]any{
+		"sameFiles":     same,
+		"deployedFiles": len(deployed),
+		"plannedFiles":  len(plan.Files),
+		"anchoredAt":    common[:strings.Index(common+"/", "/")],
+	}
+	if len(onlyLocal) > 0 {
+		out["onlyLocal"] = onlyLocal
+	}
+	if len(onlyDeployed) > 0 {
+		out["onlyDeployed"] = onlyDeployed
+	}
+	if len(sizeDiffers) > 0 {
+		out["sizeDiffers"] = sizeDiffers
+	}
+	if same {
+		out["note"] = "the plan carries the same files with the same sizes as the deployed version — contents are not compared"
+	}
+	return out
+}
+
+// sbCommonSuffix returns the longest common suffix of a and b on path
+// segment boundaries.
+func sbCommonSuffix(a, b string) string {
+	as, bs := strings.Split(a, "/"), strings.Split(b, "/")
+	n := 0
+	for n < len(as) && n < len(bs) && as[len(as)-1-n] == bs[len(bs)-1-n] {
+		n++
+	}
+	return strings.Join(as[len(as)-n:], "/")
 }
 
 // --- Reading a function back ---

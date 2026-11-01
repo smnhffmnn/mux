@@ -35,16 +35,22 @@ type sbFakeRequest struct {
 // sbFake is a Management API stand-in for one project with one deployed
 // function, two secrets and a log stream.
 type sbFake struct {
-	srv      *httptest.Server
-	mu       sync.Mutex
-	requests []sbFakeRequest
-	version  int
-	rateOnce bool // answer the first deploy with 429, then succeed
+	srv        *httptest.Server
+	mu         sync.Mutex
+	requests   []sbFakeRequest
+	version    int
+	rateOnce   bool // answer the first deploy with 429, then succeed
+	migrations []map[string]string
+	failApply  string // name of a migration whose apply answers 500
 }
 
 func newSBFake(t *testing.T) *sbFake {
 	t.Helper()
-	f := &sbFake{version: 7}
+	f := &sbFake{version: 7, migrations: []map[string]string{
+		{"version": "20260710085001", "name": "20260710085001_929350e6-7b35-4f7e-818f-91f6a6c404aa"}, // early API form: full stem
+		{"version": "20260805175905", "name": "8447fd06-6bca-464e-88de-4bad72f7834c"},                // later API form: name part only, version shifted
+		{"version": "20260901120000", "name": "add_widgets"},                                         // CLI form: version = file version
+	}}
 	record := func(r *http.Request) []byte {
 		body, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
@@ -94,12 +100,12 @@ func newSBFake(t *testing.T) *sbFake {
 		pw, _ := mw.CreateFormField("metadata")
 		io.WriteString(pw, `{"entrypoint_path":"supabase/functions/hook/index.ts"}`)
 		h := make(map[string][]string)
-		h["Content-Disposition"] = []string{`form-data; name="file"; filename="supabase/functions/hook/index.ts"`}
-		h["Supabase-Path"] = []string{"supabase/functions/hook/index.ts"}
+		h["Content-Disposition"] = []string{`form-data; name="file"; filename="functions/hook/index.ts"`}
+		h["Supabase-Path"] = []string{"functions/hook/index.ts"}
 		pw, _ = mw.CreatePart(h)
 		io.WriteString(pw, "import '../_shared/a.ts';\n")
 		h2 := make(map[string][]string)
-		h2["Content-Disposition"] = []string{`form-data; name="file"; filename="supabase/functions/_shared/a.ts"`}
+		h2["Content-Disposition"] = []string{`form-data; name="file"; filename="functions/_shared/a.ts"`}
 		pw, _ = mw.CreatePart(h2)
 		io.WriteString(pw, "export const a = 1;\n")
 		mw.Close()
@@ -160,13 +166,35 @@ func newSBFake(t *testing.T) *sbFake {
 		record(r)
 		jsonOK(w, 201, `[{"ro":true}]`)
 	})
+	mux.HandleFunc(base+"/database/migrations", func(w http.ResponseWriter, r *http.Request) {
+		body := record(r)
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		switch r.Method {
+		case http.MethodGet:
+			out, _ := json.Marshal(f.migrations)
+			jsonOK(w, 200, string(out))
+		case http.MethodPost:
+			var m struct {
+				Query string `json:"query"`
+				Name  string `json:"name"`
+			}
+			json.Unmarshal(body, &m)
+			if m.Name == f.failApply {
+				jsonOK(w, 500, `{"message":"failed to run sql query: syntax error at or near \"BROKEN\""}`)
+				return
+			}
+			f.migrations = append(f.migrations, map[string]string{"version": fmt.Sprintf("2026110100%04d", len(f.migrations)), "name": m.Name})
+			jsonOK(w, 201, ``)
+		}
+	})
 	mux.HandleFunc(base+"/analytics/endpoints/logs", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
 		if strings.Contains(r.URL.Query().Get("sql"), "BROKEN") {
 			jsonOK(w, 200, `{"result":[],"error":"Syntax error near BROKEN"}`)
 			return
 		}
-		jsonOK(w, 200, `{"result":[{"timestamp":1761934200123456,"event_message":"hello","function_id":"fid-1"}]}`)
+		jsonOK(w, 200, `{"result":[{"timestamp":1761934200123456,"event_message":"hello","function_id":"fid-1"},{"timestamp":"2026-11-01T13:04:01.230000","event_message":"naive"}]}`)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
@@ -249,12 +277,12 @@ func TestSupabase_NewAndTools(t *testing.T) {
 		return out
 	}
 	full := names(newTestSupabase(t, f, nil))
-	want := []string{"project", "functions_list", "function_get", "secrets_list", "sql_query", "logs", "function_deploy", "function_delete", "secrets_set", "secrets_delete"}
+	want := []string{"project", "functions_list", "function_get", "secrets_list", "sql_query", "logs", "migrations_list", "migrations_pending", "migrations_apply", "function_deploy", "function_delete", "secrets_set", "secrets_delete"}
 	if strings.Join(full, ",") != strings.Join(want, ",") {
 		t.Errorf("tools = %v\nwant %v", full, want)
 	}
 	ro := names(newTestSupabase(t, f, func(c *config.Connection) { c.ReadOnly = true }))
-	if strings.Join(ro, ",") != strings.Join(want[:6], ",") {
+	if strings.Join(ro, ",") != strings.Join(want[:8], ",") {
 		t.Errorf("read-only tools = %v", ro)
 	}
 	s := newTestSupabase(t, f, func(c *config.Connection) { c.Instructions = "production project of the app" })
@@ -313,7 +341,7 @@ func TestSupabase_FunctionGet(t *testing.T) {
 		t.Fatal(errText)
 	}
 	files := out["files"].([]any)
-	if len(files) != 2 || files[0].(map[string]any)["path"] != "supabase/functions/_shared/a.ts" || files[1].(map[string]any)["size"] != float64(26) {
+	if len(files) != 2 || files[0].(map[string]any)["path"] != "functions/_shared/a.ts" || files[1].(map[string]any)["size"] != float64(26) {
 		t.Errorf("files = %v", files)
 	}
 	if out["metadata"].(map[string]any)["entrypoint_path"] != "supabase/functions/hook/index.ts" {
@@ -331,7 +359,7 @@ func TestSupabase_FunctionGet(t *testing.T) {
 	if errText != "" {
 		t.Fatal(errText)
 	}
-	if out["file"] != "supabase/functions/hook/index.ts" || out["content"] != "import '../_shared/a.ts';\n" {
+	if out["file"] != "functions/hook/index.ts" || out["content"] != "import '../_shared/a.ts';\n" {
 		t.Errorf("inline = %v", out)
 	}
 	if _, errText := sbCall(t, s, s.handleFunctionGet, map[string]any{"slug": "hook", "file": "nope.ts"}); !strings.Contains(errText, "not among") {
@@ -343,7 +371,7 @@ func TestSupabase_FunctionGet(t *testing.T) {
 	if errText != "" {
 		t.Fatal(errText)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "supabase", "functions", "_shared", "a.ts"))
+	data, err := os.ReadFile(filepath.Join(dir, "functions", "_shared", "a.ts"))
 	if err != nil || string(data) != "export const a = 1;\n" {
 		t.Errorf("written file: %q %v", data, err)
 	}
@@ -402,6 +430,16 @@ func TestSupabase_Deploy(t *testing.T) {
 	}
 	if out["before"].(map[string]any)["version"] != float64(7) {
 		t.Errorf("before = %v", out["before"])
+	}
+	// The deployed version holds index.ts (26 bytes) and _shared/a.ts under
+	// the server's anchoring; the plan has them under supabase/ plus deno.json
+	// and a differently sized index.ts.
+	cmp := out["comparison"].(map[string]any)
+	if cmp["sameFiles"] != false || fmt.Sprint(cmp["onlyLocal"]) != "[functions/hook/deno.json]" || cmp["onlyDeployed"] != nil {
+		t.Errorf("comparison = %v", cmp)
+	}
+	if sd := fmt.Sprint(cmp["sizeDiffers"]); !strings.Contains(sd, "functions/hook/index.ts (local 37, deployed 26)") {
+		t.Errorf("sizeDiffers = %v", sd)
 	}
 	// verify_jwt neither in config nor in the call: the deployed value is kept.
 	if out["metadata"].(map[string]any)["verify_jwt"] != false {
@@ -640,7 +678,7 @@ func TestSupabase_Logs(t *testing.T) {
 		t.Errorf("window = %v", out)
 	}
 	rows := out["rows"].([]any)
-	if len(rows) != 1 || rows[0].(map[string]any)["timestamp"] != "2025-10-31T18:10:00.123456Z" {
+	if len(rows) != 2 || rows[0].(map[string]any)["timestamp"] != "2025-10-31T18:10:00.123456Z" || rows[1].(map[string]any)["timestamp"] != "2026-11-01T13:04:01.230000Z" {
 		t.Errorf("rows = %v", rows)
 	}
 	req, _ := f.last("GET", "/analytics/endpoints/logs")
