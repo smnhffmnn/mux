@@ -23,6 +23,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/smnhffmnn/mux/internal/blob"
 	"github.com/smnhffmnn/mux/internal/config"
 )
 
@@ -136,6 +137,38 @@ func sbProjectRoot(raw string) (string, error) {
 		return "", fmt.Errorf("path is not usable: %w", err)
 	}
 	return root, nil
+}
+
+// sbProjectRootArg resolves the path argument of the deploy: a tree the
+// agent uploaded to mux (blob:<id>, unpacked under the store) or a directory
+// on this machine. For a tree the git-root boundary is the tree itself.
+func sbProjectRootArg(raw string) (string, *blob.Info, error) {
+	dir, info, err := blobInputTree(raw, "path")
+	if err != nil {
+		return "", nil, err
+	}
+	root, err := sbProjectRoot(dir)
+	if err != nil && info != nil {
+		return "", nil, sbTreeError(err, dir, info)
+	}
+	return root, info, err
+}
+
+// sbTreeError rewrites an error about a tree blob for the caller: the store's
+// private path becomes the blob reference, and a tree without supabase/ at
+// its top gets the archiving hint.
+func sbTreeError(err error, dir string, info *blob.Info) error {
+	msg := strings.ReplaceAll(err.Error(), dir, blob.Ref(info.ID))
+	hasSupabase := false
+	for _, t := range info.TopLevel {
+		if t == "supabase" {
+			hasSupabase = true
+		}
+	}
+	if !hasSupabase {
+		return fmt.Errorf("%s — the archive has to hold supabase/ at its top level (tar -C <project root> -cz supabase | curl --data-binary @- '…/blob?tree=1'); its top level holds %v", msg, info.TopLevel)
+	}
+	return errors.New(msg)
 }
 
 // sbGitRoot walks up from dir to the nearest directory with a .git entry.
@@ -875,6 +908,17 @@ func sbGlobRegexp(glob string) (*regexp.Regexp, error) {
 // files and metadata. remoteVerifyJWT is the deployed function's setting,
 // used when config.toml and the call do not say — the CLI keeps it as well.
 func sbPlanDeploy(projectRoot, slug, projectRef string, verifyOverride *bool, remoteVerifyJWT *bool) (*sbDeployPlan, error) {
+	sourceRoot := projectRoot
+	if g, ok := sbGitRoot(projectRoot); ok {
+		sourceRoot = g
+	}
+	return sbPlanDeployBounded(projectRoot, sourceRoot, slug, projectRef, verifyOverride, remoteVerifyJWT)
+}
+
+// sbPlanDeployBounded is sbPlanDeploy with the walk boundary given: for a
+// tree the agent uploaded, the tree itself — a .git above the store (a
+// dotfiles repository in the home directory) must not widen it.
+func sbPlanDeployBounded(projectRoot, sourceRoot, slug, projectRef string, verifyOverride *bool, remoteVerifyJWT *bool) (*sbDeployPlan, error) {
 	cfg, err := sbReadFunctionConfig(projectRoot, slug, projectRef)
 	if err != nil {
 		return nil, err
@@ -887,10 +931,6 @@ func sbPlanDeploy(projectRoot, slug, projectRef string, verifyOverride *bool, re
 	}
 	if err := sbResolveImportMap(projectRoot, &cfg); err != nil {
 		return nil, err
-	}
-	sourceRoot := projectRoot
-	if g, ok := sbGitRoot(projectRoot); ok {
-		sourceRoot = g
 	}
 	plan := &sbDeployPlan{Slug: slug, ProjectRoot: projectRoot, SourceRoot: sourceRoot, Config: cfg}
 	realSource := sbRealPath(sourceRoot)
@@ -1028,7 +1068,7 @@ func (s *Supabase) handleFunctionDeploy(ctx context.Context, req mcp.CallToolReq
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	projectRoot, err := sbProjectRoot(rawPath)
+	projectRoot, treeBlob, err := sbProjectRootArg(rawPath)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1062,16 +1102,29 @@ func (s *Supabase) handleFunctionDeploy(ctx context.Context, req mcp.CallToolReq
 	if before != nil {
 		remoteVerify = before.VerifyJWT
 	}
-	plan, err := sbPlanDeploy(projectRoot, slug, s.projectRef, verifyOverride, remoteVerify)
+	var plan *sbDeployPlan
+	if treeBlob != nil {
+		plan, err = sbPlanDeployBounded(projectRoot, projectRoot, slug, s.projectRef, verifyOverride, remoteVerify)
+		if err != nil {
+			err = sbTreeError(err, projectRoot, treeBlob)
+		}
+	} else {
+		plan, err = sbPlanDeploy(projectRoot, slug, s.projectRef, verifyOverride, remoteVerify)
+	}
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
+	shownRoot, shownSource := projectRoot, plan.SourceRoot
+	if treeBlob != nil {
+		// The store's private path says nothing to the caller; the blob does.
+		shownRoot, shownSource = blobDisplay(treeBlob), blobDisplay(treeBlob)
+	}
 	result := map[string]any{
 		"project":     s.projectRef,
 		"slug":        slug,
-		"projectRoot": projectRoot,
-		"sourceRoot":  plan.SourceRoot,
+		"projectRoot": shownRoot,
+		"sourceRoot":  shownSource,
 		"metadata":    plan.Metadata,
 		"files":       plan.Files,
 		"fileCount":   len(plan.Files),
@@ -1122,6 +1175,12 @@ func (s *Supabase) handleFunctionDeploy(ctx context.Context, req mcp.CallToolReq
 			return mcp.NewToolResultError(fmt.Sprintf("unexpected deploy status %d (the API answers 201 on success): %s", resp.StatusCode, strings.TrimSpace(string(data)))), nil
 		}
 		return mcp.NewToolResultError("deploy failed: " + sbErrorMessage(resp.StatusCode, data).Error()), nil
+	}
+	// The deploy took: a tree the agent uploaded for it has served its
+	// purpose. A dry run above leaves it, so plan and deploy share one upload.
+	if treeBlob != nil {
+		consumeBlob(treeBlob)
+		result["consumedBlob"] = blob.Ref(treeBlob.ID)
 	}
 	var deployed sbRawFunction
 	if err := json.Unmarshal(data, &deployed); err != nil {
@@ -1351,7 +1410,21 @@ func (s *Supabase) handleFunctionGet(ctx context.Context, req mcp.CallToolReques
 		return mcp.NewToolResultError("file and output_dir are alternatives: one file inline, or all files to disk"), nil
 	}
 	var outRoot string
-	if outputDir != "" {
+	toBlob := wantsBlobOutput(outputDir)
+	switch {
+	case toBlob:
+		// The files are written to a scratch directory and handed back as one
+		// tree blob (a tar.gz on GET).
+		if blobStore == nil {
+			return noBlobStoreResult("output_dir"), nil
+		}
+		tmp, err := os.MkdirTemp(blobStore.Dir(), "function-get-*")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("create scratch directory: %v", err)), nil
+		}
+		defer os.RemoveAll(tmp)
+		outRoot = tmp
+	case outputDir != "":
 		outRoot = filepath.Clean(config.ExpandHome(outputDir))
 		if !filepath.IsAbs(outRoot) {
 			return mcp.NewToolResultError(fmt.Sprintf("output_dir must be an absolute path: %s", outputDir)), nil
@@ -1381,7 +1454,13 @@ func (s *Supabase) handleFunctionGet(ctx context.Context, req mcp.CallToolReques
 			return mcp.NewToolResultError(fmt.Sprintf("function %s was deployed as a pre-built bundle — the API has no source files, so %q cannot be read; output_dir writes the bundle", slug, file)), nil
 		}
 		result["bundle"] = map[string]any{"format": "eszip", "size": len(eszip), "note": "the function was deployed as a pre-built bundle; the API has no source files for it"}
-		if outputDir != "" {
+		if toBlob {
+			info, err := storeBytesAsBlob(eszip, blob.Meta{Name: slug + ".eszip", ContentType: "application/octet-stream", Source: "supabase function_get"})
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			result["blob"] = blobReference(info)
+		} else if outputDir != "" {
 			dest := filepath.Join(outRoot, slug+".eszip")
 			if err := sbWriteNew(dest, eszip); err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
@@ -1436,8 +1515,16 @@ func (s *Supabase) handleFunctionGet(ctx context.Context, req mcp.CallToolReques
 			}
 			written = append(written, dest)
 		}
-		result["written"] = written
-		result["outputDir"] = outRoot
+		if toBlob {
+			info, err := blobStore.PutDir(outRoot, blob.Meta{Name: slug, Source: "supabase function_get"})
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("store the files as a blob: %v", err)), nil
+			}
+			result["blob"] = blobReference(info)
+		} else {
+			result["written"] = written
+			result["outputDir"] = outRoot
+		}
 	}
 	return sbResultJSON(result)
 }
@@ -1517,6 +1604,46 @@ func sbReadEnvFile(raw string) (values map[string]string, skipped []string, err 
 	if bytes.IndexByte(data, 0) >= 0 {
 		return nil, nil, fmt.Errorf("env_file is not a text file: %s", clean)
 	}
+	values, skipped, err = sbParseEnv(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(values) == 0 && len(skipped) == 0 {
+		return nil, nil, fmt.Errorf("env_file %s holds no KEY=VALUE lines", clean)
+	}
+	return values, skipped, nil
+}
+
+// sbReadEnvBlob reads a dotenv file the agent uploaded as a blob. The same
+// rules as for a path, minus the name check (a blob has no file name to
+// vouch for it; its content has to parse as dotenv instead).
+func sbReadEnvBlob(path string, info *blob.Info) (values map[string]string, skipped []string, err error) {
+	if info.Size == 0 {
+		return nil, nil, fmt.Errorf("env_file blob %s is empty", info.ID)
+	}
+	if info.Size > sbEnvFileMax {
+		return nil, nil, fmt.Errorf("env_file blob %s is larger than %d KB", info.ID, sbEnvFileMax>>10)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("env_file blob %s is not readable: %w", info.ID, err)
+	}
+	if bytes.IndexByte(data, 0) >= 0 {
+		return nil, nil, fmt.Errorf("env_file blob %s is not a text file", info.ID)
+	}
+	values, skipped, err = sbParseEnv(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(values) == 0 && len(skipped) == 0 {
+		return nil, nil, fmt.Errorf("env_file blob %s holds no KEY=VALUE lines", info.ID)
+	}
+	return values, skipped, nil
+}
+
+// sbParseEnv reads KEY=VALUE lines in dotenv form. Errors carry a line
+// number, never the line.
+func sbParseEnv(data []byte) (values map[string]string, skipped []string, err error) {
 	values = map[string]string{}
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	sc.Buffer(make([]byte, 0, 64*1024), sbEnvFileMax+1)
@@ -1548,9 +1675,6 @@ func sbReadEnvFile(raw string) (values map[string]string, skipped []string, err 
 	}
 	if err := sc.Err(); err != nil {
 		return nil, nil, fmt.Errorf("read env_file: %w", err)
-	}
-	if len(values) == 0 && len(skipped) == 0 {
-		return nil, nil, fmt.Errorf("env_file %s holds no KEY=VALUE lines", clean)
 	}
 	sort.Strings(skipped)
 	return values, skipped, nil

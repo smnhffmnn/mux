@@ -22,6 +22,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/smnhffmnn/mux/internal/blob"
 	"github.com/smnhffmnn/mux/internal/bridge"
 	"github.com/smnhffmnn/mux/internal/config"
 	"github.com/smnhffmnn/mux/internal/health"
@@ -397,8 +398,25 @@ More info: https://github.com/smnhffmnn/mux
 		log.Printf("[mux] Tunnel %q failed: %v — connections using it will be skipped", name, err)
 	}
 
+	// The blob store moves files between the agent and mux (internal/blob).
+	// It hangs off the HTTP listener, so a plain stdio instance — which has
+	// none — runs without it and its tools fall back to local paths.
+	var blobs *blob.Store
+	if !useStdio {
+		blobs = openBlobStore(cfg)
+		tools.SetBlobStore(blobs)
+		if blobs != nil {
+			// A normal shutdown takes the blobs with it; after a crash the
+			// next start reaps the directory.
+			defer blobs.Close()
+		}
+	}
+
 	// Build MCP instructions from connection descriptions
 	instruction := "mux (MCP Unified Exchange) — a unified MCP gateway providing access to configured database and proxy connections."
+	if blobs != nil {
+		instruction += "\n\n" + blobs.Instructions()
+	}
 	for _, conn := range cfg.AllConnections() {
 		instr := conn.Instructions
 		if instr == "" {
@@ -425,6 +443,9 @@ More info: https://github.com/smnhffmnn/mux
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	registerProxies(ctx, s, cfg, tm)
+	if blobs != nil {
+		go blobs.Run(ctx.Done(), time.Minute)
+	}
 
 	// Wire up vault unlock → retry skipped connections
 	if vlt != nil {
@@ -515,6 +536,32 @@ More info: https://github.com/smnhffmnn/mux
 
 	// --- Desktop mode (Wails v3 + MCP HTTP) ---
 	runDesktop(s, cfg, tm, book, ctx, cancel, vlt, waServer, approvalQueue)
+}
+
+// openBlobStore opens the temporary file store under the state directory
+// with the limits of [blobs]. A failure is logged and leaves mux without a
+// store: every file tool then needs a local path, and says so.
+func openBlobStore(cfg *config.Config) *blob.Store {
+	opts := blob.Options{BaseURL: fmt.Sprintf("http://127.0.0.1:%d", cfg.Server.Port)}
+	var err error
+	if opts.TTL, err = cfg.Blobs.EffectiveTTL(); err != nil {
+		log.Printf("[blob] %v — using the default %s", err, blob.DefaultTTL)
+	}
+	if opts.MaxTotal, err = cfg.Blobs.EffectiveMaxTotal(); err != nil {
+		log.Printf("[blob] %v — using the default %s", err, blob.FormatSize(blob.DefaultMaxTotal))
+	}
+	if opts.MaxBlob, err = cfg.Blobs.EffectiveMaxBlob(); err != nil {
+		log.Printf("[blob] %v — using the default %s", err, blob.FormatSize(blob.DefaultMaxBlob))
+	}
+	dir := filepath.Join(config.StateDir(), "blobs")
+	store, err := blob.Open(dir, opts)
+	if err != nil {
+		log.Printf("[blob] store unavailable: %v — file tools need local paths", err)
+		return nil
+	}
+	log.Printf("[blob] store at %s (ttl %s, cap %s total, %s per blob) — POST/GET /blob on the loopback listener",
+		store.Dir(), blob.FormatDuration(store.TTL()), blob.FormatSize(store.MaxTotal()), blob.FormatSize(store.MaxBlob()))
+	return store
 }
 
 // headlessLocalRoutes assembles the routes of the loopback HTTP server in
@@ -709,6 +756,9 @@ func startHTTPServer(s *server.MCPServer, cfg *config.Config, hc *health.Checker
 	if hc != nil {
 		hc.Mount(httpMux)
 	}
+	// /blob sits here with /health: loopback only, same trust boundary as
+	// /mcp, in headless and desktop mode alike.
+	tools.MountBlobRoutes(httpMux)
 
 	if localRoutes != nil {
 		localRoutes(httpMux)

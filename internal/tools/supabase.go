@@ -18,6 +18,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/smnhffmnn/mux/internal/blob"
 	"github.com/smnhffmnn/mux/internal/config"
 )
 
@@ -61,8 +62,8 @@ const (
 const DefaultSupabaseInstructions = `One Supabase project over the Management API; every tool acts on that project.
 functions_list shows the deployed Edge Functions with version and update time; function_get reads one back — its metadata and the source files the server holds (list, one file inline, or all files into a directory).
 migrations_pending compares the checkout's supabase/migrations/ with the project's history; migrations_apply runs the pending files through the API in file order (dry_run first) — the database is production.
-function_deploy uploads a function from a local checkout: pass the project root (the directory that contains supabase/) and the slug; mux collects the files the way the supabase CLI does (entrypoint, relative imports, import map targets, static_files from config.toml) and the server bundles. Use dry_run first: it shows the file list and compares it with the files of the deployed version (comparison.sameFiles). verify_jwt is taken from config.toml, else kept as deployed; pass it only to change it.
-secrets_list never returns values. secrets_set reads them from an env_file on this machine (preferred) or from the call; names must not start with SUPABASE_.
+function_deploy uploads a function from a checkout: pass the project root (the directory that contains supabase/) and the slug. The root is a tree blob you uploaded (tar -C <project root> -cz supabase | curl --data-binary @- -H 'Content-Type: application/gzip' '<mux>/blob?tree=1', then path=blob:<id>) or, where you and mux share a disk, an absolute path. mux collects the files the way the supabase CLI does (entrypoint, relative imports, import map targets, static_files from config.toml) and the server bundles. Use dry_run first: it shows the file list and compares it with the files of the deployed version (comparison.sameFiles); the same tree then serves the deploy, which deletes it once it succeeded. migrations_pending and migrations_apply take the same tree. verify_jwt is taken from config.toml, else kept as deployed; pass it only to change it.
+secrets_list never returns values. secrets_set reads them from an env_file (preferred — a dotenv file uploaded as a blob, blob:<id>, or a path on this machine) or from the call; names must not start with SUPABASE_.
 sql_query runs SQL on the project's Postgres through the API; on a read-only connection only the read-only endpoint is used. logs queries the unified log stream (ClickHouse SQL) for a window of at most 24 hours — the default is the last hour of function_logs; filter by function slug.
 Write tools are absent on read-only connections.`
 
@@ -668,8 +669,25 @@ func (s *Supabase) handleSecretsSet(ctx context.Context, req mcp.CallToolRequest
 	}
 	secrets := map[string]string{}
 	var fromFile, skipped []string
+	var envBlob *blob.Info
 	if envFile != "" {
-		parsed, skip, err := sbReadEnvFile(envFile)
+		// blob:<id> is a dotenv file the agent uploaded to mux; a path is a
+		// file on this machine. Either way the values stay out of the result.
+		src, info, err := blobInputFile(envFile, "env_file")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		var parsed map[string]string
+		var skip []string
+		if info != nil {
+			envBlob = info
+			parsed, skip, err = sbReadEnvBlob(src, info)
+			// Read once, then gone: a file of secrets has no business staying
+			// in the store, whatever the API says next. A retry re-uploads.
+			consumeBlob(envBlob)
+		} else {
+			parsed, skip, err = sbReadEnvFile(envFile)
+		}
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -717,6 +735,9 @@ func (s *Supabase) handleSecretsSet(ctx context.Context, req mcp.CallToolRequest
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	result := map[string]any{"project": s.projectRef, "set": names, "note": "functions see new values on their next invocation"}
+	if envBlob != nil {
+		result["consumedBlob"] = blob.Ref(envBlob.ID)
+	}
 	if len(fromFile) > 0 {
 		sortStrings(fromFile)
 		result["fromEnvFile"] = fromFile

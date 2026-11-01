@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,13 +41,15 @@ Endpoints:
 - GET /v1/models — List available TTS models
 - GET /v1/user/subscription — Subscription status, remaining credits
 
-Binary responses (audio and anything else non-textual) are written to disk,
-never inlined: pass output_file (absolute path) to choose the destination, or
-omit it and the connector writes into the mux output directory. Either way the
-result is the file path plus metadata (status, content-type, size). Textual
-responses (JSON, XML, text/*) come back inline, truncated at 512 KB with a
-marker — endpoints that wrap audio in JSON (e.g. .../with-timestamps) are
-better fetched with output_file.
+Binary responses (audio and anything else non-textual) are never inlined:
+omit output_file and the connector stores the audio as a blob you fetch from
+mux (the result names it), pass output_file "blob" to force that for any
+response, or pass an absolute path where you and mux share a disk. Either way
+the result is the reference or path plus metadata (status, content-type,
+size). Textual responses (JSON, XML, text/*) come back inline up to 512 KB; a
+longer one arrives as that preview plus a blob holding all of it — endpoints
+that wrap audio in JSON (e.g. .../with-timestamps) are better fetched with
+output_file.
 
 Auth: xi-api-key: {token} (automatic)`
 
@@ -58,10 +59,9 @@ const elevenlabsAPIKeyHeader = "xi-api-key"
 
 // ElevenLabs wraps the ElevenLabs REST API as MCP tools.
 type ElevenLabs struct {
-	client    *http.Client
-	baseURL   string
-	apiKey    string
-	outputDir string
+	client  *http.Client
+	baseURL string
+	apiKey  string
 }
 
 // NewElevenLabs creates an ElevenLabs connection from config.
@@ -105,17 +105,16 @@ func NewElevenLabs(conn config.Connection, dialer Dialer) (*ElevenLabs, error) {
 				return nil
 			},
 		},
-		baseURL:   baseURL,
-		apiKey:    conn.Token,
-		outputDir: filepath.Join(config.Dir(), "output"),
+		baseURL: baseURL,
+		apiKey:  conn.Token,
 	}, nil
 }
 
 // Tools returns the MCP tools for the ElevenLabs connection.
 func (e *ElevenLabs) Tools() []ToolDef {
 	outputFileDesc := "Save the response body to this absolute file path instead of returning it inline (supports ~ for home directory). " +
-		"Binary responses such as audio are always written to a file — without output_file they go to the mux output directory. " +
-		"Returns metadata only (status, content-type, path, size). An existing file is never overwritten. " +
+		"Binary responses such as audio never come back inline — without output_file they are stored as a blob you fetch from mux (works from any machine); pass \"blob\" to get a blob for a text response as well. " +
+		"Returns metadata only (status, content-type, path or blob, size). An existing file is never overwritten. " +
 		"Only writes on 2xx responses; errors are returned inline."
 
 	return []ToolDef{
@@ -123,7 +122,7 @@ func (e *ElevenLabs) Tools() []ToolDef {
 			Tool: mcp.NewTool("get",
 				mcp.WithDescription(fmt.Sprintf(
 					"Make an HTTP GET request to %s and return the response body. Binary responses "+
-						"(e.g. audio downloads from the history endpoints) are written to a file instead — see output_file.\n\n"+
+						"(e.g. audio downloads from the history endpoints) are stored as a blob instead — see output_file.\n\n"+
 						"Auth: xi-api-key header (automatic).\n\n"+
 						"Useful endpoints:\n"+
 						"- GET /v1/voices — List available voices\n"+
@@ -145,9 +144,9 @@ func (e *ElevenLabs) Tools() []ToolDef {
 						"- POST /v1/text-to-speech/{voice_id} — Text-to-speech (body: text, model_id)\n"+
 						"- POST /v1/text-to-speech/{voice_id}/stream — Streaming text-to-speech\n"+
 						"- POST /v1/sound-generation — Sound effects (body: text, duration_seconds)\n\n"+
-						"These endpoints answer with raw audio bytes. The audio is written to a file and the "+
-						"result carries the path plus metadata — pass output_file to pick the destination, "+
-						"otherwise the mux output directory is used.",
+						"These endpoints answer with raw audio bytes. The audio never comes back inline: without output_file it is stored as a blob you fetch from mux, "+
+						"with output_file it goes to that absolute path where you and mux share a disk (\"blob\" forces a blob). "+
+						"The result carries the reference or path plus metadata.",
 					e.baseURL,
 				)),
 				mcp.WithString("path", mcp.Required(), mcp.Description("Path to append to the base URL, e.g. /v1/text-to-speech/{voice_id}")),
@@ -220,26 +219,22 @@ func (e *ElevenLabs) doRequest(ctx context.Context, method string, req mcp.CallT
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		contentType := sniffContentType(resp)
+		ext, binary := binaryResponseExt(contentType)
 		if outputFile != "" {
-			return saveResponseToFile(resp, contentType, outputFile)
+			return saveResponseToFileNamed(resp, contentType, outputFile, "", "elevenlabs"+ext)
 		}
 		// A narration track is megabytes of audio; inlining it would blow up the
-		// caller's context, and truncating it would corrupt the file. Stream it
-		// to the output directory and answer with the path.
-		if ext, ok := binaryResponseExt(contentType); ok {
-			return saveResponseToGeneratedFile(resp, contentType, e.outputDir, "elevenlabs-*"+ext)
+		// caller's context, and truncating it would corrupt the file. Store it
+		// as a blob (or, on a stdio instance without a store, in the output
+		// directory) and answer with the reference.
+		if binary {
+			return storeResponseAsBlob(resp, contentType, "elevenlabs"+ext, "elevenlabs", "", true)
 		}
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, elevenlabsMaxBody+1))
+	body, note, err := readBodyLimited(resp, elevenlabsMaxBody, "elevenlabs-response.json", "elevenlabs")
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("read response: %v", err)), nil
-	}
-
-	var note string
-	if len(body) > elevenlabsMaxBody {
-		body = body[:elevenlabsMaxBody]
-		note = fmt.Sprintf("\n\n[truncated at %d bytes — pass output_file to write the full response to disk]", elevenlabsMaxBody)
 	}
 
 	result := fmt.Sprintf("HTTP %d %s\n\n%s%s", resp.StatusCode, resp.Status, string(body), note)

@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +15,9 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/smnhffmnn/mux/internal/blob"
 	"github.com/smnhffmnn/mux/internal/config"
+	"github.com/smnhffmnn/mux/internal/tools"
 )
 
 // freePort asks the kernel for an unused loopback port. startHTTPServer binds
@@ -256,5 +260,59 @@ func TestShutdownWithoutConnections(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed >= time.Second {
 		t.Fatalf("Shutdown took %v, want well under 1s", elapsed)
+	}
+}
+
+// TestStartHTTPServerMountsBlobRoutes checks that the blob store's routes
+// sit on the loopback server once a store is installed — in headless and
+// desktop mode alike, since both go through startHTTPServer — and that an
+// instance without a store answers 404 there instead of panicking.
+func TestStartHTTPServerMountsBlobRoutes(t *testing.T) {
+	store, err := blob.Open(filepath.Join(t.TempDir(), "blobs"), blob.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools.SetBlobStore(store)
+	t.Cleanup(func() { tools.SetBlobStore(nil) })
+
+	s := server.NewMCPServer("mux-test", "0.0.0")
+	_, mcpURL := startTestServer(t, s)
+	base := strings.TrimSuffix(mcpURL, "/mcp")
+
+	resp, err := http.Post(base+"/blob?name=a.txt", "text/plain", strings.NewReader("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /blob = %d", resp.StatusCode)
+	}
+	var created struct {
+		ID  string `json:"id"`
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	got, err := http.Get(base + "/blob/" + created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer got.Body.Close()
+	body, _ := io.ReadAll(got.Body)
+	if got.StatusCode != http.StatusOK || string(body) != "hello" {
+		t.Fatalf("GET /blob/{id} = %d %q", got.StatusCode, body)
+	}
+
+	tools.SetBlobStore(nil)
+	s2 := server.NewMCPServer("mux-test", "0.0.0")
+	_, mcpURL2 := startTestServer(t, s2)
+	resp2, err := http.Get(strings.TrimSuffix(mcpURL2, "/mcp") + "/blob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /blob without a store = %d, want 404", resp2.StatusCode)
 	}
 }

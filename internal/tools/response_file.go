@@ -25,6 +25,12 @@ import (
 // The same checks run again in saveResponseToFile, which is the authority:
 // O_EXCL there decides the race, this is only the early exit.
 func validateOutputFile(outputFile string) (string, error) {
+	if wantsBlobOutput(outputFile) {
+		if blobStore == nil {
+			return "", errors.New("output_file \"blob\": no blob store — this mux serves stdio without its HTTP listener; pass an absolute path instead")
+		}
+		return blobOutputSentinel, nil
+	}
 	clean := filepath.Clean(config.ExpandHome(outputFile))
 	if !filepath.IsAbs(clean) {
 		return "", fmt.Errorf("output_file must be an absolute path: %s", outputFile)
@@ -54,6 +60,18 @@ func saveResponseToFile(resp *http.Response, contentType, outputFile string) (*m
 // result — used to report what was uploaded when the response of an upload is
 // itself written to disk.
 func saveResponseToFileWithNote(resp *http.Response, contentType, outputFile, note string) (*mcp.CallToolResult, error) {
+	return saveResponseToFileNamed(resp, contentType, outputFile, note, "")
+}
+
+// saveResponseToFileNamed is saveResponseToFileWithNote for a caller that
+// knows what the file is called (an attachment's name): with output_file
+// "blob" the blob carries that name, so the agent sees it and a later
+// attach has one.
+func saveResponseToFileNamed(resp *http.Response, contentType, outputFile, note, name string) (*mcp.CallToolResult, error) {
+	// "blob": the caller wants the bytes from mux, not on mux's disk.
+	if wantsBlobOutput(outputFile) {
+		return storeResponseAsBlob(resp, contentType, name, "output_file", note, false)
+	}
 	outputFile = config.ExpandHome(outputFile)
 	clean := filepath.Clean(outputFile)
 	if !filepath.IsAbs(clean) {
@@ -83,14 +101,14 @@ func saveResponseToFileWithNote(resp *http.Response, contentType, outputFile, no
 }
 
 // saveResponseToGeneratedFile streams an HTTP response body to a fresh file in
-// dir, naming it after pattern (an os.CreateTemp pattern). Used when a response
-// carries binary payload and the caller named no destination: inlining raw
-// bytes into the tool result would flood the agent's context with megabytes of
-// garbage, and truncating them would hand back a corrupt file.
+// dir, naming it after pattern (an os.CreateTemp pattern). This is what a
+// stdio instance does with binary payload when it has no blob store: the
+// agent that spawned it shares the disk, and the path in the result is one
+// it can open. requireBody makes an empty body an error.
 //
 // mux does not delete these files — the caller needs them after the tool
 // returns.
-func saveResponseToGeneratedFile(resp *http.Response, contentType, dir, pattern string) (*mcp.CallToolResult, error) {
+func saveResponseToGeneratedFile(resp *http.Response, contentType, dir, pattern string, requireBody bool) (*mcp.CallToolResult, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("create output directory: %v", err)), nil
 	}
@@ -106,16 +124,19 @@ func saveResponseToGeneratedFile(resp *http.Response, contentType, dir, pattern 
 		os.Remove(name)
 		return mcp.NewToolResultError(fmt.Sprintf("write output file: %v", err)), nil
 	}
-	// An empty payload is not a file the caller can use — a silent 0-byte
-	// "success" would only surface much later, e.g. as a mute narration track.
 	if n == 0 {
 		os.Remove(name)
-		return mcp.NewToolResultError(fmt.Sprintf("HTTP %d %s: empty response body, nothing written",
-			resp.StatusCode, resp.Status)), nil
+		if requireBody {
+			// A silent 0-byte "success" would only surface much later, e.g.
+			// as a mute narration track.
+			return mcp.NewToolResultError(fmt.Sprintf("HTTP %d %s: empty response body, nothing written",
+				resp.StatusCode, resp.Status)), nil
+		}
+		return mcp.NewToolResultText(fmt.Sprintf("HTTP %d %s\n\nEmpty response body, nothing written", resp.StatusCode, resp.Status)), nil
 	}
 
 	return mcp.NewToolResultText(responseFileResult(resp, contentType, name, n,
-		"No output_file given — written to the mux output directory. Pass output_file to choose the destination.")), nil
+		"No output_file given and no blob store (stdio instance) — written to the mux output directory. Pass output_file to choose the destination.")), nil
 }
 
 // writeAndClose copies src into f and closes f either way. Errors from Close
@@ -191,8 +212,8 @@ var audioFileExts = map[string]string{
 // audioFileExts (or add a sibling table) when one does.
 //
 // The extension is derived from the media type, so it comes from a remote
-// server: only [a-z0-9.-] survives, the rest degrades to ".bin". CreateTemp
-// rejects path separators on its own, this keeps the value boring anyway.
+// server: only [a-z0-9.-] survives, the rest degrades to ".bin" — it ends up
+// in a blob or file name, and stays boring.
 func binaryResponseExt(contentType string) (string, bool) {
 	mediaType, _, _ := mime.ParseMediaType(contentType)
 	if mediaType == "" {

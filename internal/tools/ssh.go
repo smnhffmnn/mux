@@ -17,6 +17,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/smnhffmnn/mux/internal/blob"
 	"github.com/smnhffmnn/mux/internal/config"
 	"github.com/smnhffmnn/mux/internal/sshclient"
 )
@@ -51,7 +52,7 @@ func sshExecMaxTimeout() time.Duration { return uploadTimeout }
 
 // DefaultSSHInstructions are shown to AI clients when a connection has no
 // instructions of its own.
-const DefaultSSHInstructions = `Remote host over SSH. exec runs ONE program with its arguments as a list — no shell, no pipes or globs unless shell=true is allowed on this connection; pass cwd and stdin as parameters. Output is limited inline; pass output_file to keep large stdout. Use dry_run to see the exact command line and whether the connection's policy allows it. download and upload copy files between this machine and the host by path. Every operation is logged on the mux side.`
+const DefaultSSHInstructions = `Remote host over SSH. exec runs ONE program with its arguments as a list — no shell, no pipes or globs unless shell=true is allowed on this connection; pass cwd and stdin as parameters. Output is limited inline; pass output_file ("blob" for a blob you fetch from mux, or a path) to keep large stdout. Use dry_run to see the exact command line and whether the connection's policy allows it. download brings a remote file back as a blob (or to a path), upload sends a blob (blob:<id>) or a local file to the host. Every operation is logged on the mux side.`
 
 // SSH wraps one remote host as MCP tools.
 type SSH struct {
@@ -141,7 +142,7 @@ func (s *SSH) Tools() []ToolDef {
 				mcp.WithString("stdin", mcp.Description("Text written to the program's standard input, then EOF.")),
 				mcp.WithNumber("timeout", mcp.Description(fmt.Sprintf("Seconds until mux stops waiting and sends SIGKILL. Default %d, at most %d (%s).",
 					int(sshExecDefaultTimeout.Seconds()), int(sshExecMaxTimeout().Seconds()), sshExecMaxTimeout()))),
-				mcp.WithString("output_file", mcp.Description("Save stdout to this absolute local path instead of returning it inline (supports ~). Unlimited size; an existing file is never overwritten. stderr and the exit code are still returned.")),
+				mcp.WithString("output_file", mcp.Description("Save stdout instead of returning it inline: \"blob\" stores it as a blob you fetch from mux (works from any machine; capped at the store's per-blob size, 256 MiB by default), an absolute local path (supports ~) writes it where you and mux share a disk, without a size limit. An existing file is never overwritten. stderr and the exit code are still returned.")),
 				mcp.WithBoolean("shell", mcp.Description("Pass args[0] verbatim to the remote login shell (pipes, globs, redirects). Only on a connection without allow_commands and deny_commands that is not read-only; args must have exactly one element.")),
 				mcp.WithBoolean("dry_run", mcp.Description("Do not run: return the exact command line that would be sent and whether the connection's policy allows it.")),
 			),
@@ -149,9 +150,9 @@ func (s *SSH) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("download",
-				mcp.WithDescription(fmt.Sprintf("Copy a file from %s to this machine over SFTP, streamed to disk. Returns path and size; the content never passes through the conversation.", target)),
+				mcp.WithDescription(fmt.Sprintf("Copy a file from %s over SFTP, streamed — into a blob you fetch from mux, or to a local path. Returns the blob or path and the size; the content never passes through the conversation.", target)),
 				mcp.WithString("remote_path", mcp.Required(), mcp.Description("File on the host (absolute, or relative to the login directory).")),
-				mcp.WithString("output_file", mcp.Required(), mcp.Description("Absolute local destination path (supports ~). An existing file is never overwritten.")),
+				mcp.WithString("output_file", mcp.Description("Where the file goes: omitted or \"blob\" stores it as a blob you fetch from mux (works from any machine; capped at the store's per-blob size, 256 MiB by default); an absolute local path (supports ~) writes it where you and mux share a disk, without a size limit. An existing file is never overwritten.")),
 			),
 			Handler: s.handleDownload,
 		},
@@ -160,8 +161,8 @@ func (s *SSH) Tools() []ToolDef {
 	if !s.readOnly {
 		tools = append(tools, ToolDef{
 			Tool: mcp.NewTool("upload",
-				mcp.WithDescription(fmt.Sprintf("Copy a local file to %s over SFTP, streamed from disk. The path is read by the mux process, so it must be visible to it (in a container: mounted).", target)),
-				mcp.WithString("file_path", mcp.Required(), mcp.Description("Absolute local source path (supports ~), a regular file.")),
+				mcp.WithDescription(fmt.Sprintf("Copy a file to %s over SFTP, streamed — from a blob uploaded to mux (blob:<id>), or from a local path where you and mux share a disk.", target)),
+				mcp.WithString("file_path", mcp.Required(), mcp.Description("blob:<id> of a blob uploaded to mux (POST /blob), or an absolute local path (supports ~) of a regular file. A blob is deleted once the upload succeeded.")),
 				mcp.WithString("remote_path", mcp.Required(), mcp.Description("Destination path on the host (absolute, or relative to the login directory). The parent directory must exist.")),
 				mcp.WithString("mode", mcp.Description("Permission bits for the new file as octal text, e.g. 0644 (default) or 0755.")),
 				mcp.WithBoolean("overwrite", mcp.Description("Replace an existing remote file. Default false: an existing file is an error.")),
@@ -176,6 +177,7 @@ func (s *SSH) Tools() []ToolDef {
 // --- exec ---
 
 type execRequest struct {
+	outMax     int64 // cap for stdout written to a blob, 0 = none
 	argv       []string
 	cwd        string
 	stdin      string
@@ -305,7 +307,16 @@ func (s *SSH) handleExec(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 	// Check the destination before connecting: a command that ran for nothing
 	// because the output file existed is the worse order of events.
 	var outPath string
-	if e.outputFile != "" {
+	toBlob := wantsBlobOutput(e.outputFile)
+	if toBlob {
+		// stdout lands in the store and is adopted as a blob afterwards;
+		// the writer stops at the blob cap, so a runaway command cannot fill
+		// the state volume first.
+		if outPath, err = blobTempPath("output_file"); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		e.outMax = blobMaxBytes()
+	} else if e.outputFile != "" {
 		outPath, err = validateOutputFile(e.outputFile)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -323,6 +334,17 @@ func (s *SSH) handleExec(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 		} else if runErr != nil && fi.Size() == 0 {
 			os.Remove(outPath)
 			res.outPath = ""
+		} else if toBlob {
+			info, aerr := blobAdopt(outPath, blob.Meta{Name: "stdout.txt", ContentType: "text/plain", Source: "ssh exec"})
+			if aerr != nil {
+				os.Remove(outPath)
+				res.outPath = ""
+				if runErr == nil {
+					runErr = fmt.Errorf("stdout ran, but storing it as a blob failed: %w", aerr)
+				}
+			} else {
+				res.outPath = blobReference(info)
+			}
 		} else {
 			res.outPath = outPath
 		}
@@ -441,7 +463,7 @@ func (s *SSH) run(ctx context.Context, cmd string, e *execRequest, outPath strin
 		if err != nil {
 			return res, fmt.Errorf("create output_file: %w", err)
 		}
-		outFile = &errorRecordingFile{File: f}
+		outFile = &errorRecordingFile{File: f, limit: e.outMax}
 		// Count bytes for the result; the file gets everything.
 		stdout = io.MultiWriter(outFile, &countOnly{n: &res.stdout.total, touch: s.client.Touch})
 	}
@@ -578,11 +600,21 @@ func openSession(ctx context.Context, client *ssh.Client) (*ssh.Session, error) 
 // and Session.Wait may drop.
 type errorRecordingFile struct {
 	*os.File
-	err error
+	err   error
+	limit int64 // bytes the file may grow to, 0 = no limit (a blob has one, a path has none)
+	n     int64
 }
 
 func (f *errorRecordingFile) Write(p []byte) (int, error) {
+	if f.limit > 0 && f.n+int64(len(p)) > f.limit {
+		err := fmt.Errorf("stdout exceeds the blob cap of %d bytes — pass output_file with a path, or narrow the command", f.limit)
+		if f.err == nil {
+			f.err = err
+		}
+		return 0, err
+	}
 	n, err := f.File.Write(p)
+	f.n += int64(n)
 	if err != nil && f.err == nil {
 		f.err = err
 	}
@@ -665,7 +697,11 @@ func (r *execResult) render(complete bool) string {
 		if complete {
 			fmt.Fprintf(&b, "\n\nstdout saved to: %s", r.outPath)
 		} else {
-			fmt.Fprintf(&b, "\n\npartial stdout saved to: %s (remove it before retrying with the same output_file)", r.outPath)
+			if strings.HasPrefix(r.outPath, "blob ") {
+				fmt.Fprintf(&b, "\n\npartial stdout saved to: %s", r.outPath)
+			} else {
+				fmt.Fprintf(&b, "\n\npartial stdout saved to: %s (remove it before retrying with the same output_file)", r.outPath)
+			}
 		}
 	} else if r.stdout.total > 0 {
 		b.WriteString("\n\n--- stdout ---\n")

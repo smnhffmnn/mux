@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -78,7 +77,6 @@ type YouTrackREST struct {
 	instructions string
 	protected    []config.FieldGuard
 	setOnce      []config.FieldGuard
-	outputDir    string
 
 	tzMu sync.Mutex
 	tz   *time.Location // token owner's profile time zone, loaded lazily
@@ -127,7 +125,6 @@ func NewYouTrackREST(conn config.Connection, dialer Dialer) (*YouTrackREST, erro
 		instructions: conn.Instructions,
 		protected:    protected,
 		setOnce:      setOnce,
-		outputDir:    filepath.Join(config.Dir(), "output"),
 	}, nil
 }
 

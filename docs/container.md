@@ -68,11 +68,7 @@ The log file lives outside the config directory, at `/state/mux/mux.log`
 per-connection variables listed in `config.example.toml`). Fine for single
 values, unsuited to structured connection definitions.
 
-**Uploads** are not a fourth way in, but they hang off the mount. `file_path` on
-the `request`/`post` tools (HTTP, OpenAI, Recraft, Ideogram) is opened by mux
-itself, so a file that lives on the host is invisible unless its directory is
-mounted; the tool then answers `file_path not found: … (resolved on the machine
-running mux)`. Mount the directory the agent writes its files to.
+**Files** do not come through the mount. The agent's disk is not the container's, so a path in `file_path`, `env_file` or the Supabase `path` names nothing here; mux answers `file_path not found: … (resolved on the machine running mux)`. The way in and out is the blob store on the loopback listener (`POST /blob`, `GET /blob/{id}`, see [blobs.md](blobs.md)): the agent uploads a file or an archive and passes `blob:<id>`, and a tool that produces a file answers with a blob the agent fetches. The store lives under `/state/mux/blobs/<pid>`, so it sits on the state volume next to the log; each process empties its own directory when it starts and removes it when it stops normally, and a start reaps the directories of processes that are gone. Do not mount the agent's directories into the container to work around this — a gateway that reads other people's disks is the shape this store exists to avoid.
 
 **SSH connections** in the container authenticate with a stored key only — there is no ssh-agent, so `auth = "agent"` fails at registration and the connection reports as unregistered in `/health`. Host keys come from `hostKey` on the provisioned connection or from `/config/mux/known_hosts` on the mount (`~/.ssh/known_hosts` of the `nonroot` user does not exist). `GET /audit/ssh` lists what the connections ran; it is on the loopback listener like `/health`.
 

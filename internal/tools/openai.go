@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -30,15 +29,17 @@ Common POST endpoints (use the request tool):
 - /v1/embeddings — Text embeddings (text-embedding-3-small/-large)
 - /v1/images/generations — Image generation (DALL·E, gpt-image-*)
 
-Multipart endpoints take a local file: pass file_path (absolute path, sent as
-form field "file") and the remaining fields as form_fields, e.g.
+Multipart endpoints take a file: pass file_path (blob:<id> of a blob uploaded
+to mux, or an absolute path where you and mux share a disk; sent as form field
+"file") and the remaining fields as form_fields, e.g.
 - /v1/audio/transcriptions, /v1/audio/translations — Whisper: form_fields {"model": "whisper-1"}
 - /v1/files — File upload: form_fields {"purpose": "assistants"}
 - /v1/images/edits — Image edit: file_field "image", form_fields {"prompt": "..."}
-The file is streamed from disk and never enters the conversation. One file per
+The file is streamed and never enters the conversation. One file per
 request.
 
-For binary or large responses pass output_file to stream the body to disk
+For binary or large responses pass output_file ("blob" for a blob you fetch
+from mux, or a path) to keep the body out of the conversation
 instead of returning it inline.
 
 Auth: Authorization: Bearer {token} (automatic)`
@@ -83,11 +84,11 @@ func NewOpenAI(conn config.Connection, dialer Dialer) (*OpenAI, error) {
 
 // Tools returns the MCP tools for the OpenAI connection.
 func (o *OpenAI) Tools() []ToolDef {
-	outputFileDesc := "Save response body to this absolute file path instead of returning it inline (supports ~ for home directory). Useful for large or binary responses (audio transcriptions, image bytes). Returns only metadata (status, content-type, path, size). An existing file is never overwritten. Only writes on 2xx responses; errors are returned inline."
+	outputFileDesc := "Save the response body instead of returning it inline: \"blob\" stores it as a blob you fetch from mux (works from any machine), an absolute file path (supports ~) writes it where you and mux share a disk. Useful for large responses (images, audio, binary data). Returns only metadata (status, content-type, blob or path, size). An existing file is never overwritten. Only writes on 2xx responses; errors are returned inline."
 
 	requestOpts := []mcp.ToolOption{
 		mcp.WithDescription(fmt.Sprintf(
-			"Make an HTTP request to %s with a JSON body, or upload a local file as multipart/form-data. Supports POST, PUT, PATCH, and DELETE.\n\n"+
+			"Make an HTTP request to %s with a JSON body, or upload a file (a blob or a local path) as multipart/form-data. Supports POST, PUT, PATCH, and DELETE.\n\n"+
 				"Auth: Bearer token (automatic).\n\n"+
 				"Common POST endpoints:\n"+
 				"- POST /v1/chat/completions — Chat completions (gpt-4o, gpt-4o-mini, o1, o3-mini, …)\n"+
@@ -193,16 +194,17 @@ func (o *OpenAI) doRequest(ctx context.Context, method string, req mcp.CallToolR
 		return mcp.NewToolResultError(requestError(ctx, err, httpReq, upload)), nil
 	}
 	defer resp.Body.Close()
+	upload.finish(resp)
 
 	if outputFile := req.GetString("output_file", ""); outputFile != "" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return saveResponseToFileWithNote(resp, resp.Header.Get("Content-Type"), outputFile, upload.note())
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, openaiMaxBody))
+	body, marker, err := readBodyLimited(resp, openaiMaxBody, "openai-response.json", "openai")
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("read response: %v", err)), nil
 	}
 
-	result := statusLine(resp, upload) + "\n\n" + string(body)
+	result := statusLine(resp, upload) + "\n\n" + string(body) + marker
 	return mcp.NewToolResultText(result), nil
 }

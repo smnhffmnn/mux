@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -36,8 +35,9 @@ Endpoints:
 - POST /v1/ideogram-v3/replace-background — Replace image background (multipart: image, prompt)
 - POST /v1/ideogram-v3/describe — Describe an image (multipart: image)
 
-Multipart endpoints take a local file via the post tool: pass file_path
-(absolute path, sent as form field "image") and the text values as form_fields,
+Multipart endpoints take a file via the post tool: pass file_path (blob:<id>
+of a blob uploaded to mux, or an absolute path where you and mux share a disk;
+sent as form field "image") and the text values as form_fields,
 e.g. {"prompt": "...", "rendering_speed": "TURBO"}; leave body empty. One file
 per request — /edit needs image and mask together and cannot be served yet.
 
@@ -154,12 +154,12 @@ func (i *Ideogram) handleGet(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, ideogramMaxBody))
+	body, marker, err := readBodyLimited(resp, ideogramMaxBody, "ideogram-response.json", "ideogram")
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("read response: %v", err)), nil
 	}
 
-	result := fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, resp.Status, string(body))
+	result := fmt.Sprintf("HTTP %d %s\n\n%s%s", resp.StatusCode, resp.Status, string(body), marker)
 	return mcp.NewToolResultText(result), nil
 }
 
@@ -189,12 +189,13 @@ func (i *Ideogram) handlePost(ctx context.Context, req mcp.CallToolRequest) (*mc
 		return mcp.NewToolResultError(requestError(ctx, err, httpReq, upload)), nil
 	}
 	defer resp.Body.Close()
+	upload.finish(resp)
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, ideogramMaxBody))
+	body, marker, err := readBodyLimited(resp, ideogramMaxBody, "ideogram-response.json", "ideogram")
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("read response: %v", err)), nil
 	}
 
-	result := statusLine(resp, upload) + "\n\n" + string(body)
+	result := statusLine(resp, upload) + "\n\n" + string(body) + marker
 	return mcp.NewToolResultText(result), nil
 }

@@ -38,11 +38,11 @@ func (s *Supabase) Tools() []ToolDef {
 		{
 			Tool: mcp.NewTool("function_get",
 				mcp.WithDescription("One deployed function: its metadata and the source files the server holds for it (paths as uploaded, relative to the project root, with sizes). "+
-					"With file, the content of that one file is returned inline (text up to 256 KB); with output_dir, all files are written under that directory (never overwriting). "+
+					"With file, the content of that one file is returned inline (text up to 256 KB); with output_dir, all files are written under that directory (never overwriting) — or, with output_dir \"blob\", handed back as one tree blob (a tar.gz) you fetch from mux. "+
 					"A function deployed as a pre-built bundle has no source files — the result says so."),
 				mcp.WithString("slug", mcp.Required(), mcp.Description("Function slug, as listed by functions_list")),
 				mcp.WithString("file", mcp.Description("Path of one file to return inline — as listed in files, or its unique suffix (index.ts)")),
-				mcp.WithString("output_dir", mcp.Description("Absolute directory to write all files into, keeping their paths (created if missing; existing files are not overwritten)")),
+				mcp.WithString("output_dir", mcp.Description("\"blob\" to receive all files as one tree blob (works from any machine), or an absolute directory to write them into where you and mux share a disk, keeping their paths (created if missing; existing files are not overwritten)")),
 				mcp.WithReadOnlyHintAnnotation(true),
 			),
 			Handler: s.handleFunctionGet,
@@ -91,8 +91,8 @@ func (s *Supabase) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("migrations_pending",
-				mcp.WithDescription("Compare the migration files of a local checkout (supabase/migrations/<version>_<name>.sql under path) with the project's history and list what is pending, in the order it would be applied. A file counts as applied when the history has its version, its file stem or its name part. Changes nothing."),
-				mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path of the project root on the machine running mux (contains supabase/migrations)")),
+				mcp.WithDescription("Compare the migration files of a checkout (supabase/migrations/<version>_<name>.sql under path — a tree blob or a local directory) with the project's history and list what is pending, in the order it would be applied. A file counts as applied when the history has its version, its file stem or its name part. Changes nothing."),
+				mcp.WithString("path", mcp.Required(), mcp.Description("The project root: blob:<id> of a tree uploaded to mux (tar -C <project root> -cz supabase | curl --data-binary @- '…/blob?tree=1' — works from any machine), or an absolute path where you and mux share a disk. Must contain supabase/migrations.")),
 				mcp.WithReadOnlyHintAnnotation(true),
 			),
 			Handler: s.handleMigrationsPending,
@@ -104,10 +104,10 @@ func (s *Supabase) Tools() []ToolDef {
 	tools = append(tools,
 		ToolDef{
 			Tool: mcp.NewTool("migrations_apply",
-				mcp.WithDescription("Apply pending migration files from a local checkout through the Management API — the SQL runs on the project's database and the migration is recorded in the history under the file's stem as name (the server assigns the version). Without file, every pending migration in file order; with file, that one file. "+
+				mcp.WithDescription("Apply pending migration files from a checkout (a tree blob or a local directory) through the Management API — the SQL runs on the project's database and the migration is recorded in the history under the file's stem as name (the server assigns the version). Without file, every pending migration in file order; with file, that one file. "+
 					"dry_run lists what would run (size, approximate statement count, sha256) without touching the database. Stops at the first error: the migrations before it are applied and recorded, the failing one is not. "+
-					"The database is production — read migrations_pending first, and do not apply a file out of order unless you mean to."),
-				mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path of the project root on the machine running mux (contains supabase/migrations)")),
+					"The database is production — read migrations_pending first, and do not apply a file out of order unless you mean to. A tree blob is deleted once every planned migration ran; a failure or a dry run leaves it."),
+				mcp.WithString("path", mcp.Required(), mcp.Description("The project root: blob:<id> of a tree uploaded to mux (tar -C <project root> -cz supabase | curl --data-binary @- '…/blob?tree=1' — works from any machine), or an absolute path where you and mux share a disk. Must contain supabase/migrations.")),
 				mcp.WithString("file", mcp.Description("One migration to apply: its file name without .sql, or its version")),
 				mcp.WithBoolean("dry_run", mcp.Description("Only list what would be applied (default false)")),
 				mcp.WithDestructiveHintAnnotation(true),
@@ -118,12 +118,12 @@ func (s *Supabase) Tools() []ToolDef {
 	tools = append(tools,
 		ToolDef{
 			Tool: mcp.NewTool("function_deploy",
-				mcp.WithDescription("Deploy an Edge Function from a local checkout: pass the project root (the directory that contains supabase/) and the slug. "+
+				mcp.WithDescription("Deploy an Edge Function from a checkout: pass the project root (the directory that contains supabase/) as a tree blob or a local path, and the slug. "+
 					"mux collects the files the supabase CLI would upload — the entrypoint (supabase/functions/<slug>/index.ts unless config.toml says otherwise), its relative imports (../_shared/… included), the import map (deno.json next to the entrypoint, or as configured) and its local targets, and config.toml's static_files — and the server bundles. "+
 					"Files outside the git root are skipped with a warning; files above the project root cannot be carried. "+
 					"verify_jwt comes from config.toml, else stays as deployed; pass it only to change it. dry_run shows the file list and metadata without deploying. "+
-					"The result carries the function before and after, so the version shows the deploy took."),
-				mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path of the project root on the machine running mux (contains supabase/functions)")),
+					"The result carries the function before and after, so the version shows the deploy took. A tree blob is deleted once the deploy succeeded; a dry run leaves it."),
+				mcp.WithString("path", mcp.Required(), mcp.Description("The project root: blob:<id> of a tree uploaded to mux (tar -C <project root> -cz supabase | curl --data-binary @- '…/blob?tree=1' — works from any machine), or an absolute path where you and mux share a disk. Must contain supabase/functions.")),
 				mcp.WithString("slug", mcp.Required(), mcp.Description("Function slug (the directory name under supabase/functions)")),
 				mcp.WithBoolean("verify_jwt", mcp.Description("Require a valid JWT on invocation — overrides config.toml and the deployed setting")),
 				mcp.WithBoolean("dry_run", mcp.Description("Only compute and show what would be uploaded (default false)")),
@@ -140,9 +140,9 @@ func (s *Supabase) Tools() []ToolDef {
 		},
 		ToolDef{
 			Tool: mcp.NewTool("secrets_set",
-				mcp.WithDescription("Create or update function secrets. Prefer env_file: an absolute path to a KEY=VALUE file on the machine running mux, so the values never pass through this conversation; secrets (name → value) is the direct form. "+
+				mcp.WithDescription("Create or update function secrets. Prefer env_file — a KEY=VALUE file uploaded to mux as a blob, or an absolute path where you and mux share a disk — so the values never pass through this conversation; secrets (name → value) is the direct form. "+
 					"Names must not start with SUPABASE_. Functions see new values on their next invocation."),
-				mcp.WithString("env_file", mcp.Description("Absolute path of a dotenv file on the machine running mux — named .env, .env.<name> or <name>.env; KEY=VALUE per line, # comments, quotes. SUPABASE_* entries are skipped.")),
+				mcp.WithString("env_file", mcp.Description("blob:<id> of a dotenv file uploaded to mux (deleted as soon as it is read, whatever happens next), or an absolute path of one on the machine running mux named .env, .env.<name> or <name>.env. KEY=VALUE per line, # comments, quotes. SUPABASE_* entries are skipped.")),
 				mcp.WithObject("secrets", mcp.Description("Secrets as name → value, e.g. {\"OPENAI_API_KEY\": \"sk-…\"} (merged with env_file; the call wins on a duplicate)")),
 			),
 			Handler: s.handleSecretsSet,

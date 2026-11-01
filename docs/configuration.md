@@ -33,7 +33,7 @@ tls_key = "/path/to/key.pem"
 tls_port = 7701                    # HTTPS port (default: port + 1)
 ```
 
-The HTTP port serves the MCP endpoint (`/mcp`) on localhost. The HTTPS port (if configured) serves the vault UI, WebAuthn flows, and approval pages on all interfaces.
+The HTTP port serves the MCP endpoint (`/mcp`), `/health`, the blob store (`/blob`) and the OAuth routes on localhost. The HTTPS port (if configured) serves the vault UI, WebAuthn flows, and approval pages on all interfaces.
 
 `stdio_proxy` controls what a stdio invocation does when another instance is already serving MCP on `port`:
 
@@ -58,6 +58,17 @@ With `stdio_proxy = "auto"`, a stdio invocation that finds an instance serving o
 **What bridging does and does not cover.** Only an instance that serves HTTP can be bridged to, and a stdio instance does not open a listener. So bridging takes effect when a desktop or headless instance is running — which is the normal setup, since that is what serves `/mcp` for HTTP clients. If the *only* mux processes on the machine are stdio ones spawned by clients, they cannot find each other and each runs standalone, with the collisions above. Two instances on two *different* machines are a different case: bridging cannot reach across machines, so each installation announces its own identity to the provisioning server instead (`X-Mux-Instance`, see [Instance identity](provisioning.md#instance-identity)), and a server that keys tunnel credentials per instance hands each machine its own peer. Whether it does is up to the server; mux only ever sends the name.
 
 Use `never` when an instance on the same port should deliberately keep its own tunnels, config view and vault instead of relaying. Note that an instance on a *different* port never bridges anyway — only the instance's own configured port is probed.
+
+### Blobs (`[blobs]`)
+
+```toml
+[blobs]
+ttl = "1h"            # lifetime of a blob (default: 1h)
+max_total = "1GiB"    # all blobs together, on disk (default: 1 GiB)
+max_blob = "256MiB"   # one blob, or one unpacked tree (default: 256 MiB)
+```
+
+The blob store is the temporary file store on the loopback listener (`POST /blob`, `GET /blob/{id}`) through which files move between an agent and mux when the two do not share a disk — see [blobs.md](blobs.md). It lives under the state directory (`$XDG_STATE_HOME/mux/blobs/<pid>`, `~/.local/state/mux/blobs/<pid>` by default; `<config dir>\state\blobs\<pid>` on Windows), one directory per process that is emptied when it starts and removed when it stops, and is on whenever mux serves HTTP. Sizes take `K`/`M`/`G`/`T` with or without an `i`; both are binary. A value that does not parse is logged and the default used.
 
 ### Connections
 

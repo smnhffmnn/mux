@@ -91,12 +91,7 @@ func LogDir() string {
 	if runtime.GOOS == "windows" {
 		return filepath.Join(Dir(), "logs")
 	}
-	// The spec requires ignoring relative values.
-	if xdg := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(xdg) {
-		return filepath.Join(xdg, ServiceName)
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "state", ServiceName)
+	return xdgStateDir()
 }
 
 // MigrateLegacyDir performs a one-time migration of ~/.mux to the preferred
@@ -389,6 +384,7 @@ type Config struct {
 	Provisioning []ProvisioningConfig `toml:"provisioning,omitempty"`
 	Vault        VaultConfig          `toml:"vault,omitempty"`
 	Tunnels      []TunnelConfig       `toml:"tunnels,omitempty"`
+	Blobs        BlobsConfig          `toml:"blobs,omitempty"`
 	Connections  []Connection         `toml:"connections,omitempty"`
 
 	// Runtime fields (not persisted). Provisioned entries are tracked by

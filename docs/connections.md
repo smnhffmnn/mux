@@ -133,7 +133,7 @@ type = "microsoft-graph"
 | `{name}_create_forward_draft` | Create a forward draft (does NOT send). Parameters: `conversation_id`, `to` (required), `body`, `cc`, `bcc` (optional). |
 | `{name}_send_draft` | Send an existing draft (created by `create_draft` / `create_reply_draft` / `create_forward_draft`). Dispatches immediately and moves it to Sent Items. Parameter: `draft_id` (required). |
 | `{name}_list_attachments` | List attachments of a message. Parameter: `message_id` (required). |
-| `{name}_get_attachment` | Get attachment content (base64-encoded). Parameters: `message_id`, `attachment_id` (required). |
+| `{name}_get_attachment` | Get attachment content. A file attachment comes back as JSON with the bytes stored as a [blob](blobs.md) (`blob`, `blobUrl`, `blobRef`); images ≤ 5 MB also as image content; item and reference attachments return their JSON as is. Parameters: `message_id`, `attachment_id` (required). |
 | `{name}_sp_list_sites` | Search SharePoint sites. Parameter: `query` (default: `*`). |
 | `{name}_sp_get_site` | Get SharePoint site details. Parameter: `site_id` (required). |
 | `{name}_sp_list_drives` | List document libraries for a site with quota info. Parameter: `site_id` (required). |
@@ -168,7 +168,7 @@ type = "openai"
 
 | Tool | Description |
 |------|-------------|
-| `{name}_get` | HTTP GET to the OpenAI API. Params: `path` (required, e.g. `/v1/models`), `output_file` (optional, stream binary/large responses to disk). |
+| `{name}_get` | HTTP GET to the OpenAI API. Params: `path` (required, e.g. `/v1/models`), `output_file` (optional: an absolute path, or `"blob"` to receive binary/large responses as a blob). |
 | `{name}_request` | HTTP POST/PUT/PATCH/DELETE with a JSON body, or a multipart file upload. Params: `method`, `path`, `body` (JSON string), `output_file`, `file_path`, `file_field` (default `file`), `form_fields`. Use for `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/images/generations`; multipart endpoints such as `/v1/audio/transcriptions` or `/v1/files` take `file_path` plus `form_fields` (e.g. `{"model": "whisper-1"}`). See [Uploading files](#uploading-files). |
 
 Default instructions describe both tools and list common POST endpoints.
@@ -193,14 +193,14 @@ type = "elevenlabs"
 
 | Tool | Description |
 |------|-------------|
-| `{name}_get` | HTTP GET request to the ElevenLabs API. Params: `path` (required, e.g. `/v1/voices`), `output_file` (optional, absolute path). |
-| `{name}_post` | HTTP POST with a JSON body. Params: `path` (required, e.g. `/v1/text-to-speech/{voice_id}`), `body` (required, JSON string), `output_file` (optional, absolute path). Use for text-to-speech, streaming TTS and sound generation. |
+| `{name}_get` | HTTP GET request to the ElevenLabs API. Params: `path` (required, e.g. `/v1/voices`), `output_file` (optional: an absolute path, or `"blob"` to receive the body as a blob). |
+| `{name}_post` | HTTP POST with a JSON body. Params: `path` (required, e.g. `/v1/text-to-speech/{voice_id}`), `body` (required, JSON string), `output_file` (optional: an absolute path, or `"blob"`). Use for text-to-speech, streaming TTS and sound generation. |
 
-**Binary responses are never inlined.** The text-to-speech endpoints answer with raw audio bytes; the connector streams them to a file and returns the path plus metadata (status, content-type, size). With `output_file` the destination is yours — an unusable path (relative, or a file that already exists) is rejected *before* the request is sent, so a paid generation is not thrown away. Without `output_file` the audio lands in `~/.mux/output/` (same directory as the Gemini connector uses); mux does not delete those files.
+**Binary responses are never inlined.** The text-to-speech endpoints answer with raw audio bytes; without `output_file` the connector stores them as a [blob](blobs.md) and returns the reference plus metadata (status, content-type, size) — the agent fetches the audio from mux, from any machine (a stdio instance without a store writes the file to the config directory's `output/` instead, as before). With `output_file` the destination is a path on mux's disk (for the laptop, where agent and mux share it) — an unusable path (relative, or a file that already exists) is rejected *before* the request is sent, so a paid generation is not thrown away.
 
-Whether a response counts as binary is decided by its `Content-Type`: textual types (`application/json`, `application/xml`, `text/*`, `+json`/`+xml`, and the common `application/` text formats) are returned inline as text, truncated at 512 KB with an explicit marker; everything else is written to disk — audio types under their real extension, other binary payload as `.bin`. If the server declares no type at all, mux sniffs the first bytes, so header-less audio still becomes a file. Non-2xx responses are always inlined, so an API error stays readable and writes no file.
+Whether a response counts as binary is decided by its `Content-Type`: textual types (`application/json`, `application/xml`, `text/*`, `+json`/`+xml`, and the common `application/` text formats) are returned inline as text — the first 512 KB, with a marker that names the blob holding the whole body when a 2xx is longer; everything else becomes a blob — audio types under their real extension, other binary payload as `.bin`. If the server declares no type at all, mux sniffs the first bytes, so header-less audio still becomes a blob. Non-2xx responses are always inlined, so an API error stays readable and stores nothing.
 
-Endpoints that wrap audio in JSON (e.g. `…/with-timestamps`) count as textual — fetch those with `output_file` to avoid the 512 KB cut.
+Endpoints that wrap audio in JSON (e.g. `…/with-timestamps`) count as textual — over 512 KB the result carries the first 512 KB as a preview and the blob with the whole body; pass `output_file` to skip the preview.
 
 Default instructions describe available endpoints (TTS, streaming TTS, sound generation, voices, models, subscription) and the file handling.
 
@@ -479,7 +479,7 @@ instructions = "P = projects, T = tickets. State Review means waiting for feedba
 | `{name}_get_issue` | One issue in full: fields, tags, links by relation, attachments, watchers, all comments. Parameters: `issue` (required), `include_comments`, `include_description`. |
 | `{name}_get_comments` | Comments with author, timestamps, visibility, attachments. Parameters: `issue` (required), `top`, `skip` (whole thread without them). |
 | `{name}_get_activities` | Change history for one issue or a query. Parameters: `issue` or `query`, `categories`, `author`, `start`, `end`, `newest_first`, `top`, `skip`. |
-| `{name}_get_attachment` | Attachment content: images ≤ 5 MB as image content, small text inline, otherwise saved to a file. Parameters: `issue`, `attachment` (id or name), `output_file`. |
+| `{name}_get_attachment` | Attachment content: images ≤ 5 MB as image content plus a blob to pass on, small text inline, everything else as a [blob](blobs.md). Parameters: `issue`, `attachment` (id or name), `output_file` (a path on mux's disk instead). |
 | `{name}_list_projects` | Projects with id, short name, name, leader. Parameter: `include_archived`. |
 | `{name}_get_project` | A project with its fields: type, required, allowed values (resolved states separately). Parameter: `project`. |
 | `{name}_find_users` | Users by login, name or email fragment. Parameters: `query` (required), `top`. |
@@ -497,7 +497,7 @@ instructions = "P = projects, T = tickets. State Review means waiting for feedba
 | `{name}_add_comment` | Parameters: `issue`, `text` (required), `visibility_groups`, `visibility_users`. |
 | `{name}_update_comment` | Edit a comment's text and/or visibility. Parameters: `issue`, `comment` (required), `text`, `visibility_groups`, `visibility_users` (at least one; a list left out keeps its entries, both lists empty lift the restriction). |
 | `{name}_delete_comment` | Delete a comment; the result re-reads it and reports `deleted = true` once YouTrack no longer returns it. Parameters: `issue`, `comment` (required). |
-| `{name}_attach` | Upload files streamed from disk, several per call. Parameters: `issue`, `file_paths` (required). Returns the full attachment list. |
+| `{name}_attach` | Upload files, several per call: `blob:<id>` entries of blobs uploaded with a name, or local paths where agent and mux share a disk. Parameters: `issue`, `file_paths` (required). Returns the full attachment list; blobs are deleted once the upload succeeded. |
 | `{name}_watch` | Add watchers. Parameters: `issue`, `users` (required). |
 | `{name}_link_issues` | Parameters: `issue`, `relation` (phrase as seen from issue, e.g. `parent for`), `target` (required). |
 | `{name}_log_work` | Parameters: `issue`, `duration` (`90` or `1h 30m`; required), `date` (YYYY-MM-DD), `text`, `type`. |
@@ -588,7 +588,7 @@ instructions = "Semantic search over documentation. Use when grep is insufficien
 
 ### Supabase
 
-One [Supabase](https://supabase.com) project over the Management API (`https://api.supabase.com`): Edge Functions listed, read back, deployed and deleted; database migrations from a checkout; function secrets; SQL against the project's Postgres; the unified log stream. The type exists for the deploy — the API takes a function as a multipart request with one part per source file and bundles on the server, and mux collects those files the way the supabase CLI does, so a function deployed from an agent carries the same files as one deployed with `supabase functions deploy`. Nothing passes through the model but the paths.
+One [Supabase](https://supabase.com) project over the Management API (`https://api.supabase.com`): Edge Functions listed, read back, deployed and deleted; database migrations from a checkout; function secrets; SQL against the project's Postgres; the unified log stream. The type exists for the deploy — the API takes a function as a multipart request with one part per source file and bundles on the server, and mux collects those files the way the supabase CLI does, so a function deployed from an agent carries the same files as one deployed with `supabase functions deploy`. Nothing passes through the model but a path or a blob id: from a machine that does not share mux's disk — a container, another host — the checkout reaches mux as a tree blob (`tar -C <project root> -cz supabase | curl … '/blob?tree=1'`, see [blobs.md](blobs.md)).
 
 **Required fields**: `name`, `type`, `project_ref` (the project's reference — 20 lowercase letters, the id in the dashboard URL `supabase.com/dashboard/project/<ref>`; not necessarily the `project_id` of `supabase/config.toml`, which names the local stack)
 
@@ -611,22 +611,22 @@ instructions = "Production project of the app. hello-world is the public webhook
 |------|-------------|
 | `{name}_project` | The project: ref, name, region, status, organization, database host; whether the connection is read-only. |
 | `{name}_functions_list` | Edge Functions with slug, status, version, `verifyJwt`, entrypoint and import map paths as deployed, created/updated (UTC). |
-| `{name}_function_get` | One function: metadata and the source files the server holds (paths as uploaded, sizes). Parameters: `slug` (required), `file` (one file inline, text ≤ 256 KB), `output_dir` (write all files there, never overwriting). A function deployed as a pre-built bundle reports `bundle` instead of files. |
+| `{name}_function_get` | One function: metadata and the source files the server holds (paths as uploaded, sizes). Parameters: `slug` (required), `file` (one file inline, text ≤ 256 KB), `output_dir` (write all files there, never overwriting — or `"blob"` to receive them as one tree blob, a tar.gz). A function deployed as a pre-built bundle reports `bundle` instead of files; `output_dir` writes the bundle. |
 | `{name}_secrets_list` | Secret names with their update time. Values are never returned. |
 | `{name}_sql_query` | SQL through the API, rows as JSON. Parameters: `query` (required), `parameters` (positional, optional), `read_only`. On a read-only connection every query runs on the read-only endpoint (as `supabase_read_only_user`); otherwise `read_only=true` gives the same guarantee. Results are not paged — add `LIMIT`. |
 | `{name}_migrations_list` | The migration history (`supabase_migrations.schema_migrations`): version and name, oldest first. |
-| `{name}_migrations_pending` | The migration files of a checkout (`supabase/migrations/<version>_<name>.sql` under `path`) against the history: what is pending, in apply order, what is applied and under which history entry, and history entries no file accounts for. Changes nothing. |
+| `{name}_migrations_pending` | The migration files of a checkout (`supabase/migrations/<version>_<name>.sql` under `path` — a tree blob or a local directory) against the history: what is pending, in apply order, what is applied and under which history entry, and history entries no file accounts for. Changes nothing. |
 | `{name}_logs` | The unified log stream for a window of at most 24 hours (default: the last hour), newest first. Parameters: `source` (default `function_logs`; `function_edge_logs`, `edge_logs`, `postgres_logs`, `auth_logs`, `storage_logs`, `realtime_logs`), `function` (slug, for the two function sources), `search` (message contains), `start`, `end`, `limit` (default 100, max 1000), `sql` (your own ClickHouse SQL over the table `logs` instead of the built query — `source`, `function`, `search` and `limit` do not apply then; only the window does). The result shows the SQL that ran. |
 
 **MCP tools exposed** (when `read_only = false`):
 
 | Tool | Description |
 |------|-------------|
-| `{name}_function_deploy` | Deploy from a local checkout. Parameters: `path` (the project root — the directory that contains `supabase/`; absolute, on the machine running mux), `slug` (required), `verify_jwt`, `dry_run`. Returns the function before and after (the version advances), the files uploaded with sizes, the metadata sent, and warnings for imports that were skipped. |
+| `{name}_function_deploy` | Deploy from a checkout. Parameters: `path` (the project root — the directory that contains `supabase/` — as `blob:<id>` of a tree uploaded with `?tree=1`, or an absolute path on the machine running mux), `slug` (required), `verify_jwt`, `dry_run`. Returns the function before and after (the version advances), the files uploaded with sizes, the metadata sent, and warnings for imports that were skipped. A tree blob is deleted once the deploy succeeded; a dry run leaves it. |
 | `{name}_function_delete` | Delete a deployed function; its URL stops answering at once. Parameter: `slug`. |
-| `{name}_secrets_set` | Create or update secrets. Parameters: `env_file` (absolute path of a dotenv file on the machine running mux — named `.env`, `.env.<name>` or `<name>.env`, a regular text file; the values never pass through the conversation, and an error names a line number, never a line), `secrets` (name → value, merged; the call wins on a duplicate). Names are environment variable names; `SUPABASE_*` entries of an env file are skipped and reported, in the call they are refused; at most 100 per call. |
+| `{name}_secrets_set` | Create or update secrets. Parameters: `env_file` (`blob:<id>` of a dotenv file uploaded to mux — deleted as soon as it is read, whatever the API answers — or an absolute path of one on the machine running mux named `.env`, `.env.<name>` or `<name>.env`; the values never pass through the conversation, and an error names a line number, never a line), `secrets` (name → value, merged; the call wins on a duplicate). Names are environment variable names; `SUPABASE_*` entries of an env file are skipped and reported, in the call they are refused; at most 100 per call. |
 | `{name}_secrets_delete` | Delete secrets by name. Parameter: `names`. |
-| `{name}_migrations_apply` | Apply pending migration files through the API: the SQL runs on the project's database and the migration is recorded in the history under the file's stem as name; the server assigns the version. Parameters: `path` (required), `file` (one migration, by stem or version), `dry_run` (list what would run with size, approximate statement count and sha256). Every pending file in file order without `file`; stops at the first error — the files before it are applied and recorded, the failing one is not. |
+| `{name}_migrations_apply` | Apply pending migration files from a checkout (`path`: a tree blob or a local directory) through the API: the SQL runs on the project's database and the migration is recorded in the history under the file's stem as name; the server assigns the version. Parameters: `path` (required), `file` (one migration, by stem or version), `dry_run` (list what would run with size, approximate statement count and sha256). Every pending file in file order without `file`; stops at the first error — the files before it are applied and recorded, the failing one is not. A tree blob is deleted once every pending migration ran; a failure, a dry run, or a run limited to one `file` while others stay pending leaves it for the next call. |
 
 **What a deploy uploads.** The CLI's rules (`apps/cli/src/shared/functions/deploy.ts` in `supabase/cli`), reproduced in `internal/tools/supabase_deploy.go`:
 
@@ -643,7 +643,7 @@ Every name is anchored at the project root with forward slashes (`supabase/funct
 
 **Reading a function back.** `function_get` asks the API for the source files (`Accept: multipart/form-data`) and lists them with the paths they were uploaded under — the same anchoring. A function deployed by an old CLI as a pre-built eszip has no source files on the server; `output_dir` then writes the bundle.
 
-**Secrets** are the project's function secrets (environment of the Edge Functions). `secrets_list` strips the values the API returns; `secrets_set` prefers an `env_file`, so a key copied from a dashboard goes from a file on disk to Supabase without appearing in a tool call. Functions see new values on their next invocation.
+**Secrets** are the project's function secrets (environment of the Edge Functions). `secrets_list` strips the values the API returns; `secrets_set` prefers an `env_file` — a dotenv file uploaded to mux as a blob (deleted the moment it is read, whatever the API answers) or a file on mux's disk — so a key copied from a dashboard goes to Supabase without appearing in a tool call. Functions see new values on their next invocation.
 
 **Rate limit.** The Management API allows 60 requests per minute per token. HTTP 429 is retried up to three times (four requests in all) with the server's `Retry-After` (capped at 30 s), also for a deploy, whose body is re-read from disk. A redirect to another host is refused, so a request body is never replayed elsewhere; `url` takes plain `http` for loopback hosts only.
 
@@ -755,25 +755,25 @@ instructions = "Internal product API. Use /api/v1/products to list products."
 | `{name}_get` | HTTP GET request. Parameters: `path` (required), `output_file` (optional — save response to file). |
 | `{name}_request` | HTTP request with body (POST, PUT, PATCH, DELETE). Parameters: `path`, `method`, `body` (JSON), `output_file`, and for uploads `file_path`, `file_field` (default `file`), `form_fields`. Available unless `read_only = true`. |
 
-Both tools support an optional `output_file` parameter. When set, the response body is streamed to the specified file path (no size limit) and only metadata (status, content-type, path, size) is returned. Useful for large responses like images or binary data.
+Both tools support an optional `output_file` parameter. When set to an absolute path, the response body is streamed to that file (no size limit) and only metadata (status, content-type, path, size) is returned; set to `"blob"`, the body is stored as a [blob](blobs.md) the agent fetches from mux. Useful for large responses like images or binary data. Without it, a body longer than 100 KB comes back as a 100 KB preview plus the blob holding all of it.
 
 #### Uploading files
 
-`{name}_request` — and the `request`/`post` tools of the OpenAI, Recraft and Ideogram connectors — can send a local file as `multipart/form-data`. This is the counterpart of `output_file`: the model names a path, mux moves the bytes, and the file never passes through the conversation.
+`{name}_request` — and the `request`/`post` tools of the OpenAI, Recraft and Ideogram connectors — can send a file as `multipart/form-data`. This is the counterpart of `output_file`: the model names a blob or a path, mux moves the bytes, and the file never passes through the conversation.
 
-- `file_path` — absolute path of the file (supports `~`). Setting it switches the request to multipart; `body` is not allowed in this mode.
+- `file_path` — `blob:<id>` of a blob the agent uploaded to mux (`POST /blob`, see [blobs.md](blobs.md)), or the absolute path of a local file (supports `~`) where agent and mux share a disk. Setting it switches the request to multipart; `body` is not allowed in this mode. A blob is deleted once the upload got a 2xx; a failed upload leaves it for the retry.
 - `file_field` — form field the file is sent under (default `file`; Ideogram uses `image`).
 - `form_fields` — the other text parts as a JSON object of scalars, e.g. `{"title": "Banner", "public": true}`. Numbers and booleans are sent as their JSON text; `null` and nested values are rejected.
 
-The file is streamed from disk with an exact `Content-Length`; the part's `Content-Type` comes from the file extension, or from the first bytes when the extension is unknown. The result reports what went out (`Uploaded banner.png as "file": 70123 bytes, image/png`). Auth headers and redirect handling are the same as for JSON requests, and a 307/308 replays the body from disk; the one difference is `Content-Type`, where a header configured on the connection gives way to the multipart boundary.
+The file is streamed with an exact `Content-Length`; the part carries the blob's name (or the file's base name), and its `Content-Type` comes from the upload's declared type or the name's extension, or from the first bytes when neither says. The result reports what went out (`Uploaded banner.png as "file": 70123 bytes, image/png`). Auth headers and redirect handling are the same as for JSON requests, and a 307/308 replays the body from disk; the one difference is `Content-Type`, where a header configured on the connection gives way to the multipart boundary.
 
 Uploads run on their own time budget of 30 minutes instead of the 30–60 seconds a JSON round trip gets, so a large file on a slow link is not cut off (100 MB at 1 MB/s take under two minutes). The budget exists for one case: a server that accepts the connection and then stops reading. No other timer covers that — the transport's response-header timeout (30 s) starts only once the body has been written in full, and the stdio transport has no per-request deadline that would otherwise end the call. When it fires, the tool result says so in plain words (`upload aborted after 30m0s: … did not finish taking N bytes of …`) rather than Go's "awaiting headers", and mux logs the abort under `[upload]`. There is no size limit on the mux side; the target API enforces its own.
 
-The path is resolved by the mux process, not by the caller: in a container the file has to be inside a mounted directory (see [container.md](container.md#configuration)). One file per request; `form_fields` without `file_path` is an error rather than a form-encoded body.
+A path is resolved by the mux process, not by the caller — in a container, where the agent's disk is not mux's, use a blob (see [blobs.md](blobs.md) and [container.md](container.md#configuration)). One file per request; `form_fields` without `file_path` is an error rather than a form-encoded body.
 
 ### Google Gemini
 
-Dedicated connector for the Google Gemini API with automatic image handling. Text responses are returned inline; generated images are decoded from base64 and saved to disk (`~/.mux/output/` by default).
+Dedicated connector for the Google Gemini API with automatic image handling. Text responses are returned inline; generated images are decoded from base64 and stored as [blobs](blobs.md) — the result names them, and images up to 5 MB come back as image content as well — or written under `output_dir` when the call names a directory on mux's disk (a stdio instance without a store writes them to the config directory's `output/`, as before). Input images for editing are blobs (`blob:<id>`) or local paths.
 
 **Required fields**: `name`, `type`
 
@@ -862,9 +862,9 @@ instructions = "Production web server. Logs live in /var/log/nginx; the app runs
 
 | Tool | Description |
 |------|-------------|
-| `{name}_exec` | Run one program. Parameters: `args` (required, the argument vector — program first), `cwd`, `stdin`, `timeout` (seconds; default 60, at most 1800), `output_file` (stdout to a local file), `shell` (pass `args[0]` to the remote shell verbatim; only on a connection without `allow_commands`, without `deny_commands` and not read-only), `dry_run` (show the command line and the policy verdict, run nothing). Returns exit code, duration and sizes, then stdout and stderr — inline up to 64 KB / 16 KB with an explicit truncation note, or stdout in the file. A non-zero exit is a result, not an error. On a timeout mux sends SIGKILL, closes the session and reports the partial output; OpenSSH 7.9+ without a forced command kills the program on that signal, older servers and forced-command sessions ignore it and may leave the program running. |
-| `{name}_download` | Copy a remote file to this machine over SFTP. Parameters: `remote_path`, `output_file` (both required). Streamed to disk; an existing local file is never overwritten. |
-| `{name}_upload` | Copy a local file to the host over SFTP. Parameters: `file_path`, `remote_path` (required), `mode` (octal, default `0644`), `overwrite` (default false — an existing remote file is an error). Streamed from disk; a failed copy removes what it created, and says so when it could not (connection gone). Absent when `read_only = true`. |
+| `{name}_exec` | Run one program. Parameters: `args` (required, the argument vector — program first), `cwd`, `stdin`, `timeout` (seconds; default 60, at most 1800), `output_file` (stdout to a blob — `"blob"`, capped at the per-blob size — or to a local file without a limit), `shell` (pass `args[0]` to the remote shell verbatim; only on a connection without `allow_commands`, without `deny_commands` and not read-only), `dry_run` (show the command line and the policy verdict, run nothing). Returns exit code, duration and sizes, then stdout and stderr — inline up to 64 KB / 16 KB with an explicit truncation note, or stdout in the blob or file. A non-zero exit is a result, not an error. On a timeout mux sends SIGKILL, closes the session and reports the partial output; OpenSSH 7.9+ without a forced command kills the program on that signal, older servers and forced-command sessions ignore it and may leave the program running. |
+| `{name}_download` | Copy a remote file over SFTP. Parameters: `remote_path` (required), `output_file` (omitted or `"blob"`: the file becomes a [blob](blobs.md) the agent fetches from mux, refused up front when the remote size is over the per-blob cap; an absolute path writes it to mux's disk without a limit, never overwriting). Streamed; the content never passes through the conversation. |
+| `{name}_upload` | Copy a file to the host over SFTP. Parameters: `file_path` (`blob:<id>` of a blob uploaded to mux, or an absolute local path), `remote_path` (required), `mode` (octal, default `0644`), `overwrite` (default false — an existing remote file is an error). Streamed; a failed copy removes what it created, and says so when it could not (connection gone); a blob is deleted once the upload succeeded. Absent when `read_only = true`. |
 
 Transfers run under the same 30-minute budget as HTTP uploads. The connection is probed with a keepalive every 30 seconds while idle; a probe that goes unanswered while no data arrived for that long marks the connection dead, so a transfer slower than about 1 KB/s can be cut by it.
 

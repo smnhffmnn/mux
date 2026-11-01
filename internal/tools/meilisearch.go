@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -250,9 +249,14 @@ func (m *Meilisearch) doJSON(ctx context.Context, path string, body any) ([]byte
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, meilisearchMaxBody))
+	respBody, marker, err := readBodyLimited(resp, meilisearchMaxBody, "meilisearch-response.json", "meilisearch")
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("read response: %w", err)
+	}
+	if marker != "" {
+		// The body was longer than this connector inlines: the first bytes
+		// come back as before, the marker names the blob with all of it.
+		respBody = append(respBody, marker...)
 	}
 
 	return respBody, resp.StatusCode, nil

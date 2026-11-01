@@ -25,8 +25,8 @@ func newTestElevenLabs(t *testing.T, url string) *ElevenLabs {
 	if err != nil {
 		t.Fatalf("NewElevenLabs: %v", err)
 	}
-	// Never write into the real ~/.mux/output during tests.
-	e.outputDir = t.TempDir()
+	// Binary responses go to a blob store under the test's temp dir.
+	useTestBlobStore(t)
 	return e
 }
 
@@ -98,7 +98,7 @@ func TestElevenLabs_PostSendsJSONBodyAndKey(t *testing.T) {
 	}
 }
 
-func TestElevenLabs_AudioWithoutOutputFileGoesToOutputDir(t *testing.T) {
+func TestElevenLabs_AudioWithoutOutputFileIsStoredAsBlob(t *testing.T) {
 	// Larger than elevenlabsMaxBody: a narration track must not be truncated to
 	// the inline limit.
 	payload := bytes.Repeat([]byte{0x49, 0x44, 0x33, 0x04}, (elevenlabsMaxBody/4)+1024)
@@ -122,28 +122,23 @@ func TestElevenLabs_AudioWithoutOutputFileGoesToOutputDir(t *testing.T) {
 	}
 
 	text := resultText(t, res)
-	path := savedPath(t, text)
-
-	if filepath.Ext(path) != ".mp3" {
-		t.Errorf("extension = %q, want .mp3 derived from audio/mpeg", filepath.Ext(path))
-	}
-	if dir := filepath.Dir(path); dir != e.outputDir {
-		t.Errorf("directory = %q, want output dir %q", dir, e.outputDir)
-	}
 	if !strings.Contains(text, "Content-Type: audio/mpeg") {
 		t.Errorf("result should report the content type:\n%s", text)
 	}
-
-	onDisk, err := os.ReadFile(path)
+	id := blobIDFromText(t, text)
+	info, err := BlobStore().Get(id)
 	if err != nil {
-		t.Fatalf("read saved file: %v", err)
+		t.Fatalf("blob %s not stored: %v", id, err)
 	}
-	if !bytes.Equal(onDisk, payload) {
-		t.Errorf("saved %d bytes, want %d — audio must be streamed whole", len(onDisk), len(payload))
+	if filepath.Ext(info.Name) != ".mp3" || info.ContentType != "audio/mpeg" {
+		t.Errorf("blob = %+v, want an .mp3 named audio/mpeg blob", info)
+	}
+	if got := readBlob(t, BlobStore(), id); !bytes.Equal(got, payload) {
+		t.Errorf("stored %d bytes, want %d — audio must be streamed whole", len(got), len(payload))
 	}
 }
 
-func TestElevenLabs_AudioWithoutContentTypeIsStillWrittenToFile(t *testing.T) {
+func TestElevenLabs_AudioWithoutContentTypeIsStillStoredAsBlob(t *testing.T) {
 	// Raw MP3 with an ID3 header, but the server declares no type at all.
 	payload := append([]byte("ID3\x04\x00\x00\x00\x00\x00\x00"), bytes.Repeat([]byte{0x11}, 4096)...)
 
@@ -170,12 +165,8 @@ func TestElevenLabs_AudioWithoutContentTypeIsStillWrittenToFile(t *testing.T) {
 	if strings.Contains(text, "ID3") {
 		t.Errorf("raw audio bytes leaked into the tool result:\n%.200s", text)
 	}
-	onDisk, err := os.ReadFile(savedPath(t, text))
-	if err != nil {
-		t.Fatalf("read saved file: %v", err)
-	}
-	if !bytes.Equal(onDisk, payload) {
-		t.Errorf("saved %d bytes, want %d", len(onDisk), len(payload))
+	if got := readBlob(t, BlobStore(), blobIDFromText(t, text)); !bytes.Equal(got, payload) {
+		t.Errorf("stored %d bytes, want %d", len(got), len(payload))
 	}
 }
 
@@ -258,12 +249,8 @@ func TestElevenLabs_ErrorResponseStaysInlineAndWritesNoFile(t *testing.T) {
 			if _, err := os.Stat(target); !os.IsNotExist(err) {
 				t.Errorf("output_file was created for a non-2xx response (stat err = %v)", err)
 			}
-			entries, err := os.ReadDir(e.outputDir)
-			if err != nil {
-				t.Fatalf("read output dir: %v", err)
-			}
-			if len(entries) != 0 {
-				t.Errorf("wrote %d file(s) into the output dir for a failed request", len(entries))
+			if n, _ := BlobStore().Stats(); n != 0 {
+				t.Errorf("stored %d blob(s) for a failed request", n)
 			}
 		})
 	}
@@ -292,8 +279,9 @@ func TestElevenLabs_LargeTextResponseIsMarkedTruncated(t *testing.T) {
 	if !strings.Contains(text, "truncated at") {
 		t.Errorf("truncated response must say so, got tail:\n%.200s", text[max(0, len(text)-200):])
 	}
-	if !strings.Contains(text, "output_file") {
-		t.Errorf("truncation note should point at output_file:\n%.200s", text[max(0, len(text)-200):])
+	// With a blob store the whole body is kept and the note names it.
+	if got := readBlob(t, BlobStore(), blobIDFromText(t, text)); !bytes.Equal(got, payload) {
+		t.Errorf("full body not stored: %d bytes, want %d", len(got), len(payload))
 	}
 }
 

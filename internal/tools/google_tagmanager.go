@@ -300,9 +300,14 @@ func (g *GoogleTagManager) doGTM(ctx context.Context, method, path string, body 
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, gtmMaxBody))
+	data, marker, err := readBodyLimited(resp, gtmMaxBody, "google-tagmanager-response.json", "google-tagmanager")
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("read response: %w", err)
+	}
+	if marker != "" {
+		// The body was longer than this connector inlines: the first bytes
+		// come back as before, the marker names the blob with all of it.
+		data = append(data, marker...)
 	}
 	return data, resp.StatusCode, nil
 }

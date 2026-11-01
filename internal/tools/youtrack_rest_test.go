@@ -510,7 +510,7 @@ func newTestYouTrack(t *testing.T, f *ytFake, mutate func(*config.Connection)) *
 	if err != nil {
 		t.Fatalf("NewYouTrackREST: %v", err)
 	}
-	y.outputDir = t.TempDir()
+	useTestBlobStore(t)
 	return y
 }
 
@@ -1264,7 +1264,7 @@ func TestYouTrackREST_GetAttachmentContentPaths(t *testing.T) {
 	y := newTestYouTrack(t, f, nil)
 	ctx := context.Background()
 
-	// Image: inline image content.
+	// Image: inline image content, plus a blob to pass on.
 	res, err := y.handleGetAttachment(ctx, toolRequest(map[string]any{"issue": "P-1", "attachment": "shot.png"}))
 	if err != nil {
 		t.Fatal(err)
@@ -1281,6 +1281,9 @@ func TestYouTrackREST_GetAttachmentContentPaths(t *testing.T) {
 	if image == nil || image.MIMEType != "image/png" || image.Data == "" {
 		t.Fatalf("want image content, got %+v", res.Content)
 	}
+	if info, err := BlobStore().Get(blobIDFromText(t, resultText(t, res))); err != nil || info.Name != "shot.png" || info.ContentType != "image/png" {
+		t.Errorf("image blob = %+v, %v", info, err)
+	}
 	if r, ok := f.last(http.MethodGet, "/api/files/92-1"); !ok || r.Query["sign"] != "abc" {
 		t.Errorf("download must follow the signed host-relative url, got %v", r)
 	}
@@ -1294,18 +1297,17 @@ func TestYouTrackREST_GetAttachmentContentPaths(t *testing.T) {
 		t.Errorf("text attachment must be inlined: %s", resultText(t, res))
 	}
 
-	// Binary without output_file: saved under the output directory.
+	// Binary without output_file: stored as a blob, never inlined.
 	res, err = y.handleGetAttachment(ctx, toolRequest(map[string]any{"issue": "P-1", "attachment": "92-4"}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := resultText(t, res)
-	if res.IsError || !strings.Contains(text, "Saved to: "+y.outputDir) {
-		t.Fatalf("binary attachment must be saved to the output directory: %s", text)
+	if res.IsError || !strings.Contains(text, "Stored as blob") {
+		t.Fatalf("binary attachment must be stored as a blob: %s", text)
 	}
-	saved, _ := os.ReadDir(y.outputDir)
-	if len(saved) != 1 || !strings.Contains(saved[0].Name(), "blob.bin") {
-		t.Errorf("saved files = %v", saved)
+	if info, err := BlobStore().Get(blobIDFromText(t, text)); err != nil || info.Name != "blob.bin" {
+		t.Errorf("stored blob = %+v, %v", info, err)
 	}
 
 	// output_file wins over inlining.

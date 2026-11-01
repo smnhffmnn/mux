@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -154,9 +153,14 @@ func (y *YouTrackAgile) fetch(ctx context.Context, path string) ([]byte, error) 
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, youtrackAgileMaxBody))
+	body, marker, err := readBodyLimited(resp, youtrackAgileMaxBody, "youtrack-agile-response.json", "youtrack")
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if marker != "" {
+		// The body was longer than this connector inlines: the first bytes
+		// come back as before, the marker names the blob with all of it.
+		body = append(body, marker...)
 	}
 
 	if resp.StatusCode != http.StatusOK {

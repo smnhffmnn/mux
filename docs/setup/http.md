@@ -22,4 +22,4 @@ Click **Test** to verify reachability. mux sends a GET request to the base URL.
 
 - The HTTP type provides generic API tools (GET, POST, etc.) — the API does not need MCP support.
 - For MCP servers, use the **MCP Proxy (generic)** type instead.
-- The `request` tool can upload a local file as multipart/form-data (`file_path` + `form_fields`). mux reads the file, not the agent — the path must be visible to the mux process.
+- The `request` tool can upload a file as multipart/form-data (`file_path` + `form_fields`): `blob:<id>` of a blob uploaded to mux (`POST /blob`), or a local path where you and mux share a disk. `output_file = "blob"` receives a response as a blob.

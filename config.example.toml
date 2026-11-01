@@ -12,6 +12,14 @@ port = 7700                                  # HTTP port (always localhost, for 
 # tls_key = "/path/to/key.pem"             # TLS private key
 # tls_port = 7701                          # HTTPS port (default: port + 1), binds to all interfaces
 
+# --- Blob store (optional) ---
+# Temporary files between the agent and mux (POST/GET /blob on the loopback
+# listener), for machines that do not share mux's disk. See docs/blobs.md.
+# [blobs]
+# ttl = "1h"                                 # lifetime of a blob
+# max_total = "1GiB"                         # all blobs together, on disk
+# max_blob = "256MiB"                        # one blob, or one unpacked tree
+
 # --- Encrypted Vault (optional) ---
 # Hardware-security-grade secret storage with WebAuthn/FIDO2 unlock.
 # When enabled, secrets are encrypted at rest with AES-256-GCM.
