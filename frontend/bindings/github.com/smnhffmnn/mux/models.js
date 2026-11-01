@@ -811,6 +811,14 @@ export class SaveConnectionRequest {
              */
             this["smtpSavesSent"] = undefined;
         }
+        if (/** @type {any} */(false)) {
+            /**
+             * supabase connection type.
+             * @member
+             * @type {string | undefined}
+             */
+            this["projectRef"] = undefined;
+        }
 
         Object.assign(this, $$source);
     }

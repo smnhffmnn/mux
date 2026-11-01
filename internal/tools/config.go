@@ -120,7 +120,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("Extra HTTP headers sent with every request (http and proxy types), one 'Name: Value' per line (e.g. 'Notion-Version: 2022-06-28')."),
 			),
 			mcp.WithBoolean("read_only",
-				mcp.Description("Expose reading tools only (databases: no execute; http: no request; youtrack-rest: no write and no admin tools; ssh: no upload, exec limited to allow_commands or the built-in list of reading commands). Default false."),
+				mcp.Description("Expose reading tools only (databases: no execute; http: no request; youtrack-rest: no write and no admin tools; ssh: no upload, exec limited to allow_commands or the built-in list of reading commands; supabase: no deploy, delete or secret writes, SQL on the read-only endpoint). Default false."),
 			),
 			mcp.WithString("protected_fields",
 				mcp.Description("youtrack-rest: fields this connection never writes, one per line as 'Project:Field' or 'Field' (e.g. 'P:Sprint priority')."),
@@ -157,6 +157,9 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 			),
 			mcp.WithString("from_name",
 				mcp.Description("imap: display name in the From header of drafts and sent mail (e.g. 'Jane Doe')."),
+			),
+			mcp.WithString("project_ref",
+				mcp.Description("supabase: the project's reference (20 lowercase letters, the id in the dashboard URL). Store the access token with secret_set as {name}-token; url defaults to https://api.supabase.com."),
 			),
 		),
 		Handler: ct.handleConnectionAdd,
@@ -373,6 +376,9 @@ func (ct *ConfigTools) handleConnectionList(_ context.Context, _ mcp.CallToolReq
 				entry["from_name"] = c.FromName
 			}
 		}
+		if c.Type == config.TypeSupabase && c.ProjectRef != "" {
+			entry["project_ref"] = c.ProjectRef
+		}
 		entry["secrets_set"] = secrets
 		conns = append(conns, entry)
 	}
@@ -581,6 +587,18 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 	if err := config.ValidateIMAPSending(conn); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	// supabase-only fields, same rule as the ssh fields above.
+	for _, key := range config.SupabaseFields {
+		if v := req.GetString(key, ""); v != "" && typ != config.TypeSupabase {
+			return mcp.NewToolResultError(fmt.Sprintf("%s applies to type %q only, not %q", key, config.TypeSupabase, typ)), nil
+		}
+	}
+	if v := strings.TrimSpace(req.GetString("project_ref", "")); v != "" {
+		conn.ProjectRef = v
+	}
+	if err := config.ValidateSupabase(conn); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	config.ApplyConnectionDefaults(&conn)
 	// A key stored before the connection was added (secret_set first,
@@ -597,6 +615,9 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 	}
 
 	msg := fmt.Sprintf("connection %q (%s) created", name, typ)
+	if typ == config.TypeSupabase && conn.Token == "" {
+		msg += fmt.Sprintf(". Next: store the access token with secret_set %q; the connection registers once the token is there.", name+"-token")
+	}
 	if typ == config.TypeSSH && conn.Auth != sshclient.AuthAgent && conn.KeyFile == "" {
 		if conn.PrivateKey != "" {
 			msg += fmt.Sprintf(" with the stored key %q", name+"-private-key")

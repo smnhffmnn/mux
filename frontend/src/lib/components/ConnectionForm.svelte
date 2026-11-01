@@ -40,6 +40,7 @@
     from_name: 'fromName',
     allow_send: 'allowSend',
     smtp_saves_sent: 'smtpSavesSent',
+    project_ref: 'projectRef',
   }
 
   async function handleSave() {

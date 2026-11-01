@@ -44,6 +44,7 @@ const (
 	TypeHyperbrowser     = "hyperbrowser"
 	TypeHiggsfield       = "higgsfield"
 	TypeSSH              = "ssh"
+	TypeSupabase         = "supabase"
 )
 
 // Connection.Source / Tunnel.Source values. SourceLocal marks entries

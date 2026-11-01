@@ -99,6 +99,17 @@ read_only = true
 # set_once_fields = ["P:Department"]            # written only while still empty
 # Token stored as secret (key: "youtrack-rest-token")
 
+# Supabase: one project over the Management API (Edge Functions: list, read, deploy,
+# delete; function secrets; SQL; logs). The deploy uploads the files the supabase CLI
+# would upload, the server bundles.
+# [[connections]]
+# name = "supabase-app"
+# type = "supabase"
+# project_ref = "abcdefghijklmnopqrst"          # 20 lowercase letters — the id in the dashboard URL
+# url = "https://api.supabase.com"               # optional, this is the default
+# read_only = false                             # true: no deploy/delete/secret writes, SQL read-only
+# Access token stored as secret (key: "supabase-app-token") — a fine-grained token scoped to the project
+
 # Proxy: OAuth 2.0 + PKCE (e.g. Sentry — type "sentry" defaults oauth=true)
 # [[connections]]
 # name = "sentry"

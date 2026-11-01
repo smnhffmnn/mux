@@ -199,6 +199,8 @@ export interface SaveConnectionRequest {
   fromName?: string
   allowSend?: boolean
   smtpSavesSent?: boolean
+  // supabase
+  projectRef?: string
 }
 
 // API functions

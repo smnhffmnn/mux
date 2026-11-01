@@ -187,6 +187,12 @@ type Connection struct {
 	SMTPSavesSent bool   `toml:"smtp_saves_sent,omitempty" json:"smtpSavesSent,omitempty"`
 	FromName      string `toml:"from_name,omitempty" json:"fromName,omitempty"`
 
+	// Supabase connection type (TypeSupabase): one project behind the
+	// Supabase Management API. ProjectRef is the project's reference (the
+	// 20-letter id in the dashboard URL); URL is the API host and defaults to
+	// https://api.supabase.com. The access token is Token / {name}-token.
+	ProjectRef string `toml:"project_ref,omitempty" json:"projectRef,omitempty"`
+
 	// SSH connection type (TypeSSH). Auth selects the key source: "key"
 	// (default — the secret {name}-private-key or key_file) or "agent" (the
 	// user's ssh-agent, no key in mux). HostKey pins the server's public key;
@@ -231,6 +237,10 @@ func (c *Connection) Enabled() bool {
 		// Token is fetched from vault at request time, not at startup.
 		// Only require host and user for the connection to be considered enabled.
 		return c.Host != "" && c.User != ""
+	case c.Type == TypeSupabase:
+		// The URL has a default; the token and the project are what a
+		// connection needs.
+		return c.Token != "" && c.ProjectRef != ""
 	case c.Type == TypeSSH:
 		// With auth = "agent" the key lives in the user's ssh-agent, so no
 		// stored key is needed for the connection to count as configured.
@@ -878,6 +888,10 @@ func ApplyConnectionDefaults(c *Connection) {
 	case TypeSSH:
 		if c.Port == 0 {
 			c.Port = 22
+		}
+	case TypeSupabase:
+		if c.URL == "" {
+			c.URL = SupabaseDefaultURL
 		}
 	}
 }

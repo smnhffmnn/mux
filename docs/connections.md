@@ -586,6 +586,64 @@ instructions = "Semantic search over documentation. Use when grep is insufficien
 | `{name}_search` | Hybrid search (keyword + semantic) over the index. Parameters: `query` (required), `limit` (optional, default 5, max 20). Uses `semanticRatio: 0.7` for balanced keyword/semantic weighting. |
 | `{name}_read` | Read a full document by its path. Parameter: `path` (required, as returned by search results). Uses a filter-based exact match. |
 
+### Supabase
+
+One [Supabase](https://supabase.com) project over the Management API (`https://api.supabase.com`): Edge Functions listed, read back, deployed and deleted; function secrets; SQL against the project's Postgres; the unified log stream. The type exists for the deploy — the API takes a function as a multipart request with one part per source file and bundles on the server, and mux collects those files the way the supabase CLI does, so a function deployed from an agent carries the same files as one deployed with `supabase functions deploy`. Nothing passes through the model but the paths.
+
+**Required fields**: `name`, `type`, `project_ref` (the project's reference — 20 lowercase letters, the id in the dashboard URL `supabase.com/dashboard/project/<ref>`; not necessarily the `project_id` of `supabase/config.toml`, which names the local stack)
+
+**Optional fields**: `url` (default `https://api.supabase.com`), `read_only` (default: false — no deploy, no delete, no secret writes, SQL on the read-only endpoint), `tunnel`, `instructions`
+
+**Secret**: `{name}-token` in secret store — an access token for the Management API, sent as Bearer token. Use a **fine-grained token** scoped to the project with the permissions the tools need (Edge Functions, Secrets, Database, Logs) rather than an account-wide personal access token, which opens every project the account can see.
+
+```toml
+[[connections]]
+name = "supabase-app"
+type = "supabase"
+project_ref = "abcdefghijklmnopqrst"
+instructions = "Production project of the app. hello-world is the public webhook; deploy it only after the dry run matches the CLI's file list."
+# Token stored as secret (key: "supabase-app-token")
+```
+
+**MCP tools exposed** (reading):
+
+| Tool | Description |
+|------|-------------|
+| `{name}_project` | The project: ref, name, region, status, organization, database host; whether the connection is read-only. |
+| `{name}_functions_list` | Edge Functions with slug, status, version, `verifyJwt`, entrypoint and import map paths as deployed, created/updated (UTC). |
+| `{name}_function_get` | One function: metadata and the source files the server holds (paths as uploaded, sizes). Parameters: `slug` (required), `file` (one file inline, text ≤ 256 KB), `output_dir` (write all files there, never overwriting). A function deployed as a pre-built bundle reports `bundle` instead of files. |
+| `{name}_secrets_list` | Secret names with their update time. Values are never returned. |
+| `{name}_sql_query` | SQL through the API, rows as JSON. Parameters: `query` (required), `parameters` (positional, optional), `read_only`. On a read-only connection every query runs on the read-only endpoint (as `supabase_read_only_user`); otherwise `read_only=true` gives the same guarantee. Results are not paged — add `LIMIT`. |
+| `{name}_logs` | The unified log stream for a window of at most 24 hours (default: the last hour), newest first. Parameters: `source` (default `function_logs`; `function_edge_logs`, `edge_logs`, `postgres_logs`, `auth_logs`, `storage_logs`, `realtime_logs`), `function` (slug, for the two function sources), `search` (message contains), `start`, `end`, `limit` (default 100, max 1000), `sql` (your own ClickHouse SQL over the table `logs` instead of the built query — `source`, `function`, `search` and `limit` do not apply then; only the window does). The result shows the SQL that ran. |
+
+**MCP tools exposed** (when `read_only = false`):
+
+| Tool | Description |
+|------|-------------|
+| `{name}_function_deploy` | Deploy from a local checkout. Parameters: `path` (the project root — the directory that contains `supabase/`; absolute, on the machine running mux), `slug` (required), `verify_jwt`, `dry_run`. Returns the function before and after (the version advances), the files uploaded with sizes, the metadata sent, and warnings for imports that were skipped. |
+| `{name}_function_delete` | Delete a deployed function; its URL stops answering at once. Parameter: `slug`. |
+| `{name}_secrets_set` | Create or update secrets. Parameters: `env_file` (absolute path of a dotenv file on the machine running mux — named `.env`, `.env.<name>` or `<name>.env`, a regular text file; the values never pass through the conversation, and an error names a line number, never a line), `secrets` (name → value, merged; the call wins on a duplicate). Names are environment variable names; `SUPABASE_*` entries of an env file are skipped and reported, in the call they are refused; at most 100 per call. |
+| `{name}_secrets_delete` | Delete secrets by name. Parameter: `names`. |
+
+**What a deploy uploads.** The CLI's rules (`apps/cli/src/shared/functions/deploy.ts` in `supabase/cli`), reproduced in `internal/tools/supabase_deploy.go`:
+
+- the entrypoint — `supabase/functions/<slug>/index.ts`, or `entrypoint` from `[functions.<slug>]` in `supabase/config.toml`;
+- its import graph: `import`/`export … from "…"` and `import("…")` with a relative or absolute specifier whose last segment has a dot (so `../_shared/cors.ts` and everything it imports; `npm:`, `jsr:`, `https:` and bare specifiers are the server's business), resolved through the import map first;
+- the import map, when the function has one: `import_map` from config.toml, else `deno.json`/`deno.jsonc` next to the entrypoint, else `supabase/functions/import_map.json` — an `import_map.json` next to the entrypoint is refused, as the CLI refuses it — and the local targets of that map, directories in full (symlinked subdirectories are not descended; `.env` files in such a directory are skipped with a warning, where the CLI would upload them);
+- the files matching `static_files` patterns from config.toml, with the CLI's glob: `*` and `?` within a segment, `[…]`, and `**` for anything including slashes — so `assets/**/*.html` needs a directory between `assets` and the file.
+
+`[functions.<slug>]` in config.toml supplies `entrypoint`, `import_map`, `static_files`, `verify_jwt` and `enabled`; a `[remotes.<name>]` block whose `project_id` is the connection's project overlays it, as the CLI applies it for the linked project.
+
+Every name is anchored at the project root with forward slashes (`supabase/functions/hook/index.ts`), and so are `entrypoint_path`, `import_map_path` and `static_patterns` in the metadata. The boundary of the walk is the nearest git root above the project root, or the project root itself — but a file above the project root would need a `..` in its name and is refused, and a file outside the git root is skipped with a warning; so in practice everything comes from under the project root. Symlinks are resolved before that check: a link pointing out of the checkout is skipped, never uploaded, and the upload reads the resolved path. Here mux is stricter than the CLI, which also admits the directory of an import map outside the checkout (a prepared `deno.json` could use that to upload `~/.ssh/id_rsa` through a symlink) — mux refuses an import map outside the git root instead. `verify_jwt` is sent when config.toml declares it or the call passes it; otherwise the deployed function's setting is kept — a deploy never silently switches JWT verification. `dry_run` returns the plan without uploading; comparing it with `supabase functions deploy <slug> --debug` (or with `function_get` after a CLI deploy) is the way to confirm both tools agree on a function before the first deploy from mux.
+
+**Reading a function back.** `function_get` asks the API for the source files (`Accept: multipart/form-data`) and lists them with the paths they were uploaded under — the same anchoring. A function deployed by an old CLI as a pre-built eszip has no source files on the server; `output_dir` then writes the bundle.
+
+**Secrets** are the project's function secrets (environment of the Edge Functions). `secrets_list` strips the values the API returns; `secrets_set` prefers an `env_file`, so a key copied from a dashboard goes from a file on disk to Supabase without appearing in a tool call. Functions see new values on their next invocation.
+
+**Rate limit.** The Management API allows 60 requests per minute per token. HTTP 429 is retried up to three times (four requests in all) with the server's `Retry-After` (capped at 30 s), also for a deploy, whose body is re-read from disk. A redirect to another host is refused, so a request body is never replayed elsewhere; `url` takes plain `http` for loopback hosts only.
+
+The endpoints, query parameters and fields the type uses are listed in a registry and checked against Supabase's published OpenAPI document (`https://api.supabase.com/api/v1-json`) by the test suite — vendored snapshot in `internal/tools/testdata/supabase-openapi.json`, refreshed with `scripts/supabase-openapi-snapshot.sh`; the `Supabase API drift` workflow repeats the check weekly against the live document and, with the repository secrets `SUPABASE_LIVE_TOKEN` and `SUPABASE_LIVE_REF` set, exercises the type read-only against a real project (`go test -tags notray,live ./internal/tools -run TestSupabaseLive`; the CI log carries counts only — `SUPABASE_LIVE_VERBOSE=1` prints names and paths for a local run).
+
 ## Proxy Connections
 
 ### MCP Proxy
