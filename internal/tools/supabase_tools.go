@@ -82,10 +82,39 @@ func (s *Supabase) Tools() []ToolDef {
 			),
 			Handler: s.handleLogs,
 		},
+		{
+			Tool: mcp.NewTool("migrations_list",
+				mcp.WithDescription("The project's migration history (supabase_migrations.schema_migrations): version and name of every applied migration, oldest first. Versions come from the file name when the supabase CLI applied a migration and from the server when the API did (Lovable, migrations_apply) — then only the name ties an entry to a file."),
+				mcp.WithReadOnlyHintAnnotation(true),
+			),
+			Handler: s.handleMigrationsList,
+		},
+		{
+			Tool: mcp.NewTool("migrations_pending",
+				mcp.WithDescription("Compare the migration files of a local checkout (supabase/migrations/<version>_<name>.sql under path) with the project's history and list what is pending, in the order it would be applied. A file counts as applied when the history has its version, its file stem or its name part. Changes nothing."),
+				mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path of the project root on the machine running mux (contains supabase/migrations)")),
+				mcp.WithReadOnlyHintAnnotation(true),
+			),
+			Handler: s.handleMigrationsPending,
+		},
 	}
 	if s.readOnly {
 		return tools
 	}
+	tools = append(tools,
+		ToolDef{
+			Tool: mcp.NewTool("migrations_apply",
+				mcp.WithDescription("Apply pending migration files from a local checkout through the Management API — the SQL runs on the project's database and the migration is recorded in the history under the file's stem as name (the server assigns the version). Without file, every pending migration in file order; with file, that one file. "+
+					"dry_run lists what would run (size, approximate statement count, sha256) without touching the database. Stops at the first error: the migrations before it are applied and recorded, the failing one is not. "+
+					"The database is production — read migrations_pending first, and do not apply a file out of order unless you mean to."),
+				mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path of the project root on the machine running mux (contains supabase/migrations)")),
+				mcp.WithString("file", mcp.Description("One migration to apply: its file name without .sql, or its version")),
+				mcp.WithBoolean("dry_run", mcp.Description("Only list what would be applied (default false)")),
+				mcp.WithDestructiveHintAnnotation(true),
+			),
+			Handler: s.handleMigrationsApply,
+		},
+	)
 	tools = append(tools,
 		ToolDef{
 			Tool: mcp.NewTool("function_deploy",

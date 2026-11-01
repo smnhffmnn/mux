@@ -1089,6 +1089,19 @@ func (s *Supabase) handleFunctionDeploy(ctx context.Context, req mcp.CallToolReq
 	if dryRun {
 		result["dryRun"] = true
 		result["deployed"] = false
+		if before != nil {
+			// The acceptance check in one place: the plan against the files
+			// the server holds for the running version, prefix-agnostic.
+			files, _, eszip, err := s.sbFunctionBody(ctx, slug)
+			switch {
+			case err != nil:
+				result["comparison"] = map[string]any{"error": fmt.Sprintf("the deployed files could not be read: %v", err)}
+			case eszip != nil:
+				result["comparison"] = map[string]any{"note": "the deployed version is a pre-built bundle; there are no files to compare"}
+			default:
+				result["comparison"] = sbComparePlan(plan, files, before.Entrypoint)
+			}
+		}
 		return sbResultJSON(result)
 	}
 
@@ -1096,11 +1109,9 @@ func (s *Supabase) handleFunctionDeploy(ctx context.Context, req mcp.CallToolReq
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	client := *s.client
-	client.Timeout = uploadTimeout
 	q := url.Values{}
 	q.Set("slug", slug)
-	resp, err := s.call(ctx, "function.deploy", nil, q, body, "", &client)
+	resp, err := s.call(ctx, "function.deploy", nil, q, body, "", s.longClient)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("deploy failed: %v", err)), nil
 	}
@@ -1122,6 +1133,109 @@ func (s *Supabase) handleFunctionDeploy(ctx context.Context, req mcp.CallToolReq
 		result["warning"] = fmt.Sprintf("the version did not advance (%d before, %d after)", before.Version, deployed.Version)
 	}
 	return sbResultJSON(result)
+}
+
+// sbComparePlan holds a deploy plan against the files of the deployed
+// version. The server anchors the files it hands back differently from the
+// upload (functions/x/index.ts for an upload named supabase/functions/x/index.ts
+// — seen live 01.11.2026), so both sides are compared from the functions
+// directory down: the longest common suffix anchoring works out of the
+// entrypoint. Same names and sizes means the deploy would carry what runs.
+func sbComparePlan(plan *sbDeployPlan, deployed []sbBodyFile, deployedEntrypoint string) map[string]any {
+	localEntry, _ := plan.Metadata["entrypoint_path"].(string)
+	// The deployed entrypoint is the file whose path shares the longest
+	// suffix with the local one (the server may anchor it differently from
+	// the metadata it reports).
+	deployedEntry, best := "", -1
+	for _, f := range deployed {
+		if n := len(sbCommonSuffix(localEntry, f.Path)); n > best {
+			deployedEntry, best = f.Path, n
+		}
+	}
+	if deployedEntry == "" {
+		deployedEntry = deployedEntrypoint
+	}
+	common := sbCommonSuffix(localEntry, deployedEntry)
+	localPrefix := strings.TrimSuffix(localEntry, common)
+	remotePrefix := strings.TrimSuffix(deployedEntry, common)
+	local := map[string]sbDeployFile{}
+	collision := false
+	for _, f := range plan.Files {
+		n := strings.TrimPrefix(f.Name, localPrefix)
+		if _, dup := local[n]; dup {
+			collision = true
+		}
+		local[n] = f
+	}
+	remote := map[string]sbBodyFile{}
+	for _, f := range deployed {
+		n := strings.TrimPrefix(f.Path, remotePrefix)
+		if _, dup := remote[n]; dup {
+			collision = true
+		}
+		remote[n] = f
+	}
+	var onlyLocal, onlyDeployed, sizeDiffers, contentDiffers []string
+	for n, lf := range local {
+		rf, ok := remote[n]
+		switch {
+		case !ok:
+			onlyLocal = append(onlyLocal, n)
+		case rf.Size != int(lf.Size):
+			sizeDiffers = append(sizeDiffers, fmt.Sprintf("%s (local %d, deployed %d)", n, lf.Size, rf.Size))
+		case rf.content != nil:
+			// Same size: compare the bytes, a same-length edit must not pass.
+			if data, err := os.ReadFile(lf.Path); err != nil || !bytes.Equal(data, rf.content) {
+				contentDiffers = append(contentDiffers, n)
+			}
+		}
+	}
+	for n := range remote {
+		if _, ok := local[n]; !ok {
+			onlyDeployed = append(onlyDeployed, n)
+		}
+	}
+	sort.Strings(onlyLocal)
+	sort.Strings(onlyDeployed)
+	sort.Strings(sizeDiffers)
+	sort.Strings(contentDiffers)
+	same := !collision && len(onlyLocal) == 0 && len(onlyDeployed) == 0 && len(sizeDiffers) == 0 && len(contentDiffers) == 0
+	out := map[string]any{
+		"sameFiles":     same,
+		"deployedFiles": len(deployed),
+		"plannedFiles":  len(plan.Files),
+		"anchoredAt":    common[:strings.Index(common+"/", "/")],
+	}
+	if collision {
+		out["warning"] = "two files fell onto one name after anchoring — the comparison cannot be trusted"
+	}
+	if len(onlyLocal) > 0 {
+		out["onlyLocal"] = onlyLocal
+	}
+	if len(onlyDeployed) > 0 {
+		out["onlyDeployed"] = onlyDeployed
+	}
+	if len(sizeDiffers) > 0 {
+		out["sizeDiffers"] = sizeDiffers
+	}
+	if len(contentDiffers) > 0 {
+		out["contentDiffers"] = contentDiffers
+	}
+	if same {
+		out["note"] = "the plan carries the same files, byte for byte, as the deployed version"
+	}
+	return out
+}
+
+// sbCommonSuffix returns the longest common suffix of a and b on path
+// segment boundaries.
+func sbCommonSuffix(a, b string) string {
+	as, bs := strings.Split(a, "/"), strings.Split(b, "/")
+	n := 0
+	for n < len(as) && n < len(bs) && as[len(as)-1-n] == bs[len(bs)-1-n] {
+		n++
+	}
+	return strings.Join(as[len(as)-n:], "/")
 }
 
 // --- Reading a function back ---

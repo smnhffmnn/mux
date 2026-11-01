@@ -1,6 +1,6 @@
 # Supabase (Management API)
 
-One Supabase project behind the Management API: Edge Functions (list, read back, deploy, delete), function secrets, SQL on the project's database, and the unified log stream. The deploy collects the files the way the supabase CLI does — entrypoint, relative imports, import map and its targets, `static_files` — and the server bundles; nothing but the paths passes through the agent.
+One Supabase project behind the Management API: Edge Functions (list, read back, deploy, delete), database migrations from a checkout, function secrets, SQL on the project's database, and the unified log stream. The deploy collects the files the way the supabase CLI does — entrypoint, relative imports, import map and its targets, `static_files` — and the server bundles; nothing but the paths passes through the agent.
 
 ## Prerequisites
 
@@ -24,6 +24,7 @@ Click **Test**. mux reads the project (`GET /v1/projects/{ref}`) — the call ev
 ## Notes
 
 - **Deploying.** `function_deploy` takes the project root (the directory that contains `supabase/`) and the slug. Run it with `dry_run` first: the result lists the files and the metadata that would go out. Compare the list with what `supabase functions deploy <slug> --debug` uploads, or with `function_get` after a CLI deploy — once they agree, deploy from mux.
+- **Migrations.** `migrations_pending` shows which files of `supabase/migrations/` the project has not seen; `migrations_apply` runs them through the API in file order (`dry_run` first). The history records the file's stem as name and a server-assigned version — the form Lovable writes; a project pushed with the CLI reads fine too. The token needs Database write for it.
 - **verify_jwt** is taken from `[functions.<slug>]` in `supabase/config.toml`; without it the deployed setting is kept. Pass `verify_jwt` on the call only to change it.
 - **Secrets.** Values are never returned. To set one, write it to a dotenv file (`.env`, `.env.<name>` or `<name>.env`) on the machine running mux and pass `env_file` — the value goes from the file to Supabase without appearing in the conversation. `SUPABASE_*` entries are skipped.
 - **Logs.** A window of at most 24 hours, default the last hour; `function_logs` is the console output of Edge Functions, `function_edge_logs` the requests that reached them. The query runs as ClickHouse SQL over the unified `logs` table; the result shows the SQL that ran.

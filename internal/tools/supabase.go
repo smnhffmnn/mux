@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -59,7 +60,8 @@ const (
 // tables mean belongs in the connection's instructions.
 const DefaultSupabaseInstructions = `One Supabase project over the Management API; every tool acts on that project.
 functions_list shows the deployed Edge Functions with version and update time; function_get reads one back — its metadata and the source files the server holds (list, one file inline, or all files into a directory).
-function_deploy uploads a function from a local checkout: pass the project root (the directory that contains supabase/) and the slug; mux collects the files the way the supabase CLI does (entrypoint, relative imports, import map targets, static_files from config.toml) and the server bundles. Use dry_run first to see the file list without deploying. verify_jwt is taken from config.toml, else kept as deployed; pass it only to change it.
+migrations_pending compares the checkout's supabase/migrations/ with the project's history; migrations_apply runs the pending files through the API in file order (dry_run first) — the database is production.
+function_deploy uploads a function from a local checkout: pass the project root (the directory that contains supabase/) and the slug; mux collects the files the way the supabase CLI does (entrypoint, relative imports, import map targets, static_files from config.toml) and the server bundles. Use dry_run first: it shows the file list and compares it with the files of the deployed version (comparison.sameFiles). verify_jwt is taken from config.toml, else kept as deployed; pass it only to change it.
 secrets_list never returns values. secrets_set reads them from an env_file on this machine (preferred) or from the call; names must not start with SUPABASE_.
 sql_query runs SQL on the project's Postgres through the API; on a read-only connection only the read-only endpoint is used. logs queries the unified log stream (ClickHouse SQL) for a window of at most 24 hours — the default is the last hour of function_logs; filter by function slug.
 Write tools are absent on read-only connections.`
@@ -73,6 +75,10 @@ type Supabase struct {
 	readOnly     bool
 	instructions string
 	client       *http.Client
+	// longClient serves calls the server works on for minutes — the deploy
+	// (bundling) and a migration (its SQL): no header timeout, the upload
+	// budget as the overall one.
+	longClient *http.Client
 
 	// now and sleep are swappable for tests (log windows, 429 back-off).
 	now   func() time.Time
@@ -94,12 +100,24 @@ func NewSupabase(conn config.Connection, dialer Dialer) (*Supabase, error) {
 	transport := &http.Transport{
 		ResponseHeaderTimeout: 60 * time.Second,
 	}
+	longTransport := &http.Transport{}
 	if dialer != nil {
-		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return dialer.DialContext(ctx, network, addr)
 		}
+		transport.DialContext = dial
+		longTransport.DialContext = dial
 	}
 	apiHost := strings.ToLower(strings.TrimPrefix(strings.TrimPrefix(baseURL, "https://"), "http://"))
+	checkRedirect := func(req *http.Request, via []*http.Request) error {
+		if strings.ToLower(req.URL.Host) != apiHost {
+			return fmt.Errorf("refusing redirect to %s", req.URL.Host)
+		}
+		if len(via) >= 3 {
+			return errors.New("too many redirects")
+		}
+		return nil
+	}
 	return &Supabase{
 		name:         conn.Name,
 		baseURL:      baseURL,
@@ -107,24 +125,13 @@ func NewSupabase(conn config.Connection, dialer Dialer) (*Supabase, error) {
 		projectRef:   strings.TrimSpace(conn.ProjectRef),
 		readOnly:     conn.ReadOnly,
 		instructions: conn.Instructions,
-		client: &http.Client{
-			Transport: transport,
-			Timeout:   sbRequestTimeout,
-			// A redirect to another host would replay the request body —
-			// secret values, a function's source — there. The API has no
-			// reason to redirect at all; refuse anything off-host.
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if strings.ToLower(req.URL.Host) != apiHost {
-					return fmt.Errorf("refusing redirect to %s", req.URL.Host)
-				}
-				if len(via) >= 3 {
-					return errors.New("too many redirects")
-				}
-				return nil
-			},
-		},
-		now:   time.Now,
-		sleep: sbSleep,
+		// A redirect to another host would replay the request body — secret
+		// values, a function's source — there. The API has no reason to
+		// redirect at all; refuse anything off-host.
+		client:     &http.Client{Transport: transport, Timeout: sbRequestTimeout, CheckRedirect: checkRedirect},
+		longClient: &http.Client{Transport: longTransport, Timeout: uploadTimeout, CheckRedirect: checkRedirect},
+		now:        time.Now,
+		sleep:      sbSleep,
 	}, nil
 }
 
@@ -147,27 +154,30 @@ func sbSleep(ctx context.Context, d time.Duration) error {
 // path, a dropped parameter or a removed field fails a test instead of a
 // user's call.
 type sbEndpoint struct {
-	Method string
-	Path   string
-	Params []string
+	Method  string
+	Path    string
+	Params  []string
+	Headers []string // request headers beyond auth and content type the call may send
 }
 
 // sbEndpoints is the complete list of API calls the type can make through
 // call. Handlers address entries by key; call refuses anything that is not
 // listed, so the spec test sees every path the type can send.
 var sbEndpoints = map[string]sbEndpoint{
-	"project":         {Method: http.MethodGet, Path: "/v1/projects/{ref}"},
-	"functions":       {Method: http.MethodGet, Path: "/v1/projects/{ref}/functions"},
-	"function":        {Method: http.MethodGet, Path: "/v1/projects/{ref}/functions/{function_slug}"},
-	"function.body":   {Method: http.MethodGet, Path: "/v1/projects/{ref}/functions/{function_slug}/body"},
-	"function.deploy": {Method: http.MethodPost, Path: "/v1/projects/{ref}/functions/deploy", Params: []string{"slug"}},
-	"function.delete": {Method: http.MethodDelete, Path: "/v1/projects/{ref}/functions/{function_slug}"},
-	"secrets":         {Method: http.MethodGet, Path: "/v1/projects/{ref}/secrets"},
-	"secrets.create":  {Method: http.MethodPost, Path: "/v1/projects/{ref}/secrets"},
-	"secrets.delete":  {Method: http.MethodDelete, Path: "/v1/projects/{ref}/secrets"},
-	"query":           {Method: http.MethodPost, Path: "/v1/projects/{ref}/database/query"},
-	"query.readonly":  {Method: http.MethodPost, Path: "/v1/projects/{ref}/database/query/read-only"},
-	"logs":            {Method: http.MethodGet, Path: "/v1/projects/{ref}/analytics/endpoints/logs", Params: []string{"sql", "iso_timestamp_start", "iso_timestamp_end"}},
+	"project":          {Method: http.MethodGet, Path: "/v1/projects/{ref}"},
+	"functions":        {Method: http.MethodGet, Path: "/v1/projects/{ref}/functions"},
+	"function":         {Method: http.MethodGet, Path: "/v1/projects/{ref}/functions/{function_slug}"},
+	"function.body":    {Method: http.MethodGet, Path: "/v1/projects/{ref}/functions/{function_slug}/body"},
+	"function.deploy":  {Method: http.MethodPost, Path: "/v1/projects/{ref}/functions/deploy", Params: []string{"slug"}},
+	"function.delete":  {Method: http.MethodDelete, Path: "/v1/projects/{ref}/functions/{function_slug}"},
+	"secrets":          {Method: http.MethodGet, Path: "/v1/projects/{ref}/secrets"},
+	"secrets.create":   {Method: http.MethodPost, Path: "/v1/projects/{ref}/secrets"},
+	"secrets.delete":   {Method: http.MethodDelete, Path: "/v1/projects/{ref}/secrets"},
+	"query":            {Method: http.MethodPost, Path: "/v1/projects/{ref}/database/query"},
+	"query.readonly":   {Method: http.MethodPost, Path: "/v1/projects/{ref}/database/query/read-only"},
+	"logs":             {Method: http.MethodGet, Path: "/v1/projects/{ref}/analytics/endpoints/logs", Params: []string{"sql", "iso_timestamp_start", "iso_timestamp_end"}},
+	"migrations":       {Method: http.MethodGet, Path: "/v1/projects/{ref}/database/migrations"},
+	"migrations.apply": {Method: http.MethodPost, Path: "/v1/projects/{ref}/database/migrations", Headers: []string{"Idempotency-Key"}},
 }
 
 // sbSchemaFields lists, per OpenAPI component schema, the properties the type
@@ -183,7 +193,12 @@ var sbSchemaFields = map[string][]string{
 	"V1RunQueryBody":                       {"query", "parameters", "read_only"},
 	"V1ReadOnlyQueryBody":                  {"query", "parameters"},
 	"AnalyticsResponse_Output":             {"result", "error"},
+	"V1CreateMigrationBody":                {"query", "name"},
 }
+
+// sbMigrationListFields are the properties of one entry of
+// V1ListMigrationsResponse_Output (an array schema). Checked by the spec test.
+var sbMigrationListFields = []string{"version", "name"}
 
 // sbDeployMetadataFields are the properties of FunctionDeployBody.metadata
 // the deploy sends. Checked by the spec test as a nested schema.
@@ -264,6 +279,12 @@ func sbJSONBody(v any) (*sbBody, error) {
 // parameters listed in Params. accept overrides the Accept header. HTTP 429
 // is retried with the server's Retry-After, bounded.
 func (s *Supabase) call(ctx context.Context, key string, pathParams map[string]string, query url.Values, body *sbBody, accept string, client *http.Client) (*http.Response, error) {
+	return s.callHeaders(ctx, key, pathParams, query, nil, body, accept, client)
+}
+
+// callHeaders is call with extra request headers; each must be listed in the
+// endpoint's Headers.
+func (s *Supabase) callHeaders(ctx context.Context, key string, pathParams map[string]string, query url.Values, headers map[string]string, body *sbBody, accept string, client *http.Client) (*http.Response, error) {
 	ep, ok := sbEndpoints[key]
 	if !ok {
 		return nil, fmt.Errorf("supabase: endpoint %q is not registered", key)
@@ -288,6 +309,15 @@ func (s *Supabase) call(ctx context.Context, key string, pathParams map[string]s
 	for k := range query {
 		if !allowed[k] {
 			return nil, fmt.Errorf("supabase: endpoint %q does not take query parameter %q", key, k)
+		}
+	}
+	allowedHeaders := map[string]bool{}
+	for _, h := range ep.Headers {
+		allowedHeaders[strings.ToLower(h)] = true
+	}
+	for k := range headers {
+		if !allowedHeaders[strings.ToLower(k)] {
+			return nil, fmt.Errorf("supabase: endpoint %q does not take header %q", key, k)
 		}
 	}
 	u := s.baseURL + path
@@ -323,6 +353,9 @@ func (s *Supabase) call(ctx context.Context, key string, pathParams map[string]s
 			req.ContentLength = body.length
 			req.GetBody = body.open
 			req.Header.Set("Content-Type", body.contentType)
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
 		}
 		resp, err := client.Do(req)
 		if err != nil {
@@ -361,6 +394,17 @@ func sbRetryDelay(retryAfter string, attempt int) time.Duration {
 // callJSON performs a registered call, requires a 2xx status and decodes the
 // body into out (nil out discards it). It returns the status code.
 func (s *Supabase) callJSON(ctx context.Context, key string, pathParams map[string]string, query url.Values, body any, out any) (int, error) {
+	return s.callJSONHeaders(ctx, key, pathParams, query, nil, body, out)
+}
+
+// callJSONHeaders is callJSON with extra request headers.
+func (s *Supabase) callJSONHeaders(ctx context.Context, key string, pathParams map[string]string, query url.Values, headers map[string]string, body any, out any) (int, error) {
+	return s.callJSONHeadersWith(ctx, nil, key, pathParams, query, headers, body, out)
+}
+
+// callJSONHeadersWith is callJSONHeaders on a given client (nil: the
+// connection's default one).
+func (s *Supabase) callJSONHeadersWith(ctx context.Context, client *http.Client, key string, pathParams map[string]string, query url.Values, headers map[string]string, body any, out any) (int, error) {
 	var b *sbBody
 	if body != nil {
 		var err error
@@ -368,7 +412,7 @@ func (s *Supabase) callJSON(ctx context.Context, key string, pathParams map[stri
 			return 0, err
 		}
 	}
-	resp, err := s.call(ctx, key, pathParams, query, b, "", nil)
+	resp, err := s.callHeaders(ctx, key, pathParams, query, headers, b, "", client)
 	if err != nil {
 		return 0, err
 	}
@@ -390,6 +434,14 @@ func (s *Supabase) callJSON(ctx context.Context, key string, pathParams map[stri
 		return resp.StatusCode, fmt.Errorf("decode Supabase response (HTTP %d): %w", resp.StatusCode, err)
 	}
 	return resp.StatusCode, nil
+}
+
+// sbAnswered reports whether err carries an answer from the API (a status),
+// as opposed to a request that died without one — after which the server
+// may or may not have acted.
+func sbAnswered(err error) bool {
+	var he *sbHTTPError
+	return errors.As(err, &he)
 }
 
 // sbNotFound reports whether err is the API's 404.
@@ -906,8 +958,17 @@ func (s *Supabase) handleLogs(ctx context.Context, req mcp.CallToolRequest) (*mc
 	// Function and edge-request rows carry the function's id; rows of the
 	// unified table name the timestamp in microseconds since the epoch.
 	for _, row := range raw.Result {
-		if ts, ok := row["timestamp"].(float64); ok && ts > 1e15 {
-			row["timestamp"] = time.UnixMicro(int64(ts)).UTC().Format(time.RFC3339Nano)
+		switch ts := row["timestamp"].(type) {
+		case float64:
+			if ts > 1e15 {
+				row["timestamp"] = time.UnixMicro(int64(ts)).UTC().Format(time.RFC3339Nano)
+			}
+		case string:
+			// The stream answers "2026-11-01T13:04:01.230000" — UTC without
+			// saying so (seen live 01.11.2026); say so.
+			if sbNaiveTimestamp.MatchString(ts) {
+				row["timestamp"] = ts + "Z"
+			}
 		}
 	}
 	result := map[string]any{
@@ -941,6 +1002,10 @@ func sbSQLString(v string) string {
 	v = strings.ReplaceAll(v, `\`, `\\`)
 	return strings.ReplaceAll(v, `'`, `\'`)
 }
+
+// sbNaiveTimestamp is an ISO timestamp without zone, as the logs stream
+// renders them.
+var sbNaiveTimestamp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$`)
 
 // sbParseTime accepts RFC 3339 and "YYYY-MM-DD HH:MM" / "YYYY-MM-DD" in UTC.
 func sbParseTime(v string) (time.Time, error) {

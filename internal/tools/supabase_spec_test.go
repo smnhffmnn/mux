@@ -171,6 +171,12 @@ func TestSupabase_SpecEndpoints(t *testing.T) {
 				t.Errorf("%s: query parameter %q is not documented for this operation", where, p)
 			}
 		}
+		headers := spec.params(t, where, "header", pathItem, rawOp)
+		for _, h := range ep.Headers {
+			if !headers[h] {
+				t.Errorf("%s: request header %q is not documented for this operation", where, h)
+			}
+		}
 		// Every {placeholder} of the path must be a documented path parameter.
 		pathParams := spec.params(t, where, "path", pathItem, rawOp)
 		for _, seg := range strings.Split(ep.Path, "/") {
@@ -223,6 +229,18 @@ func TestSupabase_SpecFields(t *testing.T) {
 	}
 	if file := spec.resolve(body["file"]); file == nil || file.Type != "array" {
 		t.Errorf("FunctionDeployBody.file: expected an array of files, got %+v", file)
+	}
+
+	// The migration history is an array schema; its items carry the fields.
+	list := spec.resolve(spec.Components.Schemas["V1ListMigrationsResponse_Output"])
+	if list == nil || list.Items == nil {
+		t.Fatal("V1ListMigrationsResponse_Output is not an array schema")
+	}
+	items := spec.properties(list.Items)
+	for _, field := range sbMigrationListFields {
+		if _, ok := items[field]; !ok {
+			t.Errorf("V1ListMigrationsResponse_Output items: the type reads %q, which the document does not declare", field)
+		}
 	}
 }
 
