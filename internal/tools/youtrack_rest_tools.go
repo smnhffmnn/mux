@@ -84,8 +84,8 @@ func (y *YouTrackREST) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("get_attachment",
-				mcp.WithDescription("Fetch an attachment's content. Images up to 5 MB come back as image content you can look at; small text files are inlined; everything else is saved to a file and the path returned. "+
-					"Pass output_file to choose the destination (absolute path, never overwritten)."),
+				mcp.WithDescription("Fetch an attachment's content. Images up to 5 MB come back as image content you can look at, plus a blob to pass on; small text files are inlined; everything else is stored as a blob you fetch from mux. "+
+					"Pass output_file to write it to a path instead (absolute, never overwritten; where you and mux share a disk)."),
 				mcp.WithString("issue", mcp.Required(), mcp.Description("Readable issue ID")),
 				mcp.WithString("attachment", mcp.Required(), mcp.Description("Attachment id or file name as listed by get_issue")),
 				mcp.WithString("output_file", mcp.Description("Save to this absolute path instead of returning the content (supports ~)")),
@@ -212,10 +212,10 @@ func (y *YouTrackREST) Tools() []ToolDef {
 		},
 		ToolDef{
 			Tool: mcp.NewTool("attach",
-				mcp.WithDescription("Upload one or more local files as attachments of an issue, streamed from disk. Returns the issue's complete attachment list afterwards with the uploaded ones marked. "+
+				mcp.WithDescription("Upload one or more files as attachments of an issue — blobs uploaded to mux, or local files where you and mux share a disk — streamed, never through the conversation. Returns the issue's complete attachment list afterwards with the uploaded ones marked. "+
 					"Reference an attachment in a description or comment as ![](file name). File names must be unique within an issue — list existing attachments with get_issue first."),
 				mcp.WithString("issue", mcp.Required(), mcp.Description("Readable issue ID")),
-				mcp.WithArray("file_paths", mcp.Required(), mcp.Description("Absolute paths of the files to upload (supports ~). mux reads them, so they must be visible to the mux process."), mcp.WithStringItems()),
+				mcp.WithArray("file_paths", mcp.Required(), mcp.Description("The files to upload: blob:<id> entries of blobs uploaded to mux with a name (POST /blob?name=<file name>), or absolute paths where you and mux share a disk (supports ~). Blobs are deleted once the upload succeeded."), mcp.WithStringItems()),
 			),
 			Handler: y.handleAttach,
 		},
@@ -267,7 +267,7 @@ func (y *YouTrackREST) Tools() []ToolDef {
 				mcp.WithDescription("Raw GET against the administration API — /api/admin/… (projects, custom fields, bundles, workflows, link types) or /hub/api/rest/… (Hub: users, groups, roles). "+
 					"Pass fields= yourself; the JSON comes back as is. Paths must be normalized (no . or .. segments); the issue subtree /api/admin/projects/{id}/issues is refused — issues have their own tools. Reach: a project's workflow *usage* (/admin/projects/{id}/workflows) is not the workflow itself; a project's custom field is an instance of a global field prototype with its own bundle per project; a project role is not a global role."),
 				mcp.WithString("path", mcp.Required(), mcp.Description("Path starting with /api/admin/ or /hub/api/rest/, including the query string")),
-				mcp.WithString("output_file", mcp.Description("Save the response to this absolute path (supports ~)")),
+				mcp.WithString("output_file", mcp.Description("Save the response instead of returning it inline: \"blob\" for a blob you fetch from mux, or an absolute path (supports ~) where you and mux share a disk")),
 				mcp.WithReadOnlyHintAnnotation(true),
 			),
 			Handler: y.handleAdminGet,

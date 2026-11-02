@@ -154,8 +154,9 @@ func TestLiveElevenLabs_TextToSpeech(t *testing.T) {
 	t.Logf("playable audio: %.2fs, %d bytes", duration, info.Size())
 }
 
-func TestLiveElevenLabs_OutputDirFallback(t *testing.T) {
+func TestLiveElevenLabs_BlobFallback(t *testing.T) {
 	e := liveElevenLabs(t)
+	store := useTestBlobStore(t)
 
 	var voices struct {
 		Voices []struct {
@@ -187,17 +188,15 @@ func TestLiveElevenLabs_OutputDirFallback(t *testing.T) {
 		t.Fatalf("text-to-speech failed: %s", text)
 	}
 
-	path := savedPath(t, text)
-	t.Cleanup(func() { os.Remove(path) })
-	if filepath.Ext(path) != ".mp3" {
-		t.Errorf("extension = %q, want .mp3", filepath.Ext(path))
-	}
-	info, err := os.Stat(path)
+	info, err := store.Get(blobIDFromText(t, text))
 	if err != nil {
-		t.Fatalf("stat audio file: %v", err)
+		t.Fatalf("audio blob not stored: %v", err)
 	}
-	if info.Size() < 1024 {
-		t.Errorf("audio file is %d bytes — too small to be speech", info.Size())
+	if filepath.Ext(info.Name) != ".mp3" {
+		t.Errorf("blob name = %q, want .mp3", info.Name)
 	}
-	t.Logf("output-dir fallback wrote %d bytes to %s", info.Size(), path)
+	if info.Size < 1024 {
+		t.Errorf("audio blob is %d bytes — too small to be speech", info.Size)
+	}
+	t.Logf("blob fallback stored %d bytes as %s", info.Size, info.ID)
 }

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/smnhffmnn/mux/internal/blob"
 )
 
 // Read handlers. Every handler returns a tool error (not a Go error) for API
@@ -232,19 +234,6 @@ func (y *YouTrackREST) handleGetActivities(ctx context.Context, req mcp.CallTool
 	return ytResultJSON(out)
 }
 
-// ytSafeFileName keeps an attachment name usable as part of a local file
-// name: only letters, digits, dot, dash and underscore survive.
-var ytUnsafeFileRune = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
-
-func ytSafeFileName(name string) string {
-	s := ytUnsafeFileRune.ReplaceAllString(name, "_")
-	s = strings.Trim(s, "._")
-	if s == "" {
-		return "attachment"
-	}
-	return s
-}
-
 func (y *YouTrackREST) handleGetAttachment(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	issue, _ := req.RequireString("issue")
 	want := strings.TrimSpace(req.GetString("attachment", ""))
@@ -292,7 +281,7 @@ func (y *YouTrackREST) handleGetAttachment(ctx context.Context, req mcp.CallTool
 	meta := fmt.Sprintf("%s — %s (%s, %d bytes, attachment %s)", issue, found.Name, contentType, found.Size, found.ID)
 
 	if outputFile != "" {
-		return saveResponseToFile(resp, contentType, outputFile)
+		return saveResponseToFileNamed(resp, contentType, outputFile, "", found.Name)
 	}
 	isImage := strings.HasPrefix(contentType, "image/") && !strings.Contains(contentType, "svg")
 	if isImage && found.Size <= youtrackInlineImageMax {
@@ -303,7 +292,13 @@ func (y *YouTrackREST) handleGetAttachment(ctx context.Context, req mcp.CallTool
 		if int64(len(data)) > youtrackInlineImageMax {
 			return mcp.NewToolResultError(fmt.Sprintf("attachment %s is larger than reported — pass output_file to save it", found.Name)), nil
 		}
-		return mcp.NewToolResultImage(meta, base64.StdEncoding.EncodeToString(data), contentType), nil
+		// The image to look at, and a blob to pass on (attach it elsewhere,
+		// hand it to an image tool) without a second download.
+		info, err := storeBytesAsBlob(data, blob.Meta{Name: found.Name, ContentType: contentType, Source: "youtrack"})
+		if err != nil {
+			return mcp.NewToolResultImage(meta, base64.StdEncoding.EncodeToString(data), contentType), nil
+		}
+		return imageBlobResult(meta, data, contentType, info), nil
 	}
 	if _, binary := binaryResponseExt(contentType); !binary && found.Size <= youtrackInlineTextMax {
 		data, err := io.ReadAll(io.LimitReader(resp.Body, youtrackInlineTextMax+1))
@@ -312,8 +307,7 @@ func (y *YouTrackREST) handleGetAttachment(ctx context.Context, req mcp.CallTool
 		}
 		return mcp.NewToolResultText(meta + "\n\n" + string(data)), nil
 	}
-	pattern := "youtrack-*-" + ytSafeFileName(found.Name)
-	return saveResponseToGeneratedFile(resp, contentType, y.outputDir, pattern)
+	return storeResponseAsBlob(resp, contentType, found.Name, "youtrack", meta, true)
 }
 
 func (y *YouTrackREST) handleListProjects(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

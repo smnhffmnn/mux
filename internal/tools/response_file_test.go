@@ -57,50 +57,6 @@ func TestValidateOutputFile(t *testing.T) {
 	}
 }
 
-func TestSaveResponseToGeneratedFile_EmptyBodyWritesNothing(t *testing.T) {
-	dir := t.TempDir()
-	res, err := saveResponseToGeneratedFile(responseWithBody("audio/mpeg", nil), "audio/mpeg", dir, "elevenlabs-*.mp3")
-	if err != nil {
-		t.Fatalf("saveResponseToGeneratedFile: %v", err)
-	}
-	if !res.IsError {
-		t.Errorf("empty body should be an error result, got %q", resultText(t, res))
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read dir: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("left %d file(s) behind, want none", len(entries))
-	}
-}
-
-func TestSaveResponseToGeneratedFile_CreatesDirectory(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "output")
-	payload := []byte("audio-bytes")
-
-	res, err := saveResponseToGeneratedFile(responseWithBody("audio/mpeg", payload), "audio/mpeg", dir, "elevenlabs-*.mp3")
-	if err != nil {
-		t.Fatalf("saveResponseToGeneratedFile: %v", err)
-	}
-	if res.IsError {
-		t.Fatalf("expected success, got %q", resultText(t, res))
-	}
-
-	path := savedPath(t, resultText(t, res))
-	if filepath.Dir(path) != dir {
-		t.Errorf("wrote to %q, want directory %q", path, dir)
-	}
-	onDisk, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read saved file: %v", err)
-	}
-	if !bytes.Equal(onDisk, payload) {
-		t.Errorf("content = %q, want %q", onDisk, payload)
-	}
-}
-
 func TestSniffContentType(t *testing.T) {
 	mp3 := append([]byte("ID3\x04\x00\x00\x00\x00\x00\x00"), bytes.Repeat([]byte{0x11}, 600)...)
 

@@ -23,6 +23,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/smnhffmnn/mux/internal/blob"
 	"github.com/smnhffmnn/mux/internal/config"
 )
 
@@ -371,6 +372,7 @@ type ytUploadFile struct {
 	name        string
 	contentType string
 	size        int64
+	blob        *blob.Info // set for a blob:<id> entry; deleted once the upload succeeded
 }
 
 // ytOpenUploadFiles validates the paths of an attach call the way parseUpload
@@ -378,14 +380,20 @@ type ytUploadFile struct {
 // the first byte goes out.
 func ytOpenUploadFiles(paths []string) ([]ytUploadFile, error) {
 	if len(paths) == 0 {
-		return nil, errors.New("file_paths is required (one or more absolute paths)")
+		return nil, errors.New("file_paths is required (one or more blob:<id> references or absolute paths)")
 	}
 	files := make([]ytUploadFile, 0, len(paths))
 	seen := map[string]bool{}
 	for _, p := range paths {
-		clean := filepath.Clean(config.ExpandHome(p))
-		if !filepath.IsAbs(clean) {
-			return nil, fmt.Errorf("file_paths: %q must be an absolute path", p)
+		clean, blobInfo, err := blobInputFile(p, "file_paths")
+		if err != nil {
+			return nil, err
+		}
+		if blobInfo == nil {
+			clean = filepath.Clean(config.ExpandHome(p))
+			if !filepath.IsAbs(clean) {
+				return nil, fmt.Errorf("file_paths: %q must be an absolute path", p)
+			}
 		}
 		fi, err := os.Stat(clean)
 		if err != nil {
@@ -401,16 +409,25 @@ func ytOpenUploadFiles(paths []string) ([]ytUploadFile, error) {
 		if err != nil {
 			return nil, fmt.Errorf("file_paths: %s is not readable: %w", clean, err)
 		}
-		ct := detectFileContentType(clean, f)
-		f.Close()
 		name := filepath.Base(clean)
+		if blobInfo != nil {
+			name = blobInfo.Name
+			if name == "" {
+				return nil, fmt.Errorf("file_paths: blob %s has no name — upload it with ?name=<file name> (an attachment needs one)", blobInfo.ID)
+			}
+		}
+		ct := detectFileContentType(name, f)
+		if blobInfo != nil && blobInfo.ContentType != "" && blobInfo.ContentType != "application/octet-stream" {
+			ct = blobInfo.ContentType
+		}
+		f.Close()
 		if seen[strings.ToLower(name)] {
 			// YouTrack references attachments by name in Markdown (![](name));
 			// two equal names in one upload would be indistinguishable.
 			return nil, fmt.Errorf("file_paths: two files are named %q — attachment names must be unique within an issue", name)
 		}
 		seen[strings.ToLower(name)] = true
-		files = append(files, ytUploadFile{path: clean, name: name, contentType: ct, size: fi.Size()})
+		files = append(files, ytUploadFile{path: clean, name: name, contentType: ct, size: fi.Size(), blob: blobInfo})
 	}
 	return files, nil
 }
@@ -506,6 +523,9 @@ func (y *YouTrackREST) handleAttach(ctx context.Context, req mcp.CallToolRequest
 	resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return mcp.NewToolResultError(ytAPIError(resp.StatusCode, data).Error()), nil
+	}
+	for _, f := range files {
+		consumeBlob(f.blob)
 	}
 
 	// YouTrack answers a multi-file upload with a single attachment object;

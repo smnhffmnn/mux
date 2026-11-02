@@ -23,22 +23,24 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/smnhffmnn/mux/internal/blob"
 	"github.com/smnhffmnn/mux/internal/config"
 )
 
 // Tool parameter descriptions shared by every connector that can send a file.
-// Uploads are the counterpart of output_file: the model names a path, mux
-// moves the bytes, and the file never passes through the conversation.
+// Uploads are the counterpart of output_file: the model names a blob or a
+// path, mux moves the bytes, and the file never passes through the
+// conversation.
 const (
 	// jsonBodyDesc is appended to a per-tool sentence that says whether body is
 	// optional or required. Kept separate so the two halves cannot contradict
 	// each other: body is optional for http/openai, but required for the
 	// recraft/ideogram post tools unless a file is uploaded instead.
 	jsonBodyDesc = "Not allowed together with file_path — the text parts of an upload go into form_fields."
-	filePathDesc = "Absolute path of a local file to upload (supports ~ for home directory). " +
-		"Switches the request to multipart/form-data: the file is streamed from disk as one part and " +
-		"form_fields become the other parts. Cannot be combined with body. " +
-		"mux reads the file itself, so the path must be visible to the mux process (in a container: mounted)."
+	filePathDesc = "The file to upload: blob:<id> of a blob uploaded to mux (POST /blob — the way that works from any machine), " +
+		"or the absolute path of a local file where you and mux share a disk (supports ~). " +
+		"Switches the request to multipart/form-data: the file is streamed as one part and " +
+		"form_fields become the other parts. Cannot be combined with body. A blob is deleted once the upload succeeded."
 	formFieldsDesc = "Additional multipart text fields as a JSON object of scalar values, " +
 		`e.g. {"model": "whisper-1", "temperature": 0}. Numbers and booleans are sent as their JSON text; ` +
 		"null and nested values are rejected. Requires file_path."
@@ -69,6 +71,9 @@ type multipartUpload struct {
 	contentType string            // of the file part
 	size        int64             // file size at validation time
 	fields      map[string]string // text parts, sent before the file
+	fileName    string            // what the part is called: the file's base name, or the blob's name
+	blob        *blob.Info        // set when file_path was a blob reference; consumed after a 2xx
+	method      string            // the request method, so finish can tell a replayed GET from the real answer
 
 	head              []byte // text parts + file part header, everything before the file bytes
 	tail              []byte // closing boundary
@@ -178,9 +183,17 @@ func parseUpload(req mcp.CallToolRequest, defaultField string) (*multipartUpload
 		return nil, err
 	}
 
-	clean := filepath.Clean(config.ExpandHome(filePath))
-	if !filepath.IsAbs(clean) {
-		return nil, fmt.Errorf("file_path must be an absolute path: %s", filePath)
+	// blob:<id> names a file the agent uploaded to mux; anything else is a
+	// path on this machine, validated as before.
+	clean, blobInfo, err := blobInputFile(filePath, "file_path")
+	if err != nil {
+		return nil, err
+	}
+	if blobInfo == nil {
+		clean = filepath.Clean(config.ExpandHome(filePath))
+		if !filepath.IsAbs(clean) {
+			return nil, fmt.Errorf("file_path must be an absolute path: %s", filePath)
+		}
 	}
 	// Stat before Open: opening a FIFO that has no writer blocks forever, and
 	// at this point neither the caller's context nor a client timeout is in
@@ -201,12 +214,33 @@ func parseUpload(req mcp.CallToolRequest, defaultField string) (*multipartUpload
 	}
 	defer f.Close()
 
+	fileName := filepath.Base(clean)
+	var contentType string
+	if blobInfo != nil {
+		// A blob lives under its id; the part carries the name it was
+		// uploaded with, and the type the upload declared when it said one.
+		// Without a name, the id plus an extension from the type: APIs that
+		// read the format off the file name (Whisper) need one.
+		contentType = blobInfo.ContentType
+		if contentType == "" || contentType == "application/octet-stream" {
+			contentType = detectFileContentType(blobInfo.Name, f)
+		}
+		fileName = blobInfo.Name
+		if fileName == "" {
+			fileName = blobInfo.ID + extensionForType(contentType)
+		}
+	} else {
+		contentType = detectFileContentType(fileName, f)
+	}
+	contentType = sanitizeHeaderValue(contentType)
 	u := &multipartUpload{
 		filePath:    clean,
 		fileField:   fileField,
-		contentType: detectFileContentType(clean, f),
+		fileName:    fileName,
+		contentType: contentType,
 		size:        fi.Size(),
 		fields:      fields,
+		blob:        blobInfo,
 	}
 	if err := u.render(); err != nil {
 		return nil, err
@@ -285,8 +319,8 @@ func (u *multipartUpload) render() error {
 	}
 
 	h := make(textproto.MIMEHeader)
-	h.Set("Content-Disposition", partContentDisposition(u.fileField, filepath.Base(u.filePath)))
-	h.Set("Content-Type", u.contentType)
+	h.Set("Content-Disposition", partContentDisposition(u.fileField, u.fileName))
+	h.Set("Content-Type", sanitizeHeaderValue(u.contentType))
 	if _, err := w.CreatePart(h); err != nil {
 		return fmt.Errorf("multipart: %w", err)
 	}
@@ -328,6 +362,7 @@ func partContentDisposition(fieldname, filename string) string {
 // replay the body across a 307/308 redirect (without it Go hands the redirect
 // response back unfollowed).
 func (u *multipartUpload) newRequest(ctx context.Context, method, url string) (*http.Request, error) {
+	u.method = method
 	body, err := u.openBody()
 	if err != nil {
 		return nil, err
@@ -363,8 +398,32 @@ func (u *multipartUpload) note() string {
 	if u == nil {
 		return ""
 	}
+	if u.blob != nil {
+		return fmt.Sprintf("Uploaded %s as %q: %d bytes, %s — from %s, which is deleted once the upload succeeded",
+			u.fileName, u.fileField, u.size, u.contentType, blob.Ref(u.blob.ID))
+	}
 	return fmt.Sprintf("Uploaded %s as %q: %d bytes, %s",
-		filepath.Base(u.filePath), u.fileField, u.size, u.contentType)
+		u.fileName, u.fileField, u.size, u.contentType)
+}
+
+// extensionForType names a file extension for a MIME type, ".bin" when the
+// system's table has none.
+func extensionForType(ct string) string {
+	mediaType, _, _ := mime.ParseMediaType(ct)
+	switch mediaType {
+	case "application/json":
+		return ".json"
+	case "text/plain":
+		return ".txt"
+	case "image/jpeg":
+		return ".jpg"
+	case "audio/mpeg":
+		return ".mp3"
+	}
+	if exts, _ := mime.ExtensionsByType(mediaType); len(exts) > 0 {
+		return exts[0]
+	}
+	return ".bin"
 }
 
 // newBodyRequest builds the request for a tool call that carries either a
@@ -446,7 +505,7 @@ func requestError(ctx context.Context, err error, req *http.Request, upload *mul
 		var uerr *url.Error
 		if errors.As(err, &uerr) && uerr.Timeout() {
 			msg := fmt.Sprintf("upload aborted after %s: %s accepted the connection but did not finish taking %d bytes of %s (mux upload timeout, not the server's answer)",
-				uploadTimeout, req.URL.Host, upload.size, filepath.Base(upload.filePath))
+				uploadTimeout, req.URL.Host, upload.size, upload.fileName)
 			log.Printf("[upload] %s %s: %s", req.Method, req.URL.Redacted(), msg)
 			return msg
 		}
@@ -462,4 +521,17 @@ func statusLine(resp *http.Response, upload *multipartUpload) string {
 		s += "\n" + n
 	}
 	return s
+}
+
+// finish is called once the response to an upload is in: a blob that went
+// out successfully has served its purpose and is deleted. Safe on nil. A
+// 2xx that answers a GET is not that: Go replays a 301/302/303 as a GET
+// without the body, so the file never reached the final endpoint.
+func (u *multipartUpload) finish(resp *http.Response) {
+	if u == nil || u.blob == nil || resp == nil {
+		return
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && (resp.Request == nil || u.method == "" || resp.Request.Method == u.method) {
+		consumeBlob(u.blob)
+	}
 }

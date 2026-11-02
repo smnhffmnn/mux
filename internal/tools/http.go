@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -85,7 +84,7 @@ func (h *HTTP) Tools() []ToolDef {
 		getDesc += "\n\n" + h.instructions
 	}
 
-	outputFileDesc := "Save response body to this absolute file path instead of returning it inline (supports ~ for home directory). Useful for large responses (images, binary data). Returns only metadata (status, content-type, path, size). An existing file is never overwritten. Only writes on 2xx responses; errors are returned inline."
+	outputFileDesc := "Save the response body instead of returning it inline: \"blob\" stores it as a blob you fetch from mux (works from any machine), an absolute file path (supports ~) writes it where you and mux share a disk. Useful for large responses (images, binary data). Returns only metadata (status, content-type, blob or path, size). An existing file is never overwritten. Only writes on 2xx responses; errors are returned inline."
 
 	tools := []ToolDef{
 		{
@@ -105,7 +104,7 @@ func (h *HTTP) Tools() []ToolDef {
 
 	if !h.readOnly {
 		writeDesc := fmt.Sprintf("Make an HTTP request with a body to %s. Supports POST, PUT, PATCH, and DELETE. "+
-			"The body is JSON by default; with file_path it becomes a multipart/form-data upload streamed from a local file.", h.baseURL)
+			"The body is JSON by default; with file_path (a blob uploaded to mux, or a local file) it becomes a multipart/form-data upload.", h.baseURL)
 
 		opts := []mcp.ToolOption{
 			mcp.WithDescription(writeDesc),
@@ -212,17 +211,18 @@ func (h *HTTP) doRequest(ctx context.Context, method string, req mcp.CallToolReq
 		return mcp.NewToolResultError(requestError(ctx, err, httpReq, upload)), nil
 	}
 	defer resp.Body.Close()
+	upload.finish(resp)
 
 	// If output_file is set and response is successful, stream to disk
 	if outputFile := req.GetString("output_file", ""); outputFile != "" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return saveResponseToFileWithNote(resp, resp.Header.Get("Content-Type"), outputFile, upload.note())
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	body, marker, err := readBodyLimited(resp, maxResponseBody, "response", "http")
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("read response: %v", err)), nil
 	}
 
-	result := statusLine(resp, upload) + "\n\n" + string(body)
+	result := statusLine(resp, upload) + "\n\n" + string(body) + marker
 	return mcp.NewToolResultText(result), nil
 }

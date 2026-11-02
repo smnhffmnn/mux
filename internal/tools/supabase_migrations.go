@@ -15,6 +15,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/smnhffmnn/mux/internal/blob"
 	"github.com/smnhffmnn/mux/internal/config"
 )
 
@@ -206,12 +207,26 @@ func sbMigrationsRoot(raw string) (string, error) {
 	return clean, nil
 }
 
+// sbMigrationsRootArg resolves the path argument: a tree the agent uploaded
+// to mux (blob:<id>) or a directory on this machine.
+func sbMigrationsRootArg(raw string) (string, *blob.Info, error) {
+	dir, info, err := blobInputTree(raw, "path")
+	if err != nil {
+		return "", nil, err
+	}
+	root, err := sbMigrationsRoot(dir)
+	if err != nil && info != nil {
+		return "", nil, sbTreeError(err, dir, info)
+	}
+	return root, info, err
+}
+
 func (s *Supabase) handleMigrationsPending(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	rawPath, err := stringArg(req, "path")
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	root, err := sbMigrationsRoot(rawPath)
+	root, treeBlob, err := sbMigrationsRootArg(rawPath)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -251,7 +266,7 @@ func (s *Supabase) handleMigrationsPending(ctx context.Context, req mcp.CallTool
 	}
 	result := map[string]any{
 		"project":       s.projectRef,
-		"migrationsDir": filepath.Join(root, filepath.FromSlash(sbMigrationsDir)),
+		"migrationsDir": sbShownDir(filepath.Join(root, filepath.FromSlash(sbMigrationsDir)), root, treeBlob),
 		"localCount":    len(local),
 		"historyCount":  len(history),
 		"pendingCount":  len(pending),
@@ -274,7 +289,7 @@ func (s *Supabase) handleMigrationsApply(ctx context.Context, req mcp.CallToolRe
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	root, err := sbMigrationsRoot(rawPath)
+	root, treeBlob, err := sbMigrationsRootArg(rawPath)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -445,6 +460,14 @@ func (s *Supabase) handleMigrationsApply(ctx context.Context, req mcp.CallToolRe
 		result["appliedCount"] = len(applied)
 		return sbResultJSON(result)
 	}
+	// Every pending migration ran: a tree uploaded for this run is used up.
+	// A failure above leaves it, so the fix can be applied from the same
+	// upload; so does a dry run, and so does a run limited to one file while
+	// others stay pending — the next call needs the same tree.
+	if treeBlob != nil && len(todo) == len(pending) {
+		consumeBlob(treeBlob)
+		result["consumedBlob"] = blob.Ref(treeBlob.ID)
+	}
 	versionsFromHistory()
 	result["applied"] = applied
 	result["appliedCount"] = len(applied)
@@ -472,4 +495,13 @@ func sbStripSQLComments(sql string) string {
 		}
 	}
 	return b.String()
+}
+
+// sbShownDir is a path for a result: inside a tree blob the store's private
+// path says nothing to the caller, the blob reference does.
+func sbShownDir(p, root string, tree *blob.Info) string {
+	if tree == nil {
+		return p
+	}
+	return strings.Replace(p, root, blob.Ref(tree.ID), 1)
 }

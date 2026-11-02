@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -42,8 +41,9 @@ Endpoints:
 - POST /images/replaceBackground — Replace image background (multipart: file, prompt)
 - POST /styles — Create a style reference (multipart: files)
 
-Multipart endpoints take a local file via the post tool: pass file_path
-(absolute path, sent as form field "file") and the text values as form_fields,
+Multipart endpoints take a file via the post tool: pass file_path (blob:<id>
+of a blob uploaded to mux, or an absolute path where you and mux share a disk;
+sent as form field "file") and the text values as form_fields,
 e.g. {"prompt": "...", "strength": 0.5}; leave body empty. One file per
 request — /images/inpaint needs file and mask together and cannot be served yet.
 
@@ -149,12 +149,12 @@ func (r *Recraft) handleGet(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, recraftMaxBody))
+	body, marker, err := readBodyLimited(resp, recraftMaxBody, "recraft-response.json", "recraft")
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("read response: %v", err)), nil
 	}
 
-	result := fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, resp.Status, string(body))
+	result := fmt.Sprintf("HTTP %d %s\n\n%s%s", resp.StatusCode, resp.Status, string(body), marker)
 	return mcp.NewToolResultText(result), nil
 }
 
@@ -184,12 +184,13 @@ func (r *Recraft) handlePost(ctx context.Context, req mcp.CallToolRequest) (*mcp
 		return mcp.NewToolResultError(requestError(ctx, err, httpReq, upload)), nil
 	}
 	defer resp.Body.Close()
+	upload.finish(resp)
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, recraftMaxBody))
+	body, marker, err := readBodyLimited(resp, recraftMaxBody, "recraft-response.json", "recraft")
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("read response: %v", err)), nil
 	}
 
-	result := statusLine(resp, upload) + "\n\n" + string(body)
+	result := statusLine(resp, upload) + "\n\n" + string(body) + marker
 	return mcp.NewToolResultText(result), nil
 }

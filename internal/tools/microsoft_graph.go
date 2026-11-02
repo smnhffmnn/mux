@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/smnhffmnn/mux/internal/blob"
 	"github.com/smnhffmnn/mux/internal/config"
 )
 
@@ -212,7 +214,7 @@ func (mg *MicrosoftGraph) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("get_attachment",
-				mcp.WithDescription("Get the content of a specific attachment. Returns base64-encoded content (contentBytes). Only works for file attachments (#microsoft.graph.fileAttachment), not item or reference attachments. Max ~380KB file size due to response limits."),
+				mcp.WithDescription("Get the content of a specific attachment. File attachments (#microsoft.graph.fileAttachment) come back as JSON with the bytes stored as a blob you fetch from mux (fields blob, blobUrl, blobRef); images up to 5 MB also as image content to look at. Item and reference attachments return their JSON as is. Attachments over ~6 MB exceed the response limit. (A stdio instance without a blob store returns contentBytes as base64.)"),
 				mcp.WithString("message_id", mcp.Required(), mcp.Description("Message ID")),
 				mcp.WithString("attachment_id", mcp.Required(), mcp.Description("Attachment ID from list_attachments")),
 			),
@@ -1252,8 +1254,38 @@ func (mg *MicrosoftGraph) handleGetAttachment(ctx context.Context, req mcp.CallT
 	if err := json.Unmarshal(data, &att); err != nil {
 		return mcp.NewToolResultError("parse attachment: " + err.Error()), nil
 	}
-
-	return jsonResult(att)
+	if att.ContentBytes == "" || blobStore == nil {
+		// An item or reference attachment carries no bytes, and a stdio
+		// instance has no store to hand them to: the JSON goes through as
+		// before, base64 included where there is any.
+		return jsonResult(att)
+	}
+	content, err := base64.StdEncoding.DecodeString(att.ContentBytes)
+	if err != nil {
+		return mcp.NewToolResultError("decode attachment: " + err.Error()), nil
+	}
+	info, err := storeBytesAsBlob(content, blob.Meta{Name: att.Name, ContentType: att.ContentType, Source: "microsoft-graph"})
+	if err != nil {
+		return mcp.NewToolResultError("store attachment: " + err.Error()), nil
+	}
+	// The same JSON shape as before, with the bytes replaced by the blob.
+	out := map[string]any{
+		"@odata.type": att.ODataType,
+		"id":          att.ID,
+		"name":        att.Name,
+		"size":        att.Size,
+		"contentType": att.ContentType,
+		"blob":        info.ID,
+		"blobUrl":     blobStore.URL(info.ID),
+		"blobRef":     blob.Ref(info.ID),
+		"blobExpires": info.Expires.UTC().Format(time.RFC3339),
+		"note":        blobReference(info),
+	}
+	data, _ = json.MarshalIndent(out, "", "  ")
+	if strings.HasPrefix(att.ContentType, "image/") && !strings.Contains(att.ContentType, "svg") {
+		return imageBlobResult(string(data), content, att.ContentType, nil), nil
+	}
+	return mcp.NewToolResultText(string(data)), nil
 }
 
 // --- Recipient helpers ---

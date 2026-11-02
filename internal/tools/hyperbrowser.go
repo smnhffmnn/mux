@@ -287,9 +287,14 @@ func (h *Hyperbrowser) doJSONLimit(ctx context.Context, method, path string, bod
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	data, marker, err := readBodyLimited(resp, maxBytes, "hyperbrowser-response.json", "hyperbrowser")
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("read response: %w", err)
+	}
+	if marker != "" {
+		// The body was longer than this connector inlines: the first bytes
+		// come back as before, the marker names the blob with all of it.
+		data = append(data, marker...)
 	}
 
 	return data, resp.StatusCode, nil

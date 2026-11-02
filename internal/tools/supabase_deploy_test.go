@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/smnhffmnn/mux/internal/blob"
 )
 
 // writeTree creates files under root from a map of slash paths to contents.
@@ -577,5 +580,103 @@ func TestSupabase_SecretNamesAndSlugs(t *testing.T) {
 		if sbValidSlug(slug) != ok {
 			t.Errorf("sbValidSlug(%q) = %v", slug, !ok)
 		}
+	}
+}
+
+// The deploy from a tree the agent uploaded: the same plan as from the
+// directory, the blob named in place of the store's path, and the tree
+// consumed by a successful deploy but not by a dry run.
+func TestSupabase_DeployFromTreeBlob(t *testing.T) {
+	s := useTestBlobStore(t)
+	files := map[string]string{
+		"supabase/config.toml":                 "project_id = \"abcdefghijklmnopqrst\"\n",
+		"supabase/functions/hook/index.ts":     "import { a } from '../_shared/a.ts'\nexport default a\n",
+		"supabase/functions/_shared/a.ts":      "export const a = 1\n",
+		"supabase/functions/_shared/unused.ts": "export const u = 0\n",
+	}
+	dir := t.TempDir()
+	writeTree(t, dir, files)
+	fromDir, err := sbPlanDeploy(dir, "hook", "", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var archive bytes.Buffer
+	writeTestTarGz(t, &archive, files)
+	tree, err := s.PutTree(&archive, blob.Meta{Name: "project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, info, err := sbProjectRootArg("blob:" + tree.ID)
+	if err != nil || info == nil || info.ID != tree.ID {
+		t.Fatalf("sbProjectRootArg: %q %+v %v", root, info, err)
+	}
+	fromBlob, err := sbPlanDeploy(root, "hook", "", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(planNames(fromDir), planNames(fromBlob)) {
+		t.Fatalf("plan from blob %v, from dir %v", planNames(fromBlob), planNames(fromDir))
+	}
+	if fromBlob.SourceRoot != root {
+		t.Errorf("a tree is its own source root: %q vs %q", fromBlob.SourceRoot, root)
+	}
+
+	// A tree without supabase/ at the top says what it holds instead.
+	var wrong bytes.Buffer
+	writeTestTarGz(t, &wrong, map[string]string{"myproject/supabase/functions/hook/index.ts": "x"})
+	nested, _ := s.PutTree(&wrong, blob.Meta{})
+	if _, _, err := sbProjectRootArg("blob:" + nested.ID); err == nil || !strings.Contains(err.Error(), "top level holds [myproject]") {
+		t.Fatalf("nested project root: %v", err)
+	}
+	// A plain path still works, a file blob does not.
+	if got, info, err := sbProjectRootArg(dir); err != nil || info != nil || got == "" {
+		t.Fatalf("plain path: %q %v %v", got, info, err)
+	}
+	file, _ := s.Put(strings.NewReader("x"), blob.Meta{Name: "x"})
+	if _, _, err := sbProjectRootArg("blob:" + file.ID); err == nil || !strings.Contains(err.Error(), "tree=1") {
+		t.Fatalf("file blob as path: %v", err)
+	}
+
+	// migrations: the same tree, read-only use leaves it.
+	writeTestTarGz(t, &archive, map[string]string{"supabase/migrations/20260101000000_init.sql": "select 1;"})
+	mig, _ := s.PutTree(&archive, blob.Meta{})
+	if _, info, err := sbMigrationsRootArg("blob:" + mig.ID); err != nil || info == nil {
+		t.Fatalf("migrations root from tree: %v", err)
+	}
+	if _, err := s.Get(mig.ID); err != nil {
+		t.Fatal("resolving a tree must not consume it")
+	}
+}
+
+// The env file as a blob: parsed like a file on disk, the values never in
+// the result, and the blob consumed once the secrets are set — which the
+// handler does after the API call, so here only the reader is exercised.
+func TestSupabase_EnvFileFromBlob(t *testing.T) {
+	s := useTestBlobStore(t)
+	info, _ := s.Put(strings.NewReader("# comment\nexport OPENAI_API_KEY=\"sk-123\"\nSUPABASE_URL=x\nPLAIN=yes # trailing\n"), blob.Meta{Name: "prod.env"})
+	p, got, err := blobInputFile("blob:"+info.ID, "env_file")
+	if err != nil || got == nil {
+		t.Fatal(err)
+	}
+	values, skipped, err := sbReadEnvBlob(p, got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values["OPENAI_API_KEY"] != "sk-123" || values["PLAIN"] != "yes" || len(values) != 2 {
+		t.Fatalf("values = %v", values)
+	}
+	if len(skipped) != 1 || skipped[0] != "SUPABASE_URL" {
+		t.Fatalf("skipped = %v", skipped)
+	}
+	empty, _ := s.Put(strings.NewReader(""), blob.Meta{})
+	p, got, _ = blobInputFile("blob:"+empty.ID, "env_file")
+	if _, _, err := sbReadEnvBlob(p, got); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("empty blob: %v", err)
+	}
+	bad, _ := s.Put(strings.NewReader("no equals sign\n"), blob.Meta{})
+	p, got, _ = blobInputFile("blob:"+bad.ID, "env_file")
+	if _, _, err := sbReadEnvBlob(p, got); err == nil || !strings.Contains(err.Error(), "line 1") || strings.Contains(err.Error(), "equals") {
+		t.Fatalf("bad line must name the line, never its text: %v", err)
 	}
 }

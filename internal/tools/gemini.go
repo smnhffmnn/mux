@@ -18,6 +18,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/smnhffmnn/mux/internal/blob"
 	"github.com/smnhffmnn/mux/internal/config"
 )
 
@@ -41,16 +42,15 @@ Tools:
 Image generation tips:
 - Set response_modalities to "TEXT,IMAGE" for image output (required for image generation)
 - Use aspect_ratio (e.g. "16:9") and image_size (e.g. "1K", "2K", "4K") to control output
-- Generated images are automatically saved to disk; file paths are returned
+- Generated images come back as blobs (fetch them from mux; the result names each) and inline to look at; pass output_dir to write them to a directory instead
 - Image generation typically takes 10-30 seconds
 - For image editing, pass existing images via the images parameter`
 
 // Gemini wraps the Google Gemini API as MCP tools.
 type Gemini struct {
-	client    *http.Client
-	baseURL   string
-	apiKey    string
-	outputDir string
+	client  *http.Client
+	baseURL string
+	apiKey  string
 }
 
 // NewGemini creates a Gemini connection from config.
@@ -63,8 +63,6 @@ func NewGemini(conn config.Connection, dialer Dialer) (*Gemini, error) {
 	if baseURL == "" {
 		baseURL = "https://generativelanguage.googleapis.com/v1beta"
 	}
-
-	outputDir := filepath.Join(config.Dir(), "output")
 
 	transport := &http.Transport{
 		ResponseHeaderTimeout: 120 * time.Second,
@@ -80,9 +78,8 @@ func NewGemini(conn config.Connection, dialer Dialer) (*Gemini, error) {
 			Transport: transport,
 			Timeout:   120 * time.Second,
 		},
-		baseURL:   baseURL,
-		apiKey:    conn.Token,
-		outputDir: outputDir,
+		baseURL: baseURL,
+		apiKey:  conn.Token,
 	}, nil
 }
 
@@ -103,8 +100,8 @@ func (g *Gemini) Tools() []ToolDef {
 			Tool: mcp.NewTool("generate",
 				mcp.WithDescription(
 					"Generate content using a Gemini model. Supports text, image generation, "+
-						"and image editing. Text parts are returned inline; images are saved to disk "+
-						"and file paths are returned.",
+						"and image editing. Text parts are returned inline; generated images come back "+
+						"as blobs you fetch from mux (and inline to look at), or as files under output_dir.",
 				),
 				mcp.WithString("model",
 					mcp.Required(),
@@ -115,7 +112,7 @@ func (g *Gemini) Tools() []ToolDef {
 					mcp.Description("Text prompt for content generation."),
 				),
 				mcp.WithString("images",
-					mcp.Description("Comma-separated list of image file paths for image editing (supports ~ for home dir). Max 20 MB per image."),
+					mcp.Description("Comma-separated images for image editing: blob:<id> of an image uploaded to mux, or an absolute path where you and mux share a disk (supports ~). Max 20 MB per image."),
 				),
 				mcp.WithString("response_modalities",
 					mcp.Description("Comma-separated output types: TEXT, IMAGE, or TEXT,IMAGE. Required for image generation. If omitted, the API decides based on the model."),
@@ -127,7 +124,7 @@ func (g *Gemini) Tools() []ToolDef {
 					mcp.Description("Image output resolution: 512, 1K, 2K, or 4K (default: 1K)"),
 				),
 				mcp.WithString("output_dir",
-					mcp.Description("Override output directory for saved images (default: $XDG_CONFIG_HOME/mux/output/, supports ~ for home dir)."),
+					mcp.Description("Write generated images to this absolute directory (supports ~) where you and mux share a disk. Default: images are stored as blobs."),
 				),
 			),
 			Handler: g.handleGenerate,
@@ -211,6 +208,20 @@ func (g *Gemini) handleGenerate(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 	model = "models/" + cleanModel
 
+	// Images go to output_dir when one is named, as blobs otherwise ("blob"
+	// says so out loud). Checked before the paid call, so a bad directory
+	// does not cost a generation.
+	outputDir := req.GetString("output_dir", "")
+	if wantsBlobOutput(outputDir) {
+		outputDir = ""
+	}
+	if outputDir != "" {
+		outputDir = filepath.Clean(config.ExpandHome(outputDir))
+		if !filepath.IsAbs(outputDir) {
+			return mcp.NewToolResultError(fmt.Sprintf("output_dir must be an absolute path: %s", outputDir)), nil
+		}
+	}
+
 	// Build request body
 	reqBody, err := g.buildGenerateRequest(req, prompt)
 	if err != nil {
@@ -246,12 +257,6 @@ func (g *Gemini) handleGenerate(ctx context.Context, req mcp.CallToolRequest) (*
 		return mcp.NewToolResultError(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))), nil
 	}
 
-	// Determine output directory
-	outputDir := g.outputDir
-	if override := req.GetString("output_dir", ""); override != "" {
-		outputDir = config.ExpandHome(override)
-	}
-
 	return g.parseGenerateResponse(body, outputDir)
 }
 
@@ -268,10 +273,18 @@ func (g *Gemini) buildGenerateRequest(req mcp.CallToolRequest, prompt string) (m
 			if imgPath == "" {
 				continue
 			}
-			imgPath = config.ExpandHome(imgPath)
+			// blob:<id> names an image the agent uploaded to mux; anything
+			// else is a path on this machine.
+			src, blobInfo, err := blobInputFile(imgPath, "images")
+			if err != nil {
+				return nil, err
+			}
+			if blobInfo == nil {
+				src = config.ExpandHome(imgPath)
+			}
 
 			// Check file size before reading
-			info, err := os.Stat(imgPath)
+			info, err := os.Stat(src)
 			if err != nil {
 				return nil, fmt.Errorf("stat image %s: %w", imgPath, err)
 			}
@@ -279,11 +292,17 @@ func (g *Gemini) buildGenerateRequest(req mcp.CallToolRequest, prompt string) (m
 				return nil, fmt.Errorf("image %s too large (%d bytes, max %d)", imgPath, info.Size(), geminiMaxImageRead)
 			}
 
-			data, err := os.ReadFile(imgPath)
+			data, err := os.ReadFile(src)
 			if err != nil {
 				return nil, fmt.Errorf("read image %s: %w", imgPath, err)
 			}
 			mimeType := mimeFromPath(imgPath)
+			if blobInfo != nil {
+				mimeType = blobInfo.ContentType
+				if mimeType == "" || mimeType == "application/octet-stream" {
+					mimeType = mimeFromPath(blobInfo.Name)
+				}
+			}
 			parts = append(parts, map[string]any{
 				"inlineData": map[string]any{
 					"mimeType": mimeType,
@@ -336,7 +355,9 @@ func (g *Gemini) buildGenerateRequest(req mcp.CallToolRequest, prompt string) (m
 }
 
 // parseGenerateResponse extracts text and images from the Gemini API response.
-// Text parts are returned inline; images are decoded from base64 and saved to disk.
+// Text parts are returned inline; images are decoded from base64 and stored as
+// blobs (and shown inline up to blobInlineImageMax), or written under
+// outputDir when the caller named one.
 func (g *Gemini) parseGenerateResponse(body []byte, outputDir string) (*mcp.CallToolResult, error) {
 	var resp struct {
 		Candidates []struct {
@@ -372,6 +393,7 @@ func (g *Gemini) parseGenerateResponse(body []byte, outputDir string) (*mcp.Call
 
 	var textParts []string
 	var imagePaths []string
+	var imageContent []mcp.Content
 	var warnings []string
 	imageIdx := 0
 
@@ -402,11 +424,32 @@ func (g *Gemini) parseGenerateResponse(body []byte, outputDir string) (*mcp.Call
 				} `json:"inlineData"`
 			}
 			if err := json.Unmarshal(rawPart, &dataPart); err == nil && dataPart.InlineData.Data != "" {
-				path, err := g.saveImage(dataPart.InlineData.Data, dataPart.InlineData.MimeType, outputDir, filePrefix, imageIdx)
-				if err != nil {
-					textParts = append(textParts, fmt.Sprintf("[image %d decode error: %v]", imageIdx, err))
+				if outputDir != "" {
+					path, err := g.saveImage(dataPart.InlineData.Data, dataPart.InlineData.MimeType, outputDir, filePrefix, imageIdx)
+					if err != nil {
+						textParts = append(textParts, fmt.Sprintf("[image %d decode error: %v]", imageIdx, err))
+					} else {
+						imagePaths = append(imagePaths, path)
+					}
+				} else if blobStore == nil {
+					// A stdio instance without a store: the agent shares the
+					// disk, so the output directory serves as before.
+					path, err := g.saveImage(dataPart.InlineData.Data, dataPart.InlineData.MimeType, defaultOutputDir(), filePrefix, imageIdx)
+					if err != nil {
+						textParts = append(textParts, fmt.Sprintf("[image %d decode error: %v]", imageIdx, err))
+					} else {
+						imagePaths = append(imagePaths, path)
+					}
 				} else {
-					imagePaths = append(imagePaths, path)
+					ref, img, err := g.storeImage(dataPart.InlineData.Data, dataPart.InlineData.MimeType, filePrefix, imageIdx)
+					if err != nil {
+						textParts = append(textParts, fmt.Sprintf("[image %d: %v]", imageIdx, err))
+					} else {
+						imagePaths = append(imagePaths, ref)
+						if img != nil {
+							imageContent = append(imageContent, img)
+						}
+					}
 				}
 				imageIdx++
 			}
@@ -432,7 +475,29 @@ func (g *Gemini) parseGenerateResponse(body []byte, outputDir string) (*mcp.Call
 		return mcp.NewToolResultError("response contained no text or images"), nil
 	}
 
-	return mcp.NewToolResultText(strings.TrimSpace(result.String())), nil
+	out := mcp.NewToolResultText(strings.TrimSpace(result.String()))
+	out.Content = append(out.Content, imageContent...)
+	return out, nil
+}
+
+// storeImage decodes a generated image into a blob and, when it is small
+// enough to look at, into image content as well. The text reference comes
+// back either way.
+func (g *Gemini) storeImage(b64Data, mimeType, filePrefix string, idx int) (string, mcp.Content, error) {
+	data, err := base64.StdEncoding.DecodeString(b64Data)
+	if err != nil {
+		return "", nil, fmt.Errorf("base64 decode: %w", err)
+	}
+	name := fmt.Sprintf("%s-%d%s", filePrefix, idx, extFromMime(mimeType))
+	info, err := storeBytesAsBlob(data, blob.Meta{Name: name, ContentType: mimeType, Source: "gemini"})
+	if err != nil {
+		return "", nil, fmt.Errorf("%v — pass output_dir to write images to a directory instead", err)
+	}
+	var img mcp.Content
+	if int64(len(data)) <= blobInlineImageMax {
+		img = mcp.NewImageContent(base64.StdEncoding.EncodeToString(data), mimeType)
+	}
+	return blobReference(info), img, nil
 }
 
 // saveImage decodes base64 image data and writes it to a file.

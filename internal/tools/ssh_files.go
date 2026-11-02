@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"os"
 	"path"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/smnhffmnn/mux/internal/blob"
 	"github.com/smnhffmnn/mux/internal/config"
 	"github.com/smnhffmnn/mux/internal/sshclient"
 )
@@ -144,19 +146,37 @@ func (s *SSH) handleDownload(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	if outputFile == "" {
-		return mcp.NewToolResultError("output_file is required — the file is written to disk, not returned inline (use exec with cat for small text files)"), nil
-	}
-	outPath, err := validateOutputFile(outputFile)
-	if err != nil {
+	// Without a path the file becomes a blob: the content never passes
+	// through the conversation either way.
+	toBlob := outputFile == "" || wantsBlobOutput(outputFile)
+	var outPath string
+	if toBlob {
+		if outPath, err = blobTempPath("output_file"); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+	} else if outPath, err = validateOutputFile(outputFile); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	start := time.Now()
-	n, copyErr := s.download(ctx, remotePath, outPath)
+	var maxBytes int64
+	if toBlob {
+		maxBytes = blobMaxBytes()
+	}
+	n, copyErr := s.download(ctx, remotePath, outPath, maxBytes)
+	shown := outPath
+	if copyErr == nil && toBlob {
+		info, aerr := blobAdopt(outPath, blob.Meta{Name: path.Base(remotePath), ContentType: mime.TypeByExtension(path.Ext(remotePath)), Source: "ssh download"})
+		if aerr != nil {
+			os.Remove(outPath)
+			copyErr = fmt.Errorf("downloaded, but storing as a blob failed: %w", aerr)
+		} else {
+			shown = blobReference(info)
+		}
+	}
 	entry := SSHAuditEntry{
 		Connection: s.name, Target: s.client.Target(), Tool: "download",
-		Command:    fmt.Sprintf("%s → %s", remotePath, outPath),
+		Command:    fmt.Sprintf("%s → %s", remotePath, shown),
 		DurationMS: time.Since(start).Milliseconds(), Bytes: n,
 	}
 	if copyErr != nil {
@@ -168,10 +188,10 @@ func (s *SSH) handleDownload(ctx context.Context, req mcp.CallToolRequest) (*mcp
 		return mcp.NewToolResultError(copyErr.Error()), nil
 	}
 	return mcp.NewToolResultText(fmt.Sprintf("Downloaded %s:%s → %s (%d bytes, %s)",
-		s.client.Target(), remotePath, outPath, n, time.Since(start).Round(time.Millisecond))), nil
+		s.client.Target(), remotePath, shown, n, time.Since(start).Round(time.Millisecond))), nil
 }
 
-func (s *SSH) download(ctx context.Context, remotePath, outPath string) (int64, error) {
+func (s *SSH) download(ctx context.Context, remotePath, outPath string, maxBytes int64) (int64, error) {
 	sc, err := s.sftpSession(ctx)
 	if err != nil {
 		return 0, err
@@ -184,6 +204,11 @@ func (s *SSH) download(ctx context.Context, remotePath, outPath string) (int64, 
 	}
 	if info.IsDir() {
 		return 0, fmt.Errorf("remote_path %s is a directory — download copies one file", remotePath)
+	}
+	// A blob has a cap; a file that is known to be over it is refused before
+	// a byte moves, and one that lies about its size stops at the cap.
+	if maxBytes > 0 && info.Size() > maxBytes {
+		return 0, fmt.Errorf("remote_path %s is %d bytes, more than the %d a blob may hold — pass output_file with a path instead", remotePath, info.Size(), maxBytes)
 	}
 	src, err := sc.Open(remotePath)
 	if err != nil {
@@ -202,8 +227,12 @@ func (s *SSH) download(ctx context.Context, remotePath, outPath string) (int64, 
 		return 0, fmt.Errorf("create output_file: %w", err)
 	}
 
+	var w io.Writer = dst
+	if maxBytes > 0 {
+		w = &cappedWriter{w: dst, remaining: maxBytes}
+	}
 	n, err := s.copyWithDeadline(ctx, sc, func() (int64, error) {
-		return io.Copy(dst, &touchReader{r: src, touch: s.client.Touch})
+		return io.Copy(w, &touchReader{r: src, touch: s.client.Touch})
 	})
 	if cerr := dst.Close(); err == nil && cerr != nil {
 		err = cerr
@@ -248,9 +277,19 @@ func (s *SSH) handleUpload(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	}
 	overwrite := req.GetBool("overwrite", false)
 
-	local := filepath.Clean(config.ExpandHome(filePath))
-	if !filepath.IsAbs(local) {
-		return mcp.NewToolResultError(fmt.Sprintf("file_path must be an absolute path: %s", filePath)), nil
+	local, blobInfo, err := blobInputFile(filePath, "file_path")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	shown := local
+	if blobInfo == nil {
+		local = filepath.Clean(config.ExpandHome(filePath))
+		shown = local
+		if !filepath.IsAbs(local) {
+			return mcp.NewToolResultError(fmt.Sprintf("file_path must be an absolute path: %s", filePath)), nil
+		}
+	} else {
+		shown = blobDisplay(blobInfo)
 	}
 	fi, err := os.Stat(local)
 	if err != nil {
@@ -267,7 +306,7 @@ func (s *SSH) handleUpload(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	n, copyErr := s.upload(ctx, local, remotePath, mode, overwrite)
 	entry := SSHAuditEntry{
 		Connection: s.name, Target: s.client.Target(), Tool: "upload",
-		Command:    fmt.Sprintf("%s → %s", local, remotePath),
+		Command:    fmt.Sprintf("%s → %s", shown, remotePath),
 		DurationMS: time.Since(start).Milliseconds(), Bytes: n,
 	}
 	if copyErr != nil {
@@ -278,8 +317,9 @@ func (s *SSH) handleUpload(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	if copyErr != nil {
 		return mcp.NewToolResultError(copyErr.Error()), nil
 	}
+	consumeBlob(blobInfo)
 	return mcp.NewToolResultText(fmt.Sprintf("Uploaded %s → %s:%s (%d bytes, mode %04o, %s)",
-		local, s.client.Target(), remotePath, n, mode, time.Since(start).Round(time.Millisecond))), nil
+		shown, s.client.Target(), remotePath, n, mode, time.Since(start).Round(time.Millisecond))), nil
 }
 
 func (s *SSH) upload(ctx context.Context, local, remotePath string, mode os.FileMode, overwrite bool) (int64, error) {
@@ -389,4 +429,19 @@ func (s *SSH) removeRemote(sc *sftpConn, remotePath string) error {
 	}
 	defer fresh.Close()
 	return fresh.Remove(remotePath)
+}
+
+// cappedWriter stops a copy at a byte budget with an error that names it.
+type cappedWriter struct {
+	w         io.Writer
+	remaining int64
+}
+
+func (c *cappedWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > c.remaining {
+		return 0, fmt.Errorf("the file is larger than the blob cap — pass output_file with a path instead")
+	}
+	n, err := c.w.Write(p)
+	c.remaining -= int64(n)
+	return n, err
 }

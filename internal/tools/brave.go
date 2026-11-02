@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -171,9 +170,14 @@ func (b *Brave) doGet(ctx context.Context, path string) ([]byte, int, error) {
 
 	b.trackRequest(resp)
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, braveMaxBody))
+	data, marker, err := readBodyLimited(resp, braveMaxBody, "brave-response.json", "brave")
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("read response: %w", err)
+	}
+	if marker != "" {
+		// The body was longer than this connector inlines: the first bytes
+		// come back as before, the marker names the blob with all of it.
+		data = append(data, marker...)
 	}
 
 	return data, resp.StatusCode, nil

@@ -10,8 +10,9 @@ mux is a [Model Context Protocol](https://modelcontextprotocol.io) gateway that 
 
 - **Databases** -- MariaDB, PostgreSQL, ClickHouse with schema introspection and query tools; Meilisearch full-text search
 - **MCP Proxy** -- forward tool calls to upstream MCP servers with Bearer, HTTP Basic, custom-header, or OAuth auth, optionally routed through a tunnel (YouTrack, Sentry, Notion, Asana MCP, Netdata, or any MCP endpoint)
-- **API Integrations** -- Microsoft Graph (mail, calendar, SharePoint), Google Workspace (Drive, Docs, Sheets, Gmail, Calendar, Tasks), Google Tag Manager, Google Gemini, OpenAI, ElevenLabs, Brave Search, Firecrawl, Hyperbrowser (stealth browser), fal.ai (async inference queue), Higgsfield (image/video generation via its hosted MCP), Recraft + Ideogram (image generation), Asana, YouTrack (REST: issues, comments, change history, attachments, agile boards, administration), IMAP mail (with optional SMTP sending), Supabase (Management API: Edge Functions deployed from a local checkout with the CLI's file set, database migrations from the checkout, secrets, SQL, logs)
+- **API Integrations** -- Microsoft Graph (mail, calendar, SharePoint), Google Workspace (Drive, Docs, Sheets, Gmail, Calendar, Tasks), Google Tag Manager, Google Gemini, OpenAI, ElevenLabs, Brave Search, Firecrawl, Hyperbrowser (stealth browser), fal.ai (async inference queue), Higgsfield (image/video generation via its hosted MCP), Recraft + Ideogram (image generation), Asana, YouTrack (REST: issues, comments, change history, attachments, agile boards, administration), IMAP mail (with optional SMTP sending), Supabase (Management API: Edge Functions deployed from a checkout — a tree blob or a local path — with the CLI's file set, database migrations from the checkout, secrets, SQL, logs)
 - **Generic HTTP** -- connect any REST API with token auth (Bearer or Basic), custom headers, file output and multipart file upload
+- **Blobs** -- files between the agent and mux without a shared disk: upload to `POST /blob` and pass `blob:<id>` where a tool takes a file or a directory tree; results that carry a file name a blob to fetch instead of a path, and oversized responses are kept whole instead of cut off
 - **SSH Hosts** -- run commands and copy files on remote hosts with the key held by mux (or the user's ssh-agent): arguments as a list, allow/deny lists per host, read-only mode, pinned host keys, every operation logged and served on `/audit/ssh`
 - **Git Credentials** -- serve PATs from the secret store to git via `mux git-credential`
 - **WireGuard and SSH Tunnels** -- reach databases on private networks through userspace WireGuard (no root, no VPN client) or port forwarding over SSH (passphrase-protected keys and ssh-agent supported)
@@ -291,6 +292,7 @@ A PreToolUse hook script for Claude Code is included at `scripts/approval-hook.s
 |----------|-------------|
 | [Configuration](docs/configuration.md) | Complete TOML reference, environment variables, keychain conventions |
 | [Connections](docs/connections.md) | Every connection type with fields, examples, and exposed MCP tools |
+| [Blobs](docs/blobs.md) | The temporary file store: routes, `blob:<id>` and `output_file = "blob"`, lifetime, trees |
 | [Tunnels](docs/tunnels.md) | WireGuard and SSH tunnel architecture, configuration, fail-closed logic |
 | [Provisioning](docs/provisioning.md) | Remote provisioning API contract, JSON schema, server examples |
 | [Deployment](docs/deployment.md) | Building, cross-compilation, systemd, Docker, CI/CD |

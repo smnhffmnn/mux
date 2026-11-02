@@ -26,4 +26,4 @@ Click **Test** to verify the connection. mux fetches the list of models.
 
 - Also works with OpenAI-compatible APIs (e.g. Ollama, LiteLLM) — adjust the API URL accordingly.
 - The API key requires credit on the OpenAI account.
-- Multipart endpoints (Whisper `/v1/audio/transcriptions`, `/v1/files`, `/v1/images/edits`) take a local file via `file_path` on the `request` tool.
+- Multipart endpoints (Whisper `/v1/audio/transcriptions`, `/v1/files`, `/v1/images/edits`) take a file via `file_path` on the `request` tool: `blob:<id>` of a blob uploaded to mux, or a local path where you and mux share a disk.

@@ -97,7 +97,7 @@ mux automatically selects the right mode — no flags needed:
 
 **Headless build**:
 - Works without Xcode
-- No tray icon and no web UI — MCP endpoint (`http://localhost:7700/mcp`), `/health`, and the OAuth login route (`/oauth/start?connection=<name>`, see [Headless Mode](../README.md#headless-mode))
+- No tray icon and no web UI — MCP endpoint (`http://localhost:7700/mcp`), `/health`, the blob store (`/blob`, see [blobs.md](blobs.md)), and the OAuth login route (`/oauth/start?connection=<name>`, see [Headless Mode](../README.md#headless-mode))
 - Secrets stored in macOS Keychain Access (service: "mux"), or in the encrypted vault
 
 ### Linux

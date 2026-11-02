@@ -27,6 +27,7 @@ go test -tags notray ./...
 
 ```
 internal/
+├── blob/       # Temporary file store on the loopback listener (/blob routes, trees, caps)
 ├── bridge/     # stdio↔HTTP relay to an already-running instance
 ├── config/     # Configuration loading, secret management, keychain
 ├── health/     # /health report: provisioning, tunnels, registered connections
