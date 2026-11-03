@@ -1,0 +1,1 @@
+{"request_id":"req-webhooks","data":[{"id":"hook-1","description":"message events","trigger_types":["message.created","message.updated"],"webhook_url":"https://hooks.example.com/nylas","status":"active","notification_email_addresses":["ops@example.com"],"status_updated_at":1793184000,"created_at":1793184000,"updated_at":1793184000,"webhook_secret":"must-not-leak"}]}

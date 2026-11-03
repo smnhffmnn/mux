@@ -135,9 +135,9 @@ var AllTypes = []TypeDef{
 	}},
 	{Type: TypeNylas, Label: "Nylas", Fields: []TypeField{
 		{Key: "region", Label: "Region", Placeholder: "us (default) | eu", Small: true},
-		{Key: "grant_id", Label: "Grant ID", Placeholder: "UUID of the connected mailbox (Nylas Dashboard → Grants)"},
+		{Key: "grant_id", Label: "Grant ID (optional)", Placeholder: "UUID of the connected mailbox (Nylas Dashboard → Grants); empty with Mailbox Address: every grant of the application"},
 		{Key: "user", Label: "Mailbox Address (optional)", Placeholder: "jane@example.com — looks the grant up when Grant ID is empty"},
-		{Key: "token", Label: "API Key", Placeholder: "nyk_v0_… (an IAM key bound to the grant, with an expiry)", Secret: true},
+		{Key: "token", Label: "API Key", Placeholder: "nyk_v0_… (an IAM key bound to the grant, or the application's key for all grants)", Secret: true},
 		{Key: "from_name", Label: "Sender Name", Placeholder: "Jane Doe (optional)"},
 		{Key: "allow_send", Label: "Allow sending", Checkbox: true},
 	}},

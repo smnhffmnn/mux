@@ -1,0 +1,1 @@
+{"request_id":"req-grant-2","data":{"id":"grant-2","grant_status":"valid","provider":"google","email":"jane@example.org","name":"Jane Doe","created_at":1793190000,"updated_at":1793190000,"scope":["https://www.googleapis.com/auth/gmail.modify"],"email_aliases":["j.doe@example.org"],"settings":{}}}

@@ -16,7 +16,9 @@ func TestNylas_Validate(t *testing.T) {
 		{"address alone", Connection{Type: TypeNylas, User: "jane@example.com"}, ""},
 		{"eu region", Connection{Type: TypeNylas, GrantID: "g", Region: "eu"}, ""},
 		{"unknown region", Connection{Type: TypeNylas, GrantID: "g", Region: "mars"}, "not a Nylas region"},
-		{"neither grant nor address", Connection{Type: TypeNylas}, "grant_id"},
+		{"neither grant nor address is application mode", Connection{Type: TypeNylas}, ""},
+		{"read_only with allow_send", Connection{Type: TypeNylas, GrantID: "g", ReadOnly: true, AllowSend: true}, "contradict"},
+		{"read_only alone", Connection{Type: TypeNylas, GrantID: "g", ReadOnly: true}, ""},
 		{"user that is no address", Connection{Type: TypeNylas, User: "jane"}, "mailbox address"},
 		{"user with display name", Connection{Type: TypeNylas, User: "Jane <jane@example.com>"}, "mailbox address"},
 	}
@@ -46,8 +48,13 @@ func TestNylas_EnabledDefaultsSending(t *testing.T) {
 		t.Error("token + address must enable the connection")
 	}
 	c = Connection{Type: TypeNylas, Token: "k"}
-	if c.Enabled() {
-		t.Error("without grant or address the connection must not be enabled")
+	if !c.Enabled() || !NylasApplicationMode(c) {
+		t.Error("token alone must enable the connection, in application mode")
+	}
+	for _, c := range []Connection{{Type: TypeNylas, Token: "k", GrantID: "g"}, {Type: TypeNylas, Token: "k", User: "jane@example.com"}, {Type: TypeIMAP, Token: "k"}} {
+		if NylasApplicationMode(c) {
+			t.Errorf("%+v read as application mode", c)
+		}
 	}
 	c = Connection{Type: TypeNylas, GrantID: "g"}
 	if c.Enabled() {
@@ -77,6 +84,10 @@ func TestNylas_EnabledDefaultsSending(t *testing.T) {
 	c = Connection{Type: TypeNylas}
 	if c.SendEnabled() {
 		t.Error("nylas without allow_send must not send")
+	}
+	c = Connection{Type: TypeNylas, AllowSend: true, ReadOnly: true}
+	if c.SendEnabled() {
+		t.Error("a read-only nylas connection must not send")
 	}
 	c = Connection{Type: TypeIMAP, AllowSend: true}
 	if c.SendEnabled() {

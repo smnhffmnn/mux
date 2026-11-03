@@ -128,7 +128,7 @@ func TestNylasLive_Draft(t *testing.T) {
 	ny := newLiveNylas(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if err := ny.ensureGrant(ctx); err != nil {
+	if _, err := ny.boundMailbox(ctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -171,8 +171,11 @@ func TestNylasLive_Draft(t *testing.T) {
 	}
 	t.Logf("draft created in the conversation's thread (thread id reported: %v, %d warnings)", draft.ThreadID != "", len(draft.Warnings))
 
-	grantID, _, _ := ny.grant()
-	if _, err := ny.callJSON(ctx, "draft.delete", map[string]string{"grant_id": grantID, "draft_id": draft.DraftID}, url.Values{}, nil, nil); err != nil {
+	mb, err := ny.boundMailbox(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ny.callJSON(ctx, "draft.delete", map[string]string{"grant_id": mb.grantID, "draft_id": draft.DraftID}, url.Values{}, nil, nil); err != nil {
 		t.Fatalf("delete draft %s: %v", draft.DraftID, err)
 	}
 	t.Logf("draft %s deleted", draft.DraftID)
@@ -187,10 +190,11 @@ func TestNylasLive_SendToSelf(t *testing.T) {
 	ny := newLiveNylas(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if err := ny.ensureGrant(ctx); err != nil {
+	mb, err := ny.boundMailbox(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-	_, me, _ := ny.grant()
+	me := mb.email
 
 	res, err := ny.handleListConversations(ctx, toolRequest(map[string]any{"limit": float64(1)}))
 	if err != nil || res.IsError {
@@ -223,4 +227,109 @@ func TestNylasLive_SendToSelf(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("forward to self: sent=%v, %d warnings", sent.Sent, len(sent.Warnings))
+}
+
+// TestNylasLive_Application exercises the application mode with an
+// application key (NYLAS_LIVE_APP_KEY): list the grants, read the inbox of
+// the first valid one through the mailbox argument, read its grant and the
+// connectors. Nothing is written. Run by hand — an application key reaches
+// every mailbox and does not belong in CI.
+func TestNylasLive_Application(t *testing.T) {
+	key := os.Getenv("NYLAS_LIVE_APP_KEY")
+	if key == "" {
+		t.Skip("NYLAS_LIVE_APP_KEY not set")
+	}
+	ny, err := NewNylas(config.Connection{
+		Name:   "nylas-live-app",
+		Type:   config.TypeNylas,
+		Token:  key,
+		Region: os.Getenv("NYLAS_LIVE_REGION"),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ny.ApplicationMode() {
+		t.Fatal("a connection without grant_id and user must be in application mode")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	info, err := ny.Verify(ctx)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	valid := 0
+	for _, g := range info.Grants {
+		if g.GrantStatus == "valid" {
+			valid++
+		}
+	}
+	t.Logf("application: %d grants, %d valid", len(info.Grants), valid)
+
+	res, err := ny.handleListMailboxes(ctx, toolRequest(nil))
+	if err != nil || res.IsError {
+		t.Fatalf("list_mailboxes: %v / %s", err, resultText(t, res))
+	}
+	var listed struct {
+		Mailboxes []nylasMailboxInfo `json:"mailboxes"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, res)), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Mailboxes) != len(info.Grants) {
+		t.Errorf("list_mailboxes lists %d mailboxes, verify saw %d grants", len(listed.Mailboxes), len(info.Grants))
+	}
+	var first *nylasMailboxInfo
+	for i := range listed.Mailboxes {
+		if listed.Mailboxes[i].GrantStatus == "valid" {
+			first = &listed.Mailboxes[i]
+			break
+		}
+	}
+	if first == nil {
+		t.Skip("no valid grant in the application")
+	}
+
+	res, err = ny.handleGetGrant(ctx, toolRequest(map[string]any{"mailbox": first.ID}))
+	if err != nil || res.IsError {
+		t.Fatalf("get_grant: %v / %s", err, resultText(t, res))
+	}
+	res, err = ny.handleListConversations(ctx, toolRequest(map[string]any{"mailbox": first.ID, "limit": float64(3)}))
+	if err != nil || res.IsError {
+		t.Fatalf("list_conversations by grant id: %v / %s", err, resultText(t, res))
+	}
+	var page struct {
+		Mailbox       string              `json:"mailbox"`
+		Conversations []nylasConversation `json:"conversations"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, res)), &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.Mailbox != strings.ToLower(first.Email) {
+		t.Errorf("page mailbox %q, grant %q", page.Mailbox, first.Email)
+	}
+	t.Logf("mailbox %s (%s): %d conversations", first.Provider, first.ID, len(page.Conversations))
+	for i, c := range page.Conversations {
+		if c.Ball != "me" && c.Ball != "them" {
+			t.Errorf("conversation %d: ball = %q", i, c.Ball)
+		}
+	}
+	// By address as well.
+	res, err = ny.handleListMailboxes(ctx, toolRequest(map[string]any{"mailbox": first.Email}))
+	if err != nil || res.IsError {
+		t.Fatalf("list_mailboxes by address: %v / %s", err, resultText(t, res))
+	}
+	res, err = ny.handleListConnectors(ctx, toolRequest(nil))
+	if err != nil || res.IsError {
+		t.Fatalf("list_connectors: %v / %s", err, resultText(t, res))
+	}
+	var connectors []map[string]any
+	if err := json.Unmarshal([]byte(resultText(t, res)), &connectors); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%d connectors", len(connectors))
+	res, err = ny.handleAPIGet(ctx, toolRequest(map[string]any{"path": "/v3/applications"}))
+	if err != nil || res.IsError {
+		t.Fatalf("api_get /v3/applications: %v / %s", err, resultText(t, res))
+	}
 }

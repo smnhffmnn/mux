@@ -188,13 +188,16 @@ type Connection struct {
 	// https://api.supabase.com. The access token is Token / {name}-token.
 	ProjectRef string `toml:"project_ref,omitempty" json:"projectRef,omitempty"`
 
-	// Nylas connection type (TypeNylas): a mailbox behind the Nylas API.
+	// Nylas connection type (TypeNylas): mailboxes behind the Nylas API.
 	// Region selects the API host ("us", the default, or "eu" — the region
-	// of the Nylas application that owns the grant). GrantID names the
-	// connected mailbox; when it is empty, User must carry the mailbox
-	// address and mux looks the grant up by it. User is also the account's
-	// own address for the reply logic; left empty, it is read from the grant.
-	// AllowSend and FromName are shared with the imap type.
+	// of the Nylas application that owns the grants). GrantID names the
+	// connected mailbox; when it is empty and User carries the mailbox
+	// address, mux looks the grant up by it. User is also the account's own
+	// address for the reply logic; left empty, it is read from the grant.
+	// With both empty the connection is in application mode: the key serves
+	// every grant of the application and the mail tools take the mailbox as
+	// an argument. AllowSend and FromName are shared with the imap type;
+	// ReadOnly keeps the reading tools only.
 	Region  string `toml:"region,omitempty" json:"region,omitempty"`
 	GrantID string `toml:"grant_id,omitempty" json:"grantId,omitempty"`
 
@@ -239,9 +242,10 @@ func (c *Connection) Enabled() bool {
 	case c.Type == TypeIMAP:
 		return c.Host != "" && c.User != "" && c.Password != ""
 	case c.Type == TypeNylas:
-		// The grant is addressed by id or, failing that, by the mailbox
-		// address mux resolves on first use.
-		return c.Token != "" && (c.GrantID != "" || c.User != "")
+		// The key alone is enough: a mailbox is addressed by grant_id, by
+		// the address in user, or — both empty — per call, because the key
+		// serves every grant of the application.
+		return c.Token != ""
 	case c.Type == TypeGit:
 		// Token is fetched from vault at request time, not at startup.
 		// Only require host and user for the connection to be considered enabled.

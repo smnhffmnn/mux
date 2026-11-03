@@ -272,15 +272,20 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 			}
 		}
 	case conn.Type == config.TypeNylas:
-		mailbox := conn.GrantID
-		if conn.User != "" {
-			mailbox = conn.User
-		}
-		if mailbox != "" {
-			summary = fmt.Sprintf("Nylas %s · %s", conn.Region, mailbox)
-			if conn.SendEnabled() {
-				summary += " · sends"
+		if config.NylasApplicationMode(conn) {
+			summary = fmt.Sprintf("Nylas %s · all grants of the application", conn.Region)
+		} else {
+			mailbox := conn.GrantID
+			if conn.User != "" {
+				mailbox = conn.User
 			}
+			summary = fmt.Sprintf("Nylas %s · %s", conn.Region, mailbox)
+		}
+		if conn.SendEnabled() {
+			summary += " · sends"
+		}
+		if conn.ReadOnly {
+			summary += " · read-only"
 		}
 	default:
 		if conn.Host != "" {
@@ -2160,7 +2165,8 @@ func (a *App) testIMAP(conn config.Connection) testResponse {
 
 // testNylas resolves the grant and lists the folders the way the live tools
 // do — same key, same region, same tunnel routing — so a key for the wrong
-// region, an expired key or a revoked grant is reported here.
+// region, an expired key or a revoked grant is reported here. In application
+// mode it lists the grants and reports how many there are and their status.
 func (a *App) testNylas(conn config.Connection) testResponse {
 	if conn.Token == "" {
 		return testResponse{Connection: conn.Name, Connected: false, Message: "API key not configured"}
@@ -2180,20 +2186,58 @@ func (a *App) testNylas(conn config.Connection) testResponse {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if conn.GrantID != "" {
+	switch {
+	case ny.ApplicationMode():
+		testLog(conn.Name, "listing the application's grants at %s", config.NylasBaseURL(conn.Region))
+	case conn.GrantID != "":
 		testLog(conn.Name, "reading grant %s at %s", conn.GrantID, config.NylasBaseURL(conn.Region))
-	} else {
+	default:
 		testLog(conn.Name, "looking up the grant of %s at %s", conn.User, config.NylasBaseURL(conn.Region))
 	}
 	info, err := ny.Verify(ctx)
 	if err != nil {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Nylas check failed: %v", err)}
 	}
-	msg := fmt.Sprintf("Connected: grant valid (%s, %s), %d folders", info.Email, info.Provider, info.Folders)
+	var msg string
+	if info.Application {
+		msg = nylasApplicationTestMessage(info)
+	} else {
+		msg = fmt.Sprintf("Connected: grant valid (%s, %s), %d folders", info.Email, info.Provider, info.Folders)
+	}
 	if ny.SendEnabled() {
 		msg += " — sending enabled"
 	}
+	if conn.ReadOnly {
+		msg += " — read-only"
+	}
 	return testResponse{Connection: conn.Name, Connected: true, Message: msg}
+}
+
+// nylasApplicationTestMessage summarizes an application key's grants for the
+// Test button: how many, how many valid, and the first few mailboxes.
+func nylasApplicationTestMessage(info tools.NylasVerifyInfo) string {
+	valid := 0
+	var names []string
+	for _, g := range info.Grants {
+		if g.GrantStatus == "valid" {
+			valid++
+		}
+		if len(names) < 5 {
+			status := ""
+			if g.GrantStatus != "valid" {
+				status = ", " + g.GrantStatus
+			}
+			names = append(names, fmt.Sprintf("%s (%s%s)", g.Email, g.Provider, status))
+		}
+	}
+	msg := fmt.Sprintf("Connected: application key, %d grants (%d valid)", len(info.Grants), valid)
+	if len(names) > 0 {
+		msg += ": " + strings.Join(names, ", ")
+		if len(info.Grants) > len(names) {
+			msg += fmt.Sprintf(", … %d more", len(info.Grants)-len(names))
+		}
+	}
+	return msg
 }
 
 func (a *App) testGit(conn config.Connection) testResponse {

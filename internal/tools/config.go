@@ -96,7 +96,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("Port (defaults applied per type if omitted; ssh: 22)."),
 			),
 			mcp.WithString("user",
-				mcp.Description("User (for mariadb, postgresql, clickhouse, imap, git, ssh; nylas: the mailbox address, optional when grant_id is set)."),
+				mcp.Description("User (for mariadb, postgresql, clickhouse, imap, git, ssh; nylas: the mailbox address — with grant_id the account's own address, without it the address mux looks the grant up by; both empty: application mode)."),
 			),
 			mcp.WithString("database",
 				mcp.Description("Database name (for mariadb, postgresql, clickhouse)."),
@@ -120,7 +120,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("Extra HTTP headers sent with every request (http and proxy types), one 'Name: Value' per line (e.g. 'Notion-Version: 2022-06-28')."),
 			),
 			mcp.WithBoolean("read_only",
-				mcp.Description("Expose reading tools only (databases: no execute; http: no request; youtrack-rest: no write and no admin tools; ssh: no upload, exec limited to allow_commands or the built-in list of reading commands; supabase: no deploy, delete, migrations_apply or secret writes, SQL on the read-only endpoint). Default false."),
+				mcp.Description("Expose reading tools only (databases: no execute; http: no request; youtrack-rest: no write and no admin tools; ssh: no upload, exec limited to allow_commands or the built-in list of reading commands; supabase: no deploy, delete, migrations_apply or secret writes, SQL on the read-only endpoint; nylas: reading and searching only — no archive/delete/move, no drafts, no sending, no delete_grant or api_request). Default false."),
 			),
 			mcp.WithString("protected_fields",
 				mcp.Description("youtrack-rest: fields this connection never writes, one per line as 'Project:Field' or 'Field' (e.g. 'P:Sprint priority')."),
@@ -162,7 +162,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("nylas: data-residency region of the Nylas application, 'us' (default) or 'eu'."),
 			),
 			mcp.WithString("grant_id",
-				mcp.Description("nylas: id of the connected mailbox (grant). Alternatively set user to the mailbox address and mux looks the grant up."),
+				mcp.Description("nylas: id of the connected mailbox (grant). Alternatively set user to the mailbox address and mux looks the grant up. Both empty: application mode — the key serves every grant of the application, the mail tools take a mailbox argument, and the administration tools (grants, connectors, webhooks, api_get/api_request) appear."),
 			),
 			mcp.WithString("project_ref",
 				mcp.Description("supabase: the project's reference (20 lowercase letters, the id in the dashboard URL). Store the access token with secret_set as {name}-token; url defaults to https://api.supabase.com."),
@@ -389,6 +389,11 @@ func (ct *ConfigTools) handleConnectionList(_ context.Context, _ mcp.CallToolReq
 			entry["region"] = c.Region
 			if c.GrantID != "" {
 				entry["grant_id"] = c.GrantID
+			}
+			if config.NylasApplicationMode(c) {
+				entry["mode"] = "application" // the key serves every grant; mail tools take mailbox
+			} else {
+				entry["mode"] = "grant"
 			}
 			if c.AllowSend {
 				entry["allow_send"] = true

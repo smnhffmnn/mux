@@ -182,8 +182,9 @@ read_only = true
 # smtp_saves_sent = false                       # true when the provider files SMTP mail in Sent itself (Gmail)
 # Password stored as secret (key: "mail-password")
 
-# Nylas: a mailbox behind the Nylas API (Gmail, Microsoft 365, IMAP — one type).
+# Nylas: mailboxes behind the Nylas API (Gmail, Microsoft 365, IMAP — one type).
 # Conversations are Nylas threads with the account's own replies, each with a ball position.
+# Grant mode — one mailbox, a key bound to its grant:
 # [[connections]]
 # name = "mailbox"
 # type = "nylas"
@@ -193,6 +194,18 @@ read_only = true
 # from_name = "Jane Doe"                        # optional: display name in From
 # allow_send = true                             # registers send_draft, reply_send, forward_send (Nylas sends; no SMTP needed)
 # API key stored as secret (key: "mailbox-token") — an IAM key bound to the grant, with an expiry
+#
+# Application mode — neither grant_id nor user: the key serves every grant of the application.
+# The mail tools take mailbox (address or grant id), list_mailboxes lists the grants, and the
+# administration tools (get_grant, delete_grant, list_connectors, list_webhooks, api_get/api_request) appear.
+# [[connections]]
+# name = "mail-hub"
+# type = "nylas"
+# region = "eu"
+# from_name = "Jane Doe"                        # applies to every mailbox
+# allow_send = true                             # applies to every mailbox
+# read_only = false                             # true: reading and searching only (no archive/delete/move, drafts, sending, delete_grant, api_request)
+# API key stored as secret (key: "mail-hub-token") — the application's key, or an IAM key bound to the application
 
 # --- Tunnels ---
 # Connections can reference tunnels by name to route traffic through WireGuard or SSH.

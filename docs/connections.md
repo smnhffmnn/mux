@@ -559,17 +559,23 @@ allow_send = true
 
 ### Nylas
 
-A mailbox behind the [Nylas](https://developer.nylas.com/) REST API v3 — Gmail, Microsoft 365, Exchange, iCloud, Yahoo and plain IMAP accounts look the same to the agent, and the tools carry the names and parameters of the `imap` and `microsoft-graph` types (`list_conversations`, `get_conversation`, `create_reply_draft`, `send_draft`, …). The result shapes follow them where the API allows: ids are strings (Nylas message ids), `list_conversations` returns an object with a page token instead of a bare array, because Nylas pages threads by cursor. Nylas holds the provider connection (OAuth for Gmail and Microsoft, IMAP credentials otherwise) and keeps a rolling 90-day cache of IMAP mailboxes.
+Mailboxes behind the [Nylas](https://developer.nylas.com/) REST API v3 — Gmail, Microsoft 365, Exchange, iCloud, Yahoo and plain IMAP accounts look the same to the agent, and the tools carry the names and parameters of the `imap` and `microsoft-graph` types (`list_conversations`, `get_conversation`, `create_reply_draft`, `send_draft`, …). The result shapes follow them where the API allows: ids are strings (Nylas message ids), `list_conversations` returns an object with a page token instead of a bare array, because Nylas pages threads by cursor. Nylas holds the provider connection (OAuth for Gmail and Microsoft, IMAP credentials otherwise) and keeps a rolling 90-day cache of IMAP mailboxes.
 
 What the type adds is the **ball position**: a Nylas thread holds both sides of a conversation, the account's own replies included, and tracks the dates of its latest incoming and outgoing message. Every conversation therefore says whether the other side wrote last (`ball: "me"` — a reply is due) or this account did (`ball: "them"`); `lastFromMe` is the fact behind it. The other mail types list one folder without the account's own replies, so a thread answered from another client looks unanswered to them.
 
-**Required fields**: `name`, `type`, and `grant_id` (the connected mailbox) or `user` (its address — mux then looks the grant up through `GET /v3/grants`, which needs a key that may list the application's grants)
+A connection runs in one of two modes, decided by its fields:
 
-**Optional fields**: `region` (default: `us`; `eu` for applications in the EU region), `user` (the account's own address for the reply logic; read from the grant when empty), `from_name`, `allow_send` (default: false), `tunnel`, `instructions`
+- **Grant mode** — `grant_id` names the connected mailbox, or `user` carries its address and mux looks the grant up through `GET /v3/grants`. One mailbox, a key bound to its grant, `allow_send` for that mailbox. The default, and the right choice wherever a connection serves someone else's mailbox: the key cannot reach anything but that grant.
+- **Application mode** — neither `grant_id` nor `user` is set. The key is the application's key (or an IAM key bound to the application) and serves every grant of the application: the mail tools take a `mailbox` argument (address or grant id; while the application has exactly one valid grant it is the default), `list_mailboxes` without `mailbox` lists the grants, and the administration tools below appear. One key, every mailbox, one `allow_send` — meant for the owner of all the grants.
 
-**Secret**: `{name}-token` in secret store — the Nylas API key, sent as Bearer token. For production use an [IAM key](https://developer.nylas.com/docs/v3/auth/nylas-iam/) bound to the grant with an expiry, not the application-wide key.
+**Required fields**: `name`, `type`
+
+**Optional fields**: `grant_id` (the connected mailbox), `user` (its address — the account's own address for the reply logic, and the grant lookup when `grant_id` is empty; read from the grant when empty), `region` (default: `us`; `eu` for applications in the EU region), `from_name` (applies to every mailbox of the connection), `allow_send` (default: false), `read_only` (default: false — reading and searching only: no archive, delete or move, no drafts, no sending, no `delete_grant`, no `api_request`; refused together with `allow_send`), `tunnel`, `instructions`
+
+**Secret**: `{name}-token` in secret store — the Nylas API key, sent as Bearer token. Grant mode: an [IAM key](https://developer.nylas.com/docs/v3/auth/nylas-iam/) bound to the grant with an expiry, not the application-wide key. Application mode: the application's key, or an IAM key bound to the application.
 
 ```toml
+# Grant mode: one mailbox
 [[connections]]
 name = "mailbox"
 type = "nylas"
@@ -577,36 +583,57 @@ region = "eu"
 grant_id = "00000000-0000-0000-0000-000000000000"
 from_name = "Jane Doe"
 allow_send = true
+
+# Application mode: every grant of the application, mail tools take mailbox
+[[connections]]
+name = "mail-hub"
+type = "nylas"
+region = "eu"
+from_name = "Jane Doe"
+allow_send = true
 ```
 
-**MCP tools exposed**:
+**MCP tools exposed** (mail; in application mode each takes `mailbox`):
 
 | Tool | Description |
 |------|-------------|
-| `{name}_list_conversations` | Conversations (threads) of a folder in Nylas' order (newest first; not guaranteed on Gmail), with `ball`, `lastFromMe`, `latestReceived`, `latestSent`, participants, folders, `draftIds` and the latest item (`latestMessage.id` is a message id unless `latestMessage.isDraft` is set — then it is a pending draft). Returns `{folder, conversations, nextPageToken}`; an empty token is the last page. Parameters: `limit` (default 20, max 50), `page_token`, `folder` (name or id, default: the inbox), `unread`. |
+| `{name}_list_conversations` | Conversations (threads) of a folder in Nylas' order (newest first; not guaranteed on Gmail), with `ball`, `lastFromMe`, `latestReceived`, `latestSent`, participants, folders, `draftIds` and the latest item (`latestMessage.id` is a message id unless `latestMessage.isDraft` is set — then it is a pending draft). Returns `{folder, conversations, nextPageToken}` (plus `mailbox` in application mode); an empty token is the last page. Parameters: `limit` (default 20, max 50), `page_token`, `folder` (name or id, default: the inbox), `unread`. |
 | `{name}_get_conversation` | All messages of a conversation across folders, oldest first, with full body text (HTML rendered to text, links as `text (url)`), `fromMe`, folders and attachments (id, file name, type, size). Parameter: `conversation_id` (required). |
 | `{name}_search_messages` | Search conversations. Plain text; on IMAP-backed accounts mux wraps it as IMAP `TEXT "…"`, Gmail and Microsoft take their own syntax. Results are conversations as in `list_conversations`, with `ball`. Parameters: `query` (required), `limit` (default 25), `folder`, `live` (IMAP: ask the server directly, beyond the 90-day cache; slow, one folder — the result is then the matching messages grouped by thread, marked `scope: "matches"`, without `ball`), `native` (pass the query through verbatim). |
-| `{name}_list_mailboxes` | Folders (labels) with `messages` and `unseen` counts, ids and special-use attributes. |
-| `{name}_archive_conversation` | Archive the conversation's inbox messages: into the Archive folder where the mailbox has one; on Gmail by removing the INBOX label (the mail stays in All Mail); elsewhere without an Archive folder into Trash — the result names the folder. Parameter: `conversation_id` (required). |
-| `{name}_delete_conversation` | Move the conversation's inbox messages to Trash (not permanent). Parameter: `conversation_id` (required). |
-| `{name}_move_conversation` | Move the conversation's messages between folders (on Gmail: swap the source label for the target label, other labels stay). Parameters: `conversation_id`, `folder` (required; name or id), `source_folder` (default: the inbox), `create` (create the target folder, default: false). |
+| `{name}_list_mailboxes` | Folders (labels) with `messages` and `unseen` counts, ids and special-use attributes. Application mode without `mailbox`: the grants instead — `{mailboxes: [{id, email, provider, grantStatus, …}]}`. |
 | `{name}_list_attachments` | Attachments of a message. Parameter: `message_id` (required). |
 | `{name}_get_attachment` | Attachment content: written to `output_file` when given (absolute path, must not exist), otherwise inline as base64 up to 1 MiB. Parameters: `message_id`, `attachment_id` (required), `output_file`. |
-| `{name}_create_reply_draft` | Reply draft to a message of the conversation (default: the latest), threaded on it by Nylas. Saved to Drafts, does NOT send. The reply goes to the message's Reply-To (its sender when it has none). Returns `draft_id`. Parameters: `conversation_id`, `body` (required), `reply_all`, `message_id`. |
-| `{name}_create_forward_draft` | Forward draft of a message of the conversation (default: the latest); the message's attachments are downloaded and attached (up to 3 MB in total, the limit of a JSON send) unless `include_attachments` is false. Saved to Drafts, does NOT send. Parameters: `conversation_id`, `to` (required, comma-separated for several), `body`, `message_id`, `include_attachments`. |
+| `{name}_archive_conversation` | *Not with `read_only`.* Archive the conversation's inbox messages: into the Archive folder where the mailbox has one; on Gmail by removing the INBOX label (the mail stays in All Mail); elsewhere without an Archive folder into Trash — the result names the folder. Parameter: `conversation_id` (required). |
+| `{name}_delete_conversation` | *Not with `read_only`.* Move the conversation's inbox messages to Trash (not permanent). Parameter: `conversation_id` (required). |
+| `{name}_move_conversation` | *Not with `read_only`.* Move the conversation's messages between folders (on Gmail: swap the source label for the target label, other labels stay). Parameters: `conversation_id`, `folder` (required; name or id), `source_folder` (default: the inbox), `create` (create the target folder, default: false). |
+| `{name}_create_reply_draft` | *Not with `read_only`.* Reply draft to a message of the conversation (default: the latest), threaded on it by Nylas. Saved to Drafts, does NOT send. The reply goes to the message's Reply-To (its sender when it has none). Returns `draft_id`. Parameters: `conversation_id`, `body` (required), `reply_all`, `message_id`. |
+| `{name}_create_forward_draft` | *Not with `read_only`.* Forward draft of a message of the conversation (default: the latest); the message's attachments are downloaded and attached (up to 3 MB in total, the limit of a JSON send) unless `include_attachments` is false. Saved to Drafts, does NOT send. Parameters: `conversation_id`, `to` (required, comma-separated for several), `body`, `message_id`, `include_attachments`. |
 | `{name}_send_draft` | *Only with `allow_send`.* Send a draft; Nylas removes it and files the message in Sent. Parameter: `draft_id` (required). |
 | `{name}_reply_send` | *Only with `allow_send`.* Reply and send in one step. Parameters as `create_reply_draft`, but `message_id` is required. |
 | `{name}_forward_send` | *Only with `allow_send`.* Forward and send in one step. Parameters as `create_forward_draft`, but `message_id` is required. |
 
+**MCP tools exposed** (administration, application mode only):
+
+| Tool | Description |
+|------|-------------|
+| `{name}_get_grant` | One grant in full: address, aliases, name, provider, status, scope, settings, timestamps — invalid grants too. Parameter: `mailbox` (required; address or id). |
+| `{name}_delete_grant` | *Not with `read_only`.* Delete a grant: the mailbox is disconnected from Nylas for good (its messages leave the cache, its ids stop working; for IMAP grants the stored password leaves Nylas with it — the mail stays at the provider). Parameter: `mailbox` (required; two valid grants with the same address need the id). Nothing is deleted without the argument. |
+| `{name}_list_connectors` | The application's connectors, one per provider: name, scope, settings, active credential id. |
+| `{name}_list_webhooks` | The application's webhook subscriptions as Nylas reports them; a secret, should one appear, is dropped. |
+| `{name}_api_get` | Raw GET on any `/v3/…` path including the query string — calendars, contacts, `grants/{id}/…`, the application, single webhooks. Parameters: `path` (required), `output_file`. Paths are normalized (no `.` or `..` segments, no encoded separators) and confined to `/v3/`. |
+| `{name}_api_request` | *Not with `read_only`.* Raw POST/PUT/PATCH/DELETE on any `/v3/…` path with a JSON body. Parameters: `method`, `path` (required), `body`. Same path rules; the two send operations (`messages/send`, `POST drafts/{id}`) are refused — sending goes through the send tools and their `allow_send` gate. |
+
 **Which message a reply answers.** The tools that send at once need the `message_id` of the message to answer (from `list_conversations` or `get_conversation`) and refuse an id outside the conversation; drafts default to the latest message, because someone looks at a draft before it goes out. Nylas threads the reply from `reply_to_message_id` — on IMAP grants the message id Nylas hands out is the RFC 822 Message-ID the API asks for there. The result of a draft or a send carries the `thread_id` Nylas filed it in and a warning when that is not the conversation.
 
-**Sending.** `allow_send` is the switch; there is no SMTP side — Nylas sends through the provider with the grant's credentials. Switching it off in the desktop app (also through its provisioning sync) removes the send tools at once, and so does deleting the connection. `sent: true` means Nylas accepted the message (`queued: true` when it answered 202 and sends asynchronously). A send that Nylas refused reads `not sent`; one whose request died without an answer, or that Nylas answered with a 5xx (the API documents 504 for the send endpoint), reads `unclear whether sent` — never a plain error an agent would retry. `reply_send` and `forward_send` carry an `Idempotency-Key` derived from the message, so an identical retry within Nylas' one-hour window returns the first answer instead of a second mail. A `send_draft` on a draft Nylas no longer has (sent or deleted already) says so without sending. The hosted Nylas MCP server's two-step confirmation hash is not part of this vocabulary — mux' own gate is `allow_send`.
+**Sending.** `allow_send` is the switch; there is no SMTP side — Nylas sends through the provider with the grant's credentials. In application mode it applies to every mailbox of the connection. Switching it off in the desktop app (also through its provisioning sync) removes the send tools at once, and so does deleting the connection. `sent: true` means Nylas accepted the message (`queued: true` when it answered 202 and sends asynchronously). A send that Nylas refused reads `not sent`; one whose request died without an answer, or that Nylas answered with a 5xx (the API documents 504 for the send endpoint), reads `unclear whether sent` — never a plain error an agent would retry. `reply_send` and `forward_send` carry an `Idempotency-Key` derived from the grant and the message, so an identical retry within Nylas' one-hour window returns the first answer instead of a second mail. A `send_draft` on a draft Nylas no longer has (sent or deleted already) says so without sending. The hosted Nylas MCP server's two-step confirmation hash is not part of this vocabulary — mux' own gate is `allow_send`.
+
+**Mailboxes in application mode.** The grant list is read on first use and cached for five minutes (`list_mailboxes` reads it fresh); a `mailbox` the cache does not know is looked up once more before it is refused, so a grant connected a minute ago needs no restart. By address, a valid grant wins over an invalid one with the same address; two valid grants with the same address need the id. Each mailbox has its own address (`fromMe`, reply recipients, the From header), its own provider and its own folder cache; message and conversation ids belong to the mailbox they came from. `from_name` applies to every mailbox.
 
 **Folders.** mux finds the inbox, Archive and Trash by the special-use attributes Nylas reports for every provider (`\Inbox`, `\Archive`, `\Trash`) and falls back to common names (`Archive`, `INBOX.Archive`, `Deleted Messages`, …); Drafts is wherever Nylas files a draft. Folder ids are stable per grant and cached for five minutes; `list_mailboxes` always reads them fresh. Gmail keeps a message under several labels at once: there, archive removes the INBOX label and move swaps the source for the target — the other labels stay. Everywhere else a message has one folder, which the move replaces.
 
 **IMAP-backed accounts.** Nylas syncs the newest 90 days of every folder and builds threads from the mail headers (`References`, `In-Reply-To`), not from the subject. Conversations outside the window are not listed and `get_conversation` does not find them; `search_messages` with `live=true` queries the IMAP server itself (`query_imap`) and reaches older mail, one folder at a time and slowly. The thread list sees only the window.
 
-The endpoints, query parameters and fields the type uses are listed in a registry and checked against Nylas' published OpenAPI document (`https://developer.nylas.com/openapi.json`) by the test suite — vendored snapshot in `internal/tools/testdata/nylas-openapi.json`, refreshed with `scripts/nylas-openapi-snapshot.sh`; the `Nylas API drift` workflow repeats the check weekly against the live document and, with the repository secrets `NYLAS_LIVE_KEY` and `NYLAS_LIVE_GRANT` set (plus the variable `NYLAS_LIVE_REGION=eu` for an EU grant), exercises the type against a real test grant (read, draft, delete the draft; `go test -tags notray,live ./internal/tools -run TestNylasLive`).
+The endpoints, query parameters and fields the type uses are listed in a registry and checked against Nylas' published OpenAPI document (`https://developer.nylas.com/openapi.json`) by the test suite — vendored snapshot in `internal/tools/testdata/nylas-openapi.json`, refreshed with `scripts/nylas-openapi-snapshot.sh`; the pass-through pair is the one path beside the registry, confined by path rules instead. The `Nylas API drift` workflow repeats the check weekly against the live document and, with the repository secrets `NYLAS_LIVE_KEY` and `NYLAS_LIVE_GRANT` set (plus the variable `NYLAS_LIVE_REGION=eu` for an EU grant), exercises the type against a real test grant (read, draft, delete the draft; `go test -tags notray,live ./internal/tools -run TestNylasLive`). The application mode has its own live test, run by hand with an application key: `NYLAS_LIVE_APP_KEY=… go test -tags notray,live ./internal/tools -run TestNylasLive_Application`.
 
 ### Meilisearch
 
