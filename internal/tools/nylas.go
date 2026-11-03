@@ -87,7 +87,11 @@ Draft creation saves to the mailbox's Drafts folder and returns a draft_id — i
 // NylasApplicationInstructions are appended in application mode, where the
 // connection serves every grant of the Nylas application.
 const NylasApplicationInstructions = `This connection serves every mailbox (grant) of the Nylas application. list_mailboxes without mailbox lists them — address, provider, status, grant id; the mail tools take mailbox (address or grant id), optional only while the application has exactly one valid grant. Each mailbox has its own address, ball position and folders; message and conversation ids belong to the mailbox they came from.
-get_grant, list_connectors, list_webhooks and api_get read the application's administration; delete_grant disconnects a mailbox from Nylas for good, api_request sends raw writes to /v3/… — sending mail stays with the send tools.`
+get_grant, list_connectors, list_webhooks and api_get read the application's administration.`
+
+// NylasApplicationWriteInstructions follow NylasApplicationInstructions on
+// connections that are not read-only.
+const NylasApplicationWriteInstructions = `delete_grant disconnects a mailbox from Nylas for good; api_request sends raw writes to /v3/… — the message sends are refused there (the send tools are the way), and without allow_send so are the calendar writes that mail participants.`
 
 // NylasReadOnlyInstructions are appended on read-only connections.
 const NylasReadOnlyInstructions = `Read-only connection: reading and searching only — no archive, delete or move, no drafts, no sending.`
@@ -103,6 +107,9 @@ func NylasInstructions(conn config.Connection) string {
 	parts := []string{DefaultNylasInstructions}
 	if config.NylasApplicationMode(conn) {
 		parts = append(parts, NylasApplicationInstructions)
+		if !conn.ReadOnly {
+			parts = append(parts, NylasApplicationWriteInstructions)
+		}
 	}
 	switch {
 	case conn.ReadOnly:
@@ -139,6 +146,7 @@ type Nylas struct {
 	mailboxes map[string]*nylasMailbox
 	grants    []nylasGrant
 	grantsAt  time.Time
+	grantsGen uint64 // bumped by forgetGrant; a list fetched before the bump is not stored
 
 	// now is swappable for tests.
 	now func() time.Time
@@ -243,8 +251,9 @@ var nylasEndpoints = map[string]nylasEndpoint{
 // nylasSchemaFields lists, per OpenAPI component schema, the properties the
 // type decodes. It is the field table of the contract: the spec test checks
 // every name against the schema, so a property Nylas removes or renames fails
-// a test before it fails a user. (The webhook list has no schema in the
-// document; list_webhooks passes it through as is.)
+// a test before it fails a user. (The webhook list is described inline in
+// the document, not as a component schema; list_webhooks passes it through
+// as is.)
 var nylasSchemaFields = map[string][]string{
 	"thread":                {"id", "subject", "snippet", "participants", "message_ids", "draft_ids", "folders", "unread", "starred", "has_attachments", "has_drafts", "earliest_message_date", "latest_message_received_date", "latest_message_sent_date", "latest_draft_or_message"},
 	"message":               {"id", "thread_id", "subject", "snippet", "body", "from", "to", "cc", "bcc", "reply_to", "date", "folders", "unread", "starred", "attachments", "in_reply_to", "grant_id"},
@@ -842,7 +851,7 @@ func (n *Nylas) mailbox(ctx context.Context, req mcp.CallToolRequest) (*nylasMai
 		}
 		return mb, nil
 	}
-	g, err := n.findGrant(ctx, ref)
+	g, err := n.findGrant(ctx, ref, true)
 	if err != nil {
 		return nil, err
 	}
@@ -921,57 +930,88 @@ func (n *Nylas) listGrants(ctx context.Context, force bool) ([]nylasGrant, error
 		n.mu.Unlock()
 		return grants, nil
 	}
+	gen := n.grantsGen
 	n.mu.Unlock()
 
+	// Offset advances by what came back, and a page without a new grant
+	// ends the loop: the document gives limit no maximum, so a server cap
+	// below the page size must not skip grants, and a server that ignored
+	// the offset must not fill the list with repeats.
 	all := []nylasGrant{}
-	for page := 0; page < 20; page++ {
+	seen := map[string]bool{}
+	for page, offset := 0, 0; page < 20; page++ {
 		q := url.Values{}
 		q.Set("limit", fmt.Sprint(nylasGrantPage))
-		q.Set("offset", fmt.Sprint(page*nylasGrantPage))
+		q.Set("offset", fmt.Sprint(offset))
 		var grants []nylasGrant
 		if _, err := n.callJSON(ctx, "grants", nil, q, nil, &grants); err != nil {
 			return nil, fmt.Errorf("list the application's grants: %w", err)
 		}
-		all = append(all, grants...)
-		if len(grants) < nylasGrantPage {
+		added := 0
+		for _, g := range grants {
+			if !seen[g.ID] {
+				seen[g.ID] = true
+				all = append(all, g)
+				added++
+			}
+		}
+		if added == 0 {
 			break
 		}
+		offset += len(grants)
 	}
 	n.mu.Lock()
-	n.grants = all
-	n.grantsAt = n.now()
+	if n.grantsGen == gen { // a grant deleted meanwhile would be back in the cache otherwise
+		n.grants = all
+		n.grantsAt = n.now()
+	}
 	n.mu.Unlock()
 	return all, nil
 }
 
 // findGrant picks a grant of the application by id or address (application
 // mode). An empty ref is the application's only valid grant; with several,
-// the error lists them. A ref the cached list does not know is looked up
-// once more in a fresh list — a grant connected a minute ago must not need a
-// restart. The status is not judged here: get_grant and delete_grant work on
-// invalid grants too.
-func (n *Nylas) findGrant(ctx context.Context, ref string) (*nylasGrant, error) {
+// the error lists them. The cached list is refreshed once when it does not
+// know the ref, when it has no usable grant for an empty ref, or — with
+// needValid — when the grant it names is not valid: a mailbox connected or
+// reconnected a minute ago must not wait for the cache to expire. The status
+// is judged by the caller: get_grant works on invalid grants too.
+func (n *Nylas) findGrant(ctx context.Context, ref string, needValid bool) (*nylasGrant, error) {
 	grants, err := n.listGrants(ctx, false)
 	if err != nil {
 		return nil, err
 	}
 	g, err := pickNylasGrant(grants, ref)
-	if err != nil || g != nil {
-		return g, err
+	if err != nil {
+		return nil, err
+	}
+	if g != nil && (!needValid || g.GrantStatus == "" || g.GrantStatus == nylasGrantStatusValid) {
+		return g, nil
 	}
 	if grants, err = n.listGrants(ctx, true); err != nil {
 		return nil, err
 	}
-	if g, err = pickNylasGrant(grants, ref); err != nil || g != nil {
-		return g, err
+	fresh, err := pickNylasGrant(grants, ref)
+	switch {
+	case err != nil:
+		return nil, err
+	case fresh != nil:
+		return fresh, nil
+	case g != nil:
+		return g, nil // still there, still not valid: the caller says so
+	case ref != "":
+		return nil, fmt.Errorf("no grant %q in this application — list_mailboxes shows the mailboxes (address, provider, status, id)", ref)
+	case len(grants) == 0:
+		return nil, fmt.Errorf("the application has no grants — connect a mailbox in the Nylas Dashboard")
 	}
-	return nil, fmt.Errorf("no grant %q in this application — list_mailboxes shows the mailboxes (address, provider, status, id)", ref)
+	return nil, fmt.Errorf("none of the application's %d grants is valid — reconnect a mailbox in the Nylas Dashboard; list_mailboxes shows them", len(grants))
 }
 
 // pickNylasGrant applies the mailbox rules to a grant list: by id, else by
 // address (a valid grant wins over an invalid one with the same address; two
 // valid ones need the id), else — without ref — the only valid grant. A nil
-// grant with a nil error means "not in this list".
+// grant with a nil error means "nothing usable in this list"; only an
+// ambiguity is an error here, the rest is findGrant's after its refresh.
 func pickNylasGrant(grants []nylasGrant, ref string) (*nylasGrant, error) {
 	if ref == "" {
 		var valid []nylasGrant
@@ -983,10 +1023,8 @@ func pickNylasGrant(grants []nylasGrant, ref string) (*nylasGrant, error) {
 		switch {
 		case len(valid) == 1:
 			return &valid[0], nil
-		case len(grants) == 0:
-			return nil, fmt.Errorf("the application has no grants — connect a mailbox in the Nylas Dashboard")
 		case len(valid) == 0:
-			return nil, fmt.Errorf("none of the application's %d grants is valid — reconnect a mailbox in the Nylas Dashboard; list_mailboxes shows them", len(grants))
+			return nil, nil
 		}
 		return nil, fmt.Errorf("pass mailbox: the application has %d valid grants — %s", len(valid), nylasGrantSummary(valid))
 	}
@@ -1051,6 +1089,7 @@ func (n *Nylas) forgetGrant(grantID string) {
 	defer n.mu.Unlock()
 	delete(n.mailboxes, grantID)
 	n.grants = nil
+	n.grantsGen++
 }
 
 // multiLabel reports whether the provider keeps a message in several folders

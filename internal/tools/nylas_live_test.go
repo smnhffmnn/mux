@@ -230,10 +230,11 @@ func TestNylasLive_SendToSelf(t *testing.T) {
 }
 
 // TestNylasLive_Application exercises the application mode with an
-// application key (NYLAS_LIVE_APP_KEY): list the grants, read the inbox of
-// the first valid one through the mailbox argument, read its grant and the
-// connectors. Nothing is written. Run by hand — an application key reaches
-// every mailbox and does not belong in CI.
+// application key (NYLAS_LIVE_APP_KEY, NYLAS_LIVE_REGION as for the grant
+// test): list the grants, read the inbox of the first valid one through the
+// mailbox argument, read its grant and the connectors. Nothing is written.
+// Run by hand — an application key reaches every mailbox and does not belong
+// in CI. The log carries counts and ids, no addresses.
 func TestNylasLive_Application(t *testing.T) {
 	key := os.Getenv("NYLAS_LIVE_APP_KEY")
 	if key == "" {
@@ -306,7 +307,7 @@ func TestNylasLive_Application(t *testing.T) {
 		t.Fatal(err)
 	}
 	if page.Mailbox != strings.ToLower(first.Email) {
-		t.Errorf("page mailbox %q, grant %q", page.Mailbox, first.Email)
+		t.Errorf("list_conversations reports another mailbox than grant %s", first.ID)
 	}
 	t.Logf("mailbox %s (%s): %d conversations", first.Provider, first.ID, len(page.Conversations))
 	for i, c := range page.Conversations {

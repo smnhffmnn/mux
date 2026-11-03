@@ -48,7 +48,7 @@ func (n *Nylas) adminReadTools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("api_get",
-				mcp.WithDescription("Raw GET against the Nylas API — any /v3/… path, including the query string (calendars, contacts, grants/{id}/…, applications, webhooks/{id}). The JSON comes back as is, under the key's rights. Paths must be normalized (no . or .. segments). The mail tools remain the way to read mail: they carry the ball position and the conversation shape."),
+				mcp.WithDescription("Raw GET against the Nylas API — any /v3/… path, including the query string (grants/{id}/calendars, events and contacts, applications, webhooks/{id}, …). The JSON comes back as is, under the key's rights. Paths are written plain (no percent-encoding, no . or .. segments). The mail tools remain the way to read mail: they carry the ball position and the conversation shape."),
 				mcp.WithString("path", mcp.Required(), mcp.Description("Path starting with /v3/, including the query string")),
 				mcp.WithString("output_file", mcp.Description("Save the response instead of returning it inline: \"blob\" for a blob you fetch from mux, or an absolute path (supports ~) where you and mux share a disk")),
 				mcp.WithReadOnlyHintAnnotation(true),
@@ -72,7 +72,7 @@ func (n *Nylas) adminWriteTools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("api_request",
-				mcp.WithDescription("Raw POST/PUT/PATCH/DELETE against the Nylas API with a JSON body — any /v3/… path (calendars and events, contacts, webhooks, connectors, grant settings). Writes with the key's rights, which reach every grant of the application. Sending mail is refused here — the send tools are the way, with their outcome semantics and the allow_send gate. Read with api_get first."),
+				mcp.WithDescription("Raw POST/PUT/PATCH/DELETE against the Nylas API with a JSON body — any /v3/… path (contacts, webhooks, connectors, grant settings, calendars and events). Writes with the key's rights, which reach every grant of the application. The message sends (grants/{id}/messages/send, POST grants/{id}/drafts/{id}, domains/{d}/messages/send) are refused here — the send tools are the way, with their outcome semantics; without allow_send the calendar operations that mail participants are refused too (events with notify_participants, send-rsvp). Read with api_get first."),
 				mcp.WithString("method", mcp.Required(), mcp.Description("POST, PUT, PATCH or DELETE"), mcp.Enum("POST", "PUT", "PATCH", "DELETE")),
 				mcp.WithString("path", mcp.Required(), mcp.Description("Path starting with /v3/, including the query string")),
 				mcp.WithString("body", mcp.Description("JSON body")),
@@ -88,7 +88,7 @@ func (n *Nylas) handleGetGrant(ctx context.Context, req mcp.CallToolRequest) (*m
 	if ref == "" {
 		return mcp.NewToolResultError("mailbox is required: the grant's address or id"), nil
 	}
-	g, err := n.findGrant(ctx, ref)
+	g, err := n.findGrant(ctx, ref, false)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -108,9 +108,33 @@ func (n *Nylas) handleDeleteGrant(ctx context.Context, req mcp.CallToolRequest) 
 	if ref == "" {
 		return mcp.NewToolResultError("mailbox is required: the grant's address or id — nothing is deleted by default"), nil
 	}
-	g, err := n.findGrant(ctx, ref)
+	// Irreversible, so the rules are stricter than for the mail tools: the
+	// list is read fresh, and an address that more than one grant carries —
+	// whatever their status — needs the id. "Valid wins" would delete the
+	// working mailbox when an agent means the stale one.
+	grants, err := n.listGrants(ctx, true)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
+	}
+	var g *nylasGrant
+	var same []nylasGrant
+	for i := range grants {
+		if grants[i].ID == ref {
+			g = &grants[i]
+			break
+		}
+		if strings.EqualFold(strings.TrimSpace(grants[i].Email), ref) {
+			same = append(same, grants[i])
+		}
+	}
+	switch {
+	case g != nil:
+	case len(same) == 1:
+		g = &same[0]
+	case len(same) > 1:
+		return mcp.NewToolResultError(fmt.Sprintf("%d grants carry the address %s — pass the grant id of the one to delete: %s", len(same), ref, nylasGrantSummary(same))), nil
+	default:
+		return mcp.NewToolResultError(fmt.Sprintf("no grant %q in this application — list_mailboxes shows the mailboxes (address, provider, status, id)", ref)), nil
 	}
 	if _, err := n.callJSON(ctx, "grant.delete", map[string]string{"grantId": g.ID}, nil, nil, nil); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("delete grant %s (%s): %v", g.ID, g.Email, err)), nil
@@ -121,6 +145,7 @@ func (n *Nylas) handleDeleteGrant(ctx context.Context, req mcp.CallToolRequest) 
 		"grant_id": g.ID,
 		"email":    g.Email,
 		"provider": g.Provider,
+		"status":   g.GrantStatus,
 		"note":     "the mailbox is disconnected from Nylas; its message and conversation ids no longer resolve",
 	}
 	if nylasIMAPProviders[g.Provider] {
@@ -130,19 +155,30 @@ func (n *Nylas) handleDeleteGrant(ctx context.Context, req mcp.CallToolRequest) 
 }
 
 func (n *Nylas) handleListConnectors(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Paged like the grants: by what came back, until a page adds nothing
+	// (one connector per provider, so the provider is the key).
 	var all []nylasConnector
-	for page := 0; page < 10; page++ {
+	seen := map[string]bool{}
+	for page, offset := 0, 0; page < 10; page++ {
 		q := url.Values{}
 		q.Set("limit", fmt.Sprint(nylasGrantPage))
-		q.Set("offset", fmt.Sprint(page*nylasGrantPage))
+		q.Set("offset", fmt.Sprint(offset))
 		var connectors []nylasConnector
 		if _, err := n.callJSON(ctx, "connectors", nil, q, nil, &connectors); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("list connectors: %v", err)), nil
 		}
-		all = append(all, connectors...)
-		if len(connectors) < nylasGrantPage {
+		added := 0
+		for _, c := range connectors {
+			if !seen[c.Provider] {
+				seen[c.Provider] = true
+				all = append(all, c)
+				added++
+			}
+		}
+		if added == 0 {
 			break
 		}
+		offset += len(connectors)
 	}
 	out := make([]map[string]any, 0, len(all))
 	for _, c := range all {
@@ -162,8 +198,11 @@ func (n *Nylas) handleListConnectors(ctx context.Context, _ mcp.CallToolRequest)
 }
 
 // handleListWebhooks passes the webhook list through: the OpenAPI document
-// declares no schema for it, so there is no field table to hold it against.
-// A secret, should one ever appear in a listing, is dropped.
+// describes it inline (id, description, trigger_types, webhook_url, status,
+// notification_email_addresses, compressed_delivery), not as a component
+// schema the field table could name, so nothing is decoded and nothing is
+// drift-checked. The document shows webhook_secret only on create and
+// rotate; it is dropped here in case a listing ever carries it.
 func (n *Nylas) handleListWebhooks(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var hooks []map[string]any
 	if _, err := n.callJSON(ctx, "webhooks", nil, nil, nil, &hooks); err != nil {
@@ -180,45 +219,86 @@ func (n *Nylas) handleListWebhooks(ctx context.Context, _ mcp.CallToolRequest) (
 
 // --- Pass-through ---
 
-// nylasSendPath matches the two operations that send mail: POST
-// /v3/grants/{id}/messages/send and POST /v3/grants/{id}/drafts/{id}. They
-// are refused on api_request, whatever allow_send says: the send tools carry
-// the outcome semantics (not sent / unclear / sent) and the idempotency key
-// that make a send safe for an agent.
-var nylasSendPath = regexp.MustCompile(`^/v3/grants/[^/]+/(messages/send|drafts/[^/]+)/?$`)
+// nylasMessageSendPath matches the operations that send a message: POST
+// /v3/grants/{id}/messages/send, POST /v3/grants/{id}/drafts/{id} (send a
+// draft) and POST /v3/domains/{domain}/messages/send (transactional mail with
+// the application key). They are refused on api_request, whatever allow_send
+// says: the send tools carry the outcome semantics (not sent / unclear /
+// sent) and the idempotency key that make a send safe for an agent.
+var nylasMessageSendPath = regexp.MustCompile(`^/v3/(grants/[^/]+/(messages/send|drafts/[^/]+)|domains/[^/]+/messages/send)$`)
+
+// nylasEventPath and nylasRSVPPath match the calendar writes that make the
+// provider mail participants: creating, updating or deleting an event
+// (notify_participants defaults to true in the API) and sending an RSVP.
+// Without allow_send they are refused — an event write passes only with
+// notify_participants=false in the query.
+var (
+	nylasEventPath = regexp.MustCompile(`^/v3/grants/[^/]+/events(/[^/]+)?$`)
+	nylasRSVPPath  = regexp.MustCompile(`^/v3/grants/[^/]+/events/[^/]+/send-rsvp$`)
+	nylasGrantPath = regexp.MustCompile(`^/v3/grants/([^/]+)$`)
+)
 
 // nylasAPIPath confines a pass-through path to the versioned API: an
-// absolute path under /v3/, normalized, with its query string. Encoded dots,
-// slashes and backslashes are refused before any decoding could turn them
-// into separators.
-func (n *Nylas) nylasAPIPath(raw string) (string, error) {
+// absolute, plain path under /v3/ — normalized, without percent-encoding or
+// a fragment — plus its query string. It returns the request URL and the
+// path the gates are checked against. The path goes into the URL through
+// url.URL, so every byte reaches the API as the segment it was written in;
+// the gates see the same path, and no decoding on either side can turn a
+// refused operation into an allowed one.
+func (n *Nylas) nylasAPIPath(raw string) (fullURL, cleaned string, err error) {
 	raw = strings.TrimSpace(raw)
 	if strings.Contains(raw, "://") {
-		return "", fmt.Errorf("path %q must be an absolute path on the API (/v3/…), not a URL", raw)
+		return "", "", fmt.Errorf("path %q must be an absolute path on the API (/v3/…), not a URL", raw)
 	}
 	if !strings.HasPrefix(raw, "/") {
 		raw = "/" + raw
 	}
-	lower := strings.ToLower(raw)
-	if strings.Contains(lower, "%2e") || strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") || strings.ContainsRune(raw, '\\') {
-		return "", fmt.Errorf("path %q: encoded dots, slashes or backslashes are not accepted", raw)
+	pathPart, query, _ := strings.Cut(raw, "?")
+	if strings.ContainsAny(pathPart, "%\\#") {
+		return "", "", fmt.Errorf("path %q: write the path plain — no percent-encoding, backslashes or # (ids go in as they are; a query string may be encoded)", raw)
+	}
+	if strings.Contains(query, "#") {
+		return "", "", fmt.Errorf("path %q: a fragment (#…) is not part of an API path", raw)
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "" || u.Host != "" || u.Opaque != "" || u.Path == "" {
-		return "", fmt.Errorf("path %q must be an absolute path on the API (/v3/…), not a URL", raw)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.Opaque != "" || u.Path == "" || u.Fragment != "" {
+		return "", "", fmt.Errorf("path %q must be an absolute path on the API (/v3/…), not a URL", raw)
 	}
-	cleaned := path.Clean(u.Path)
+	cleaned = path.Clean(u.Path)
 	if cleaned != u.Path && cleaned+"/" != u.Path {
-		return "", fmt.Errorf("path %q is not normalized (no . or .. segments, no double slashes)", raw)
+		return "", "", fmt.Errorf("path %q is not normalized (no . or .. segments, no double slashes)", raw)
 	}
 	if !strings.HasPrefix(cleaned, "/v3/") || cleaned == "/v3/" {
-		return "", fmt.Errorf("path must start with /v3/ (the Nylas API v3), got %q", raw)
+		return "", "", fmt.Errorf("path must start with /v3/ (the Nylas API v3), got %q", raw)
 	}
-	full := n.baseURL + cleaned
-	if u.RawQuery != "" {
-		full += "?" + u.RawQuery
+	base, err := url.Parse(n.baseURL)
+	if err != nil {
+		return "", "", fmt.Errorf("base URL %q: %w", n.baseURL, err)
 	}
-	return full, nil
+	full := &url.URL{Scheme: base.Scheme, Host: base.Host, Path: cleaned, RawQuery: u.RawQuery}
+	return full.String(), cleaned, nil
+}
+
+// refuseAPIRequest applies the send gates to a pass-through write: the
+// message sends are never passed through; the calendar writes that mail
+// participants only with allow_send (or with notify_participants=false).
+func (n *Nylas) refuseAPIRequest(method, cleaned, rawQuery string) error {
+	if method == http.MethodPost && nylasMessageSendPath.MatchString(cleaned) {
+		return fmt.Errorf("sending mail is not done through api_request — use send_draft, reply_send or forward_send (they exist on connections with allow_send and report whether the message went out)")
+	}
+	if n.allowSend {
+		return nil
+	}
+	if method == http.MethodPost && nylasRSVPPath.MatchString(cleaned) {
+		return fmt.Errorf("send-rsvp mails the organizer from the mailbox; this connection has no allow_send")
+	}
+	if nylasEventPath.MatchString(cleaned) {
+		q, _ := url.ParseQuery(rawQuery)
+		if q.Get("notify_participants") != "false" {
+			return fmt.Errorf("writing an event mails its participants (notify_participants defaults to true); this connection has no allow_send — pass notify_participants=false in the query to write the event without mail")
+		}
+	}
+	return nil
 }
 
 // passThrough sends a raw request to the API with the connection's key.
@@ -241,7 +321,7 @@ func (n *Nylas) passThrough(ctx context.Context, method, fullURL string, body io
 
 func (n *Nylas) handleAPIGet(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	p, _ := req.RequireString("path")
-	u, err := n.nylasAPIPath(p)
+	u, _, err := n.nylasAPIPath(p)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -259,7 +339,7 @@ func (n *Nylas) handleAPIGet(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	if outputFile != "" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return saveResponseToFile(resp, resp.Header.Get("Content-Type"), outputFile)
 	}
-	return rawHTTPResult(resp, nylasAPIInlineMax)
+	return rawHTTPResult(resp, nylasAPIInlineMax, "pass output_file to save the full response")
 }
 
 func (n *Nylas) handleAPIRequest(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -270,12 +350,13 @@ func (n *Nylas) handleAPIRequest(ctx context.Context, req mcp.CallToolRequest) (
 		return mcp.NewToolResultError("method must be POST, PUT, PATCH or DELETE"), nil
 	}
 	p, _ := req.RequireString("path")
-	u, err := n.nylasAPIPath(p)
+	u, cleaned, err := n.nylasAPIPath(p)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	if method == http.MethodPost && nylasSendPath.MatchString(strings.TrimPrefix(strings.SplitN(u, "?", 2)[0], n.baseURL)) {
-		return mcp.NewToolResultError("sending mail is not done through api_request — use send_draft, reply_send or forward_send (they exist on connections with allow_send and report whether the message went out)"), nil
+	_, rawQuery, _ := strings.Cut(u, "?")
+	if err := n.refuseAPIRequest(method, cleaned, rawQuery); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 	body, err := stringArg(req, "body")
 	if err != nil {
@@ -293,5 +374,10 @@ func (n *Nylas) handleAPIRequest(ctx context.Context, req mcp.CallToolRequest) (
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	defer resp.Body.Close()
-	return rawHTTPResult(resp, nylasAPIInlineMax)
+	if m := nylasGrantPath.FindStringSubmatch(cleaned); m != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && method != http.MethodPost {
+		// A grant changed or deleted behind the shaped tools: the caches
+		// must not serve it for another five minutes.
+		n.forgetGrant(m[1])
+	}
+	return rawHTTPResult(resp, nylasAPIInlineMax, "")
 }

@@ -133,7 +133,7 @@ All fields use **camelCase** JSON keys.
 | `user` | string | databases | Database username |
 | `password` | string | no | Database password. If omitted, mux checks the secret store for `{name}-password`. |
 | `database` | string | no | Database name (ClickHouse defaults to `"default"`) |
-| `readOnly` | boolean | no | Reading tools only (default: false): databases no `execute`; http no `request`; youtrack-rest no write and no admin tools; supabase no deploy, delete, migrations or secret writes; ssh no upload; nylas no archive/delete/move, drafts, sending, `delete_grant` or `api_request` (refused together with `allowSend`) |
+| `readOnly` | boolean | no | Reading tools only (default: false). What that means per type is in [connections.md](connections.md); for nylas: no archive/delete/move, no drafts, no sending, no `delete_grant`, no `api_request` — refused together with `allowSend`. |
 | `secure` | boolean | no | TLS for ClickHouse HTTP (default: false) |
 | `url` | string | proxy/http/api | Endpoint URL |
 | `token` | string | no | API key or Bearer token. If omitted, mux checks the secret store for `{name}-token`. |

@@ -1064,5 +1064,5 @@ func (y *YouTrackREST) handleAdminRequest(ctx context.Context, req mcp.CallToolR
 // ytRawResult renders a pass-through response: status line plus the body,
 // inlined up to youtrackAdminInlineMax.
 func ytRawResult(resp *http.Response) (*mcp.CallToolResult, error) {
-	return rawHTTPResult(resp, youtrackAdminInlineMax)
+	return rawHTTPResult(resp, youtrackAdminInlineMax, "pass output_file to save the full response")
 }
