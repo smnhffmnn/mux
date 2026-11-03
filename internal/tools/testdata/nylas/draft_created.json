@@ -1,0 +1,1 @@
+{"request_id":"req-draft","data":{"id":"draft-9","object":"draft","grant_id":"grant-1","thread_id":"t1","subject":"Re: Re: Fwd: Token expires","folders":["v0:grant-1:INBOX.Drafts"],"to":[{"email":"bob-reply@example.net"}],"cc":[],"bcc":[],"from":[{"email":"jane@example.com","name":"Jane Doe"}],"snippet":"Thanks","starred":false,"date":1793190000}}

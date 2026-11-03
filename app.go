@@ -271,6 +271,17 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 				summary += " · read-only"
 			}
 		}
+	case conn.Type == config.TypeNylas:
+		mailbox := conn.GrantID
+		if conn.User != "" {
+			mailbox = conn.User
+		}
+		if mailbox != "" {
+			summary = fmt.Sprintf("Nylas %s · %s", conn.Region, mailbox)
+			if conn.SendEnabled() {
+				summary += " · sends"
+			}
+		}
 	default:
 		if conn.Host != "" {
 			summary = fmt.Sprintf("%s:%d/%s", conn.Host, conn.Port, conn.Database)
@@ -343,6 +354,10 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 					fi.Value = checkboxValue(conn.SMTPSavesSent)
 				case "project_ref":
 					fi.Value = conn.ProjectRef
+				case "region":
+					fi.Value = conn.Region
+				case "grant_id":
+					fi.Value = conn.GrantID
 				}
 			}
 			if fd.Secret {
@@ -668,6 +683,22 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 				return nil, err
 			}
 			conn.ProjectRef, conn.URL = next.ProjectRef, next.URL
+		}
+		if conn.Type == config.TypeNylas {
+			// Written as sent, like the imap fields: a cleared field clears the
+			// value, an unticked checkbox switches sending off.
+			next := *conn
+			next.Region = strings.ToLower(strings.TrimSpace(fields.Region))
+			next.GrantID = strings.TrimSpace(fields.GrantID)
+			next.User = strings.TrimSpace(fields.User) // the mailbox address; cleared, it is read from the grant again
+			next.FromName = strings.TrimSpace(fields.FromName)
+			next.AllowSend = fields.AllowSend
+			config.ApplyConnectionDefaults(&next)
+			if err := config.ValidateNylas(next); err != nil {
+				return nil, err
+			}
+			conn.Region, conn.GrantID, conn.User = next.Region, next.GrantID, next.User
+			conn.FromName, conn.AllowSend = next.FromName, next.AllowSend
 		}
 	}
 
@@ -1056,6 +1087,8 @@ func (a *App) TestConnection(name string) *TestResult {
 		result = a.testHyperbrowser(*conn)
 	case config.TypeIMAP:
 		result = a.testIMAP(*conn)
+	case config.TypeNylas:
+		result = a.testNylas(*conn)
 	case config.TypeGit:
 		result = a.testGit(*conn)
 	default:
@@ -2123,6 +2156,44 @@ func (a *App) testIMAP(conn config.Connection) testResponse {
 		return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: IMAP and SMTP login verified (%s)", conn.User)}
 	}
 	return testResponse{Connection: conn.Name, Connected: true, Message: fmt.Sprintf("Connected: IMAP login verified (%s)", conn.User)}
+}
+
+// testNylas resolves the grant and lists the folders the way the live tools
+// do — same key, same region, same tunnel routing — so a key for the wrong
+// region, an expired key or a revoked grant is reported here.
+func (a *App) testNylas(conn config.Connection) testResponse {
+	if conn.Token == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "API key not configured"}
+	}
+	var dialer tools.Dialer
+	if conn.Tunnel != "" {
+		t := a.tm.Get(conn.Tunnel)
+		if t == nil {
+			return tunnelUnavailable(conn)
+		}
+		testLog(conn.Name, "routing through tunnel %q", conn.Tunnel)
+		dialer = t
+	}
+	ny, err := tools.NewNylas(conn, dialer)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: err.Error()}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if conn.GrantID != "" {
+		testLog(conn.Name, "reading grant %s at %s", conn.GrantID, config.NylasBaseURL(conn.Region))
+	} else {
+		testLog(conn.Name, "looking up the grant of %s at %s", conn.User, config.NylasBaseURL(conn.Region))
+	}
+	info, err := ny.Verify(ctx)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Nylas check failed: %v", err)}
+	}
+	msg := fmt.Sprintf("Connected: grant valid (%s, %s), %d folders", info.Email, info.Provider, info.Folders)
+	if ny.SendEnabled() {
+		msg += " — sending enabled"
+	}
+	return testResponse{Connection: conn.Name, Connected: true, Message: msg}
 }
 
 func (a *App) testGit(conn config.Connection) testResponse {

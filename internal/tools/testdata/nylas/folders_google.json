@@ -1,0 +1,75 @@
+{
+"request_id": "req-folders-google",
+"data": [
+{
+"id": "INBOX",
+"grant_id": "grant-g",
+"name": "INBOX",
+"object": "folder",
+"attributes": [
+"\\Inbox"
+],
+"system_folder": true,
+"total_count": 10,
+"unread_count": 2
+},
+{
+"id": "SENT",
+"grant_id": "grant-g",
+"name": "SENT",
+"object": "folder",
+"attributes": [
+"\\Sent"
+],
+"system_folder": true,
+"total_count": 4,
+"unread_count": 0
+},
+{
+"id": "TRASH",
+"grant_id": "grant-g",
+"name": "TRASH",
+"object": "folder",
+"attributes": [
+"\\Trash"
+],
+"system_folder": true,
+"total_count": 1,
+"unread_count": 0
+},
+{
+"id": "DRAFT",
+"grant_id": "grant-g",
+"name": "DRAFT",
+"object": "folder",
+"attributes": [
+"\\Drafts"
+],
+"system_folder": true,
+"total_count": 0,
+"unread_count": 0
+},
+{
+"id": "IMPORTANT",
+"grant_id": "grant-g",
+"name": "IMPORTANT",
+"object": "folder",
+"attributes": [
+"\\Important"
+],
+"system_folder": true,
+"total_count": 3,
+"unread_count": 0
+},
+{
+"id": "Label_12",
+"grant_id": "grant-g",
+"name": "Receipts",
+"object": "folder",
+"attributes": [],
+"system_folder": false,
+"total_count": 2,
+"unread_count": 0
+}
+]
+}

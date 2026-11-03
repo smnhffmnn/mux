@@ -819,6 +819,21 @@ export class SaveConnectionRequest {
              */
             this["projectRef"] = undefined;
         }
+        if (/** @type {any} */(false)) {
+            /**
+             * nylas connection type. FromName and AllowSend above are shared with imap.
+             * @member
+             * @type {string | undefined}
+             */
+            this["region"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["grantId"] = undefined;
+        }
 
         Object.assign(this, $$source);
     }

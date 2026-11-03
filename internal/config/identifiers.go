@@ -45,6 +45,7 @@ const (
 	TypeHiggsfield       = "higgsfield"
 	TypeSSH              = "ssh"
 	TypeSupabase         = "supabase"
+	TypeNylas            = "nylas"
 )
 
 // Connection.Source / Tunnel.Source values. SourceLocal marks entries
