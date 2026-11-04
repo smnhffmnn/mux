@@ -948,8 +948,13 @@ var ytAdminIssuesPath = regexp.MustCompile(`^/projects/[^/]+/issues(?:/|$)`)
 // adminURL resolves an admin pass-through path. Two roots are allowed:
 // /api/admin/… on the YouTrack base URL and /hub/api/rest/… on the host (Hub
 // lives beside YouTrack, not under its context path). The /admin/… shorthand
-// is accepted. The path is parsed and cleaned before the prefix check, so dot
-// segments or encoded separators cannot walk out of the two subtrees.
+// is accepted. The path is written plain — no percent-encoding, backslash or
+// fragment — and cleaned before the prefix check, so dot segments cannot walk
+// out of the two subtrees; it goes into the request URL through url.URL, so
+// every byte reaches the instance as the segment it was written in and the
+// issue-subtree check sees the same path the server does. (A decoded "#" or
+// "%" pasted into the URL string would be cut or decoded again by the client
+// or the server — that is how "…/issues%23" once reached /issues.)
 func (y *YouTrackREST) adminURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if strings.Contains(raw, "://") {
@@ -958,12 +963,15 @@ func (y *YouTrackREST) adminURL(raw string) (string, error) {
 	if !strings.HasPrefix(raw, "/") {
 		raw = "/" + raw
 	}
-	lower := strings.ToLower(raw)
-	if strings.Contains(lower, "%2e") || strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") || strings.ContainsRune(raw, '\\') {
-		return "", fmt.Errorf("path %q: encoded dots, slashes or backslashes are not accepted", raw)
+	pathPart, query, _ := strings.Cut(raw, "?")
+	if strings.ContainsAny(pathPart, "%\\#") {
+		return "", fmt.Errorf("path %q: write the path plain — no percent-encoding, backslashes or # (ids go in as they are; a query string may be encoded)", raw)
+	}
+	if strings.Contains(query, "#") {
+		return "", fmt.Errorf("path %q: a fragment (#…) is not part of an API path", raw)
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "" || u.Host != "" || u.Opaque != "" || u.Path == "" {
+	if err != nil || u.Scheme != "" || u.Host != "" || u.Opaque != "" || u.Path == "" || u.Fragment != "" {
 		return "", fmt.Errorf("path %q must be an absolute path on the instance (/api/admin/… or /hub/api/rest/…), not a URL", raw)
 	}
 	cleaned := path.Clean(u.Path)
@@ -985,11 +993,12 @@ func (y *YouTrackREST) adminURL(raw string) (string, error) {
 	if !hub && ytAdminIssuesPath.MatchString(rel) {
 		return "", fmt.Errorf("path %q addresses issues through the administration API — use the issue tools (create_issue, update_issue, run_command), where the field guards apply", raw)
 	}
-	full := root + rel
-	if u.RawQuery != "" {
-		full += "?" + u.RawQuery
+	base, err := url.Parse(root)
+	if err != nil {
+		return "", fmt.Errorf("instance URL %q: %w", root, err)
 	}
-	return full, nil
+	full := &url.URL{Scheme: base.Scheme, Host: base.Host, Path: base.Path + rel, RawQuery: u.RawQuery}
+	return full.String(), nil
 }
 
 func (y *YouTrackREST) handleAdminGet(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

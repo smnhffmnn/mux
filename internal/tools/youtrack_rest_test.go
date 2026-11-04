@@ -1481,16 +1481,20 @@ func TestYouTrackREST_AdminPassThrough(t *testing.T) {
 	// Dot segments, encoded separators and the issue subtree never reach the server.
 	before := len(f.requests)
 	for path, want := range map[string]string{
-		"/api/admin/../issues/P-1":                "not normalized",
-		"/api/admin/./projects":                   "not normalized",
-		"/api/admin//projects":                    "not normalized",
-		"/hub/api/rest/../../api/issues/P-1":      "not normalized",
-		"/api/admin/%2e%2e/issues/P-1":            "encoded",
-		"/api/admin/projects%2F..%2Fissues":       "encoded",
-		"/api/admin/projects/77-27/issues":        "addresses issues",
-		"/api/admin/projects/77-27/issues/2-100":  "addresses issues",
-		"/admin/projects/77-27/issues/2-100":      "addresses issues",
-		"https://evil.example/api/admin/projects": "not a URL",
+		"/api/admin/../issues/P-1":                  "not normalized",
+		"/api/admin/./projects":                     "not normalized",
+		"/api/admin//projects":                      "not normalized",
+		"/hub/api/rest/../../api/issues/P-1":        "not normalized",
+		"/api/admin/%2e%2e/issues/P-1":              "write the path plain",
+		"/api/admin/projects%2F..%2Fissues":         "write the path plain",
+		"/api/admin/projects/77-27/issues%23":       "write the path plain", // decoded "#" would be cut by the client: /issues on the wire
+		"/api/admin/projects/77-27/issues#":         "write the path plain",
+		"/api/admin/projects/77-27/%2569ssues":      "write the path plain", // double encoding: "%69ssues" on the wire, "issues" after the server decodes
+		"/api/admin/projects/77-27/issues?f=1#frag": "fragment",
+		"/api/admin/projects/77-27/issues":          "addresses issues",
+		"/api/admin/projects/77-27/issues/2-100":    "addresses issues",
+		"/admin/projects/77-27/issues/2-100":        "addresses issues",
+		"https://evil.example/api/admin/projects":   "not a URL",
 	} {
 		res, err = y.handleAdminRequest(ctx, toolRequest(map[string]any{"method": "POST", "path": path, "body": `{"customFields":[]}`}))
 		mustError(t, res, err, want)
@@ -1509,6 +1513,11 @@ func TestYouTrackREST_AdminPassThrough(t *testing.T) {
 		if !strings.HasPrefix(u, f.srv.URL+"/api/admin/projects") {
 			t.Errorf("%s resolved to %s", path, u)
 		}
+	}
+	// A segment with characters to escape travels as one segment; the query
+	// string goes as written.
+	if u, err := y.adminURL("/hub/api/rest/users/a b?fields=id,login&query=x%20y"); err != nil || !strings.HasSuffix(u, "/hub/api/rest/users/a%20b?fields=id,login&query=x%20y") {
+		t.Errorf("escaped segment: %s, %v", u, err)
 	}
 
 	res, err = y.handleAdminRequest(ctx, toolRequest(map[string]any{"method": "POST", "path": "/api/admin/customFieldSettings/bundles/enum", "body": "{not json"}))
