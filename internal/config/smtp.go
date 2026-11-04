@@ -68,13 +68,15 @@ func isMailAddress(s string) bool {
 
 // SendEnabled reports whether a mail connection registers its send tools.
 // For imap, allow_send needs its precondition smtp_host; for nylas the API
-// sends, so allow_send alone decides.
+// sends, so allow_send alone decides — on a connection that is not read-only
+// (ValidateNylas refuses the two together; this keeps the rule where the
+// tools are built).
 func (c *Connection) SendEnabled() bool {
 	switch c.Type {
 	case TypeIMAP:
 		return c.AllowSend && c.SMTPHost != ""
 	case TypeNylas:
-		return c.AllowSend
+		return c.AllowSend && !c.ReadOnly
 	}
 	return false
 }

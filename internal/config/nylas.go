@@ -40,10 +40,20 @@ func NylasBaseURL(region string) string {
 	return "https://api." + region + ".nylas.com"
 }
 
+// NylasApplicationMode reports whether a nylas connection serves every grant
+// of its application rather than one mailbox: neither grant_id nor user names
+// a mailbox, so the key must be an application key (or an IAM key bound to
+// the application), and the mail tools take the mailbox as an argument.
+func NylasApplicationMode(c Connection) bool {
+	return c.Type == TypeNylas && strings.TrimSpace(c.GrantID) == "" && strings.TrimSpace(c.User) == ""
+}
+
 // ValidateNylas checks the fields of a nylas connection that are wrong before
-// any request is made: the region must exist, and the grant must be
-// addressable — by id, or by the mailbox address in user, which mux resolves
-// through the grants API on first use.
+// any request is made: the region must exist, user — when set — must be a
+// mailbox address, and read_only and allow_send must not both be set. Which
+// mailbox the connection serves is decided by grant_id and user: an id, an
+// address mux resolves through the grants API on first use, or neither —
+// then the key serves every grant of the application (NylasApplicationMode).
 func ValidateNylas(c Connection) error {
 	if c.Type != TypeNylas {
 		return nil // other types never read these fields
@@ -51,11 +61,13 @@ func ValidateNylas(c Connection) error {
 	if !ValidNylasRegion(c.Region) {
 		return fmt.Errorf("region %q is not a Nylas region (%s or %s)", c.Region, NylasRegionUS, NylasRegionEU)
 	}
-	if strings.TrimSpace(c.GrantID) == "" && strings.TrimSpace(c.User) == "" {
-		return fmt.Errorf("needs grant_id, or user set to the mailbox address so the grant can be looked up")
-	}
 	if u := strings.TrimSpace(c.User); u != "" && !isMailAddress(u) {
 		return fmt.Errorf("user must be the mailbox address (local@domain), got %q", c.User)
+	}
+	if c.ReadOnly && c.AllowSend {
+		// Refused rather than resolved one way: a read-only connection never
+		// sends, and a silent winner would hide a misconfiguration.
+		return fmt.Errorf("read_only and allow_send contradict each other — a read-only connection never sends; drop one of them")
 	}
 	return nil
 }

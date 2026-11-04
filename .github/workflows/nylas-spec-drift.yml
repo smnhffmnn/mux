@@ -13,7 +13,9 @@ name: Nylas API drift
 # NYLAS_LIVE_GRANT are set (an IAM key bound to that grant, with an expiry) and,
 # for a grant in the EU region, the repository variable NYLAS_LIVE_REGION=eu.
 # Without the secrets the job is skipped, not failed. The test logs counts and
-# ids only — the Actions log of a public repository is public.
+# ids only — the Actions log of a public repository is public. The application
+# mode (one key, every grant) is covered by TestNylasLive_Application, run by
+# hand with NYLAS_LIVE_APP_KEY — an application key does not belong in CI.
 
 on:
   schedule:

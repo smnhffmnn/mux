@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -1065,21 +1064,5 @@ func (y *YouTrackREST) handleAdminRequest(ctx context.Context, req mcp.CallToolR
 // ytRawResult renders a pass-through response: status line plus the body,
 // inlined up to youtrackAdminInlineMax.
 func ytRawResult(resp *http.Response) (*mcp.CallToolResult, error) {
-	data, err := io.ReadAll(io.LimitReader(resp.Body, youtrackAdminInlineMax+1))
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("read response: %v", err)), nil
-	}
-	truncated := false
-	if len(data) > youtrackAdminInlineMax {
-		data = data[:youtrackAdminInlineMax]
-		truncated = true
-	}
-	text := fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, http.StatusText(resp.StatusCode), string(data))
-	if truncated {
-		text += "\n\n[truncated at " + strconv.Itoa(youtrackAdminInlineMax) + " bytes — pass output_file to save the full response]"
-	}
-	if resp.StatusCode >= 400 {
-		return mcp.NewToolResultError(text), nil
-	}
-	return mcp.NewToolResultText(text), nil
+	return rawHTTPResult(resp, youtrackAdminInlineMax, "pass output_file to save the full response")
 }

@@ -133,7 +133,7 @@ All fields use **camelCase** JSON keys.
 | `user` | string | databases | Database username |
 | `password` | string | no | Database password. If omitted, mux checks the secret store for `{name}-password`. |
 | `database` | string | no | Database name (ClickHouse defaults to `"default"`) |
-| `readOnly` | boolean | no | Restrict to read-only queries (default: false) |
+| `readOnly` | boolean | no | Reading tools only (default: false). What that means per type is in [connections.md](connections.md); for nylas: no archive/delete/move, no drafts, no sending, no `delete_grant`, no `api_request` — refused together with `allowSend`. |
 | `secure` | boolean | no | TLS for ClickHouse HTTP (default: false) |
 | `url` | string | proxy/http/api | Endpoint URL |
 | `token` | string | no | API key or Bearer token. If omitted, mux checks the secret store for `{name}-token`. |
@@ -158,7 +158,7 @@ All fields use **camelCase** JSON keys.
 | `fromName` | string | no | imap, nylas: display name in the From header of drafts and sent mail |
 | `projectRef` | string | supabase | supabase: the project reference (20 lowercase letters). The access token is `token` or the secret `{name}-token`; `url` defaults to `https://api.supabase.com`. |
 | `region` | string | no | nylas: data-residency region of the Nylas application, `"us"` (default) or `"eu"` |
-| `grantId` | string | no | nylas: id of the connected mailbox (grant). Alternatively set `user` to the mailbox address and mux looks the grant up. The API key is `token` or the secret `{name}-token`. |
+| `grantId` | string | no | nylas: id of the connected mailbox (grant). Alternatively set `user` to the mailbox address and mux looks the grant up. Both empty: application mode — the key serves every grant of the application, the mail tools take a `mailbox` argument and the administration tools appear. The API key is `token` or the secret `{name}-token`. |
 
 ### Tunnel Object
 

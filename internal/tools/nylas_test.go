@@ -33,12 +33,22 @@ type nylasFake struct {
 	srv      *httptest.Server
 
 	provider      string // provider reported for grant-1 (default imap)
-	google        bool   // serve Gmail-shaped folders and the thread "tg" with labelled messages
+	google        bool   // serve Gmail-shaped folders and the thread "tg" with labelled messages on grant-1
 	noArchive     bool   // hide the Archive folder, so archiving falls back to Trash
 	bigAttachment bool   // report att-1 as larger than the inline limit
 	dropSend      bool   // close the connection on send without answering
 	sendStatus    int    // answer sends with this status (0: 200) and the documented error body
 	sendBadBody   bool   // answer sends with 200 and a body that is not JSON
+
+	// Application mode. grants is what GET /v3/grants lists (nil: the
+	// fixture — grant-old, invalid, and grant-1), paged by limit and offset
+	// as the API pages; deleted records the grant ids a DELETE removed.
+	// grant-2 is a second mailbox the fake serves: a Google grant of
+	// jane@example.org with the Gmail folders and the thread "tg".
+	grants       []nylasGrant
+	deleted      []string
+	pageCap      int  // serve at most this many grants per page, whatever limit asks (0: honour limit)
+	ignoreOffset bool // always serve the first page, as a server that ignored offset would
 }
 
 type nylasFakeRequest struct {
@@ -97,8 +107,8 @@ var googleMessages = []nylasMessage{
 }
 
 // messages returns the fixture messages of both threads (and the Gmail
-// thread when the fake plays a Google grant).
-func (f *nylasFake) messages(t *testing.T) []nylasMessage {
+// thread when the grant plays Google).
+func (f *nylasFake) messages(t *testing.T, google bool) []nylasMessage {
 	var all []nylasMessage
 	for _, name := range []string{"messages_t1.json", "messages_t2.json"} {
 		var env struct {
@@ -109,10 +119,44 @@ func (f *nylasFake) messages(t *testing.T) []nylasMessage {
 		}
 		all = append(all, env.Data...)
 	}
-	if f.google {
+	if google {
 		all = append(all, googleMessages...)
 	}
 	return all
+}
+
+// serveGrants answers GET /v3/grants: the configured list paged by limit and
+// offset, or the fixture.
+func (f *nylasFake) serveGrants(t *testing.T, w http.ResponseWriter, q url.Values) {
+	grants := f.grants
+	if grants == nil {
+		var env struct {
+			Data []nylasGrant `json:"data"`
+		}
+		if err := json.Unmarshal(nylasFixture(t, "grants.json"), &env); err != nil {
+			t.Fatal(err)
+		}
+		grants = env.Data
+	}
+	if _, paged := q["offset"]; !paged {
+		// The grant-mode lookup by address: one unpaged page, as the fixture.
+		writeJSON(w, 200, nylasFixture(t, "grants.json"))
+		return
+	}
+	limit, offset := 10, 0
+	fmt.Sscan(q.Get("limit"), &limit)
+	fmt.Sscan(q.Get("offset"), &offset)
+	if f.pageCap > 0 && limit > f.pageCap {
+		limit = f.pageCap
+	}
+	if f.ignoreOffset {
+		offset = 0
+	}
+	page := []nylasGrant{}
+	for i := offset; i < len(grants) && i < offset+limit; i++ {
+		page = append(page, grants[i])
+	}
+	writeJSON(w, 200, map[string]any{"request_id": "req-grants", "data": page, "limit": limit, "offset": offset})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -158,18 +202,74 @@ func (f *nylasFake) serve(t *testing.T) http.HandlerFunc {
 			writeJSON(w, http.StatusUnauthorized, nylasFixture(t, "error_unauthorized.json"))
 			return
 		}
+		// Application-level resources and the pass-through probes.
+		switch r.URL.Path {
+		case "/v3/connectors":
+			if req.Query.Get("offset") != "" && req.Query.Get("offset") != "0" {
+				writeJSON(w, 200, map[string]any{"request_id": "x", "data": []any{}})
+				return
+			}
+			writeJSON(w, 200, nylasFixture(t, "connectors.json"))
+			return
+		case "/v3/webhooks":
+			writeJSON(w, 200, nylasFixture(t, "webhooks.json"))
+			return
+		case "/v3/workspaces", "/v3/applications":
+			if r.Method == http.MethodGet {
+				writeJSON(w, 200, map[string]any{"request_id": "x", "data": []any{map[string]any{"id": "probe", "path": r.URL.Path, "query": r.URL.RawQuery}}})
+			} else {
+				writeJSON(w, 200, map[string]any{"request_id": "x", "data": map[string]any{"method": r.Method, "body": req.Body}})
+			}
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/v3/domains/") {
+			// Transactional send: must never be reached through api_request.
+			writeJSON(w, 200, map[string]any{"request_id": "x", "data": map[string]any{"sent": "transactional"}})
+			return
+		}
+		if !strings.HasPrefix(r.URL.Path, "/v3/grants") {
+			t.Errorf("fake Nylas: unexpected %s %s", r.Method, r.URL.String())
+			writeJSON(w, 404, nylasFixture(t, "error_not_found.json"))
+			return
+		}
 		p := strings.TrimPrefix(r.URL.Path, "/v3/grants")
 		switch {
 		case p == "" && r.Method == http.MethodGet:
-			writeJSON(w, 200, nylasFixture(t, "grants.json"))
+			f.serveGrants(t, w, req.Query)
+			return
 		case p == "/grant-1" && r.Method == http.MethodGet:
 			body := strings.Replace(string(nylasFixture(t, "grant.json")), `"provider":"imap"`, `"provider":"`+f.provider+`"`, 1)
 			writeJSON(w, 200, []byte(body))
+			return
+		case p == "/grant-2" && r.Method == http.MethodGet:
+			writeJSON(w, 200, nylasFixture(t, "grant_google.json"))
+			return
 		case p == "/grant-bad" && r.Method == http.MethodGet:
 			writeJSON(w, 200, map[string]any{"request_id": "x", "data": map[string]any{"id": "grant-bad", "grant_status": "invalid", "provider": "imap", "email": "jane@example.com"}})
-		case p == "/grant-1/folders" && r.Method == http.MethodGet:
+			return
+		case (p == "/grant-1" || p == "/grant-2" || p == "/grant-old") && r.Method == http.MethodDelete:
+			f.mu.Lock()
+			f.deleted = append(f.deleted, strings.TrimPrefix(p, "/"))
+			f.mu.Unlock()
+			writeJSON(w, 200, map[string]any{"request_id": "req-grant-delete"})
+			return
+		}
+
+		// Mailbox resources: /v3/grants/{gid}/… for the two grants the fake
+		// serves. grant-2 is Google-shaped throughout; grant-1 only when
+		// the fake plays Google.
+		gid, rest, _ := strings.Cut(strings.TrimPrefix(p, "/"), "/")
+		rest = "/" + rest
+		if gid != "grant-1" && gid != "grant-2" {
+			t.Errorf("fake Nylas: unexpected %s %s", r.Method, r.URL.String())
+			writeJSON(w, 404, nylasFixture(t, "error_not_found.json"))
+			return
+		}
+		google := f.google || gid == "grant-2"
+		switch {
+		case rest == "/folders" && r.Method == http.MethodGet:
 			name := "folders.json"
-			if f.google {
+			if google {
 				name = "folders_google.json"
 			}
 			if f.noArchive {
@@ -188,21 +288,21 @@ func (f *nylasFake) serve(t *testing.T) http.HandlerFunc {
 				return
 			}
 			writeJSON(w, 200, nylasFixture(t, name))
-		case p == "/grant-1/folders" && r.Method == http.MethodPost:
+		case rest == "/folders" && r.Method == http.MethodPost:
 			writeJSON(w, 200, nylasFixture(t, "folder_created.json"))
-		case p == "/grant-1/threads" && r.Method == http.MethodGet:
+		case rest == "/threads" && r.Method == http.MethodGet:
 			writeJSON(w, 200, nylasFixture(t, "threads.json"))
-		case p == "/grant-1/messages" && r.Method == http.MethodGet:
+		case rest == "/messages" && r.Method == http.MethodGet:
 			var msgs []nylasMessage
 			switch tid := req.Query.Get("thread_id"); {
 			case tid != "":
-				for _, m := range f.messages(t) {
+				for _, m := range f.messages(t, google) {
 					if m.ThreadID == tid {
 						msgs = append(msgs, m)
 					}
 				}
 			case req.Query.Get("search_query_native") != "":
-				msgs = f.messages(t)
+				msgs = f.messages(t, google)
 			}
 			if in := req.Query.Get("in"); in != "" {
 				var filtered []nylasMessage
@@ -220,15 +320,15 @@ func (f *nylasFake) serve(t *testing.T) http.HandlerFunc {
 				msgs = []nylasMessage{}
 			}
 			writeJSON(w, 200, map[string]any{"request_id": "x", "data": msgs})
-		case strings.HasPrefix(p, "/grant-1/messages/send") && r.Method == http.MethodPost:
+		case strings.HasPrefix(rest, "/messages/send") && r.Method == http.MethodPost:
 			if f.answerSend(t, w) {
 				return
 			}
 			writeJSON(w, 200, nylasFixture(t, "message_sent.json"))
-		case strings.HasPrefix(p, "/grant-1/messages/"):
-			id, _ := url.PathUnescape(strings.TrimPrefix(p, "/grant-1/messages/"))
+		case strings.HasPrefix(rest, "/messages/"):
+			id, _ := url.PathUnescape(strings.TrimPrefix(rest, "/messages/"))
 			var found *nylasMessage
-			for _, m := range f.messages(t) {
+			for _, m := range f.messages(t, google) {
 				if m.ID == id {
 					mm := m
 					found = &mm
@@ -244,34 +344,38 @@ func (f *nylasFake) serve(t *testing.T) http.HandlerFunc {
 			case http.MethodDelete:
 				writeJSON(w, 200, map[string]any{"request_id": "x"})
 			}
-		case strings.HasPrefix(p, "/grant-1/attachments/"):
-			rest := strings.TrimPrefix(p, "/grant-1/attachments/")
+		case strings.HasPrefix(rest, "/attachments/"):
+			att := strings.TrimPrefix(rest, "/attachments/")
 			if req.Query.Get("message_id") == "" {
 				writeJSON(w, 400, map[string]any{"request_id": "x", "error": map[string]any{"type": "api.invalid_request_error", "message": "message_id is required"}})
 				return
 			}
-			if strings.HasSuffix(rest, "/download") {
+			if strings.HasSuffix(att, "/download") {
 				w.Header().Set("Content-Type", "application/octet-stream")
 				w.WriteHeader(200)
 				w.Write([]byte("hello"))
 				return
 			}
-			meta := map[string]any{"id": rest, "grant_id": "grant-1", "filename": "report.pdf", "content_type": "application/pdf", "size": 5, "is_inline": false}
+			meta := map[string]any{"id": att, "grant_id": gid, "filename": "report.pdf", "content_type": "application/pdf", "size": 5, "is_inline": false}
 			if f.bigAttachment {
 				meta["size"] = nylasInlineAttachment + 1
 			}
 			writeJSON(w, 200, map[string]any{"request_id": "x", "data": meta})
-		case p == "/grant-1/drafts" && r.Method == http.MethodPost:
+		case rest == "/drafts" && r.Method == http.MethodPost:
 			writeJSON(w, 200, nylasFixture(t, "draft_created.json"))
-		case p == "/grant-1/drafts/draft-404" && r.Method == http.MethodPost:
+		case rest == "/drafts/draft-404" && r.Method == http.MethodPost:
 			writeJSON(w, 404, nylasFixture(t, "error_not_found.json"))
-		case strings.HasPrefix(p, "/grant-1/drafts/") && r.Method == http.MethodPost:
+		case strings.HasPrefix(rest, "/drafts/") && r.Method == http.MethodPost:
 			if f.answerSend(t, w) {
 				return
 			}
 			writeJSON(w, 200, nylasFixture(t, "message_sent.json"))
-		case strings.HasPrefix(p, "/grant-1/drafts/") && r.Method == http.MethodDelete:
+		case strings.HasPrefix(rest, "/drafts/") && (r.Method == http.MethodDelete || r.Method == http.MethodPut):
 			writeJSON(w, 200, map[string]any{"request_id": "x"})
+		case strings.HasPrefix(rest, "/events"):
+			// Calendar writes reached through api_request: echoed, so a test
+			// sees what passed the gate.
+			writeJSON(w, 200, map[string]any{"request_id": "x", "data": map[string]any{"method": r.Method, "path": r.URL.Path, "query": r.URL.RawQuery}})
 		default:
 			t.Errorf("fake Nylas: unexpected %s %s", r.Method, r.URL.String())
 			writeJSON(w, 404, nylasFixture(t, "error_not_found.json"))
@@ -280,13 +384,19 @@ func (f *nylasFake) serve(t *testing.T) http.HandlerFunc {
 }
 
 // newTestNylas builds a connection against the fake. grantID "" with a user
-// exercises the lookup by address.
+// exercises the lookup by address; both empty is application mode.
 func newTestNylas(t *testing.T, f *nylasFake, grantID, user string, allowSend bool) *Nylas {
 	t.Helper()
-	ny, err := NewNylas(config.Connection{
+	return newTestNylasConn(t, f, config.Connection{
 		Name: "mail", Type: config.TypeNylas, Token: "test-key", Region: "eu",
 		GrantID: grantID, User: user, FromName: "Jane Doe", AllowSend: allowSend,
-	}, nil)
+	})
+}
+
+// newTestNylasConn builds a connection from a full config against the fake.
+func newTestNylasConn(t *testing.T, f *nylasFake, conn config.Connection) *Nylas {
+	t.Helper()
+	ny, err := NewNylas(conn, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -754,7 +864,11 @@ func TestNylas_Drafts(t *testing.T) {
 	big := newTestNylas(t, f, "grant-1", "", false)
 	_ = big
 	msg := nylasMessage{ID: "m-x", Attachments: []nylasAttachment{{ID: "a", Filename: "big.bin", Size: nylasForwardAttachmentsMax + 1}}}
-	if _, err := ny.downloadAttachments(ctx, msg); err == nil || !strings.Contains(err.Error(), "include_attachments=false") {
+	mb, err := ny.boundMailbox(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ny.downloadAttachments(ctx, mb, msg); err == nil || !strings.Contains(err.Error(), "include_attachments=false") {
 		t.Errorf("oversized attachments: %v", err)
 	}
 }
@@ -778,8 +892,18 @@ func TestNylas_SendTools(t *testing.T) {
 	if got := strings.Join(names(ny), " "); !strings.Contains(got, "send_draft") || !strings.Contains(got, "reply_send") || !strings.Contains(got, "forward_send") {
 		t.Errorf("send tools missing with allow_send: %s", got)
 	}
-	if got := strings.Join(nylasSendToolNames("mail"), " "); got != "mail_send_draft mail_reply_send mail_forward_send" {
-		t.Errorf("nylasSendToolNames = %q", got)
+	// Every tool whose presence depends on the configuration is on the list
+	// that is removed before a re-registration; the reading tools are not.
+	conditional := strings.Join(nylasConditionalToolNames("mail"), " ")
+	for _, want := range []string{"mail_send_draft", "mail_reply_send", "mail_forward_send", "mail_archive_conversation", "mail_delete_conversation", "mail_move_conversation", "mail_create_reply_draft", "mail_create_forward_draft", "mail_get_grant", "mail_delete_grant", "mail_list_connectors", "mail_list_webhooks", "mail_api_get", "mail_api_request"} {
+		if !strings.Contains(conditional, want) {
+			t.Errorf("nylasConditionalToolNames lacks %s: %q", want, conditional)
+		}
+	}
+	for _, never := range []string{"mail_list_conversations", "mail_get_conversation", "mail_search_messages", "mail_list_mailboxes", "mail_list_attachments", "mail_get_attachment"} {
+		if strings.Contains(conditional, never) {
+			t.Errorf("nylasConditionalToolNames lists the always-present %s", never)
+		}
 	}
 	for _, td := range ny.sendTools() {
 		if !strings.HasSuffix(td.Tool.Description, nylasSentMeansDone) {
@@ -1058,8 +1182,15 @@ func TestNylas_Config(t *testing.T) {
 	if _, err := NewNylas(config.Connection{Name: "n", Type: config.TypeNylas, GrantID: "g"}, nil); err == nil || !strings.Contains(err.Error(), "token") {
 		t.Errorf("without token: %v", err)
 	}
-	if _, err := NewNylas(config.Connection{Name: "n", Type: config.TypeNylas, Token: "k"}, nil); err == nil || !strings.Contains(err.Error(), "grant_id") {
-		t.Errorf("without grant or user: %v", err)
+	// Neither grant nor user: application mode, not an error.
+	if app, err := NewNylas(config.Connection{Name: "n", Type: config.TypeNylas, Token: "k"}, nil); err != nil || !app.ApplicationMode() {
+		t.Errorf("without grant or user: %v, application mode %v", err, app != nil && app.ApplicationMode())
+	}
+	if ny, err := NewNylas(config.Connection{Name: "n", Type: config.TypeNylas, Token: "k", User: "jane@example.com"}, nil); err != nil || ny.ApplicationMode() {
+		t.Errorf("with user only: %v, application mode %v", err, ny != nil && ny.ApplicationMode())
+	}
+	if _, err := NewNylas(config.Connection{Name: "n", Type: config.TypeNylas, Token: "k", ReadOnly: true, AllowSend: true}, nil); err == nil || !strings.Contains(err.Error(), "contradict") {
+		t.Errorf("read_only with allow_send: %v", err)
 	}
 	if _, err := NewNylas(config.Connection{Name: "n", Type: config.TypeNylas, Token: "k", GrantID: "g", Region: "mars"}, nil); err == nil || !strings.Contains(err.Error(), "region") {
 		t.Errorf("bad region: %v", err)
@@ -1074,8 +1205,18 @@ func TestNylas_Config(t *testing.T) {
 	if got := DefaultInstructions(config.Connection{Type: config.TypeNylas, AllowSend: true}); !strings.Contains(got, "ball") || !strings.Contains(got, "Sending is enabled") {
 		t.Errorf("instructions with sending: %q", got)
 	}
-	if got := DefaultInstructions(config.Connection{Type: config.TypeNylas}); strings.Contains(got, "Sending is enabled") {
-		t.Errorf("instructions without sending mention sending")
+	if got := DefaultInstructions(config.Connection{Type: config.TypeNylas, GrantID: "g"}); strings.Contains(got, "Sending is enabled") || strings.Contains(got, "every mailbox") || strings.Contains(got, "Read-only") {
+		t.Errorf("instructions of a plain grant connection: %q", got)
+	}
+	if got := DefaultInstructions(config.Connection{Type: config.TypeNylas, GrantID: "g", ReadOnly: true}); !strings.Contains(got, "Read-only connection") || strings.Contains(got, "every mailbox") {
+		t.Errorf("instructions of a read-only grant connection: %q", got)
+	}
+	if got := DefaultInstructions(config.Connection{Type: config.TypeNylas, Token: "k", AllowSend: true}); !strings.Contains(got, "every mailbox (grant)") || !strings.Contains(got, "delete_grant") || !strings.Contains(got, "Sending is enabled") {
+		t.Errorf("application-mode instructions: %q", got)
+	}
+	// Read-only application mode advertises no tool it does not have.
+	if got := DefaultInstructions(config.Connection{Type: config.TypeNylas, Token: "k", ReadOnly: true}); !strings.Contains(got, "every mailbox (grant)") || strings.Contains(got, "delete_grant") || strings.Contains(got, "api_request") || !strings.Contains(got, "Read-only connection") {
+		t.Errorf("read-only application-mode instructions: %q", got)
 	}
 }
 
@@ -1099,8 +1240,12 @@ func TestConnectionAddNylas(t *testing.T) {
 	if text, isErr := add(map[string]any{"name": "n0", "type": config.TypeNylas, "smtp_host": "smtp.x"}); !isErr || !strings.Contains(text, "smtp_host applies to type") {
 		t.Errorf("smtp_host on nylas: %q", text)
 	}
-	if text, isErr := add(map[string]any{"name": "n1", "type": config.TypeNylas}); !isErr || !strings.Contains(text, "grant_id") {
+	// Neither grant_id nor user: application mode.
+	if text, isErr := add(map[string]any{"name": "n1", "type": config.TypeNylas}); isErr {
 		t.Errorf("nylas without grant or user: %q", text)
+	}
+	if text, isErr := add(map[string]any{"name": "n1b", "type": config.TypeNylas, "read_only": true, "allow_send": true}); !isErr || !strings.Contains(text, "contradict") {
+		t.Errorf("read_only with allow_send: %q", text)
 	}
 	if text, isErr := add(map[string]any{"name": "n2", "type": config.TypeNylas, "user": "not-an-address"}); !isErr || !strings.Contains(text, "mailbox address") {
 		t.Errorf("nylas with a user that is no address: %q", text)
@@ -1128,7 +1273,7 @@ func TestConnectionAddNylas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text := resultText(t, res); !strings.Contains(text, `"grant_id": "g-1"`) || !strings.Contains(text, `"region": "eu"`) {
+	if text := resultText(t, res); !strings.Contains(text, `"grant_id": "g-1"`) || !strings.Contains(text, `"region": "eu"`) || !strings.Contains(text, `"mode": "application"`) || !strings.Contains(text, `"mode": "grant"`) {
 		t.Errorf("connection_list lacks the nylas fields: %s", text)
 	}
 }

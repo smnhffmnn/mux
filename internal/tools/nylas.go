@@ -22,11 +22,12 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/smnhffmnn/mux/internal/config"
 )
 
-// The nylas connection type puts a mailbox behind the Nylas REST API v3 under
+// The nylas connection type puts mailboxes behind the Nylas REST API v3 under
 // mux' mail vocabulary: an agent sees the tools it knows from imap and
 // microsoft-graph (list_conversations, get_conversation, create_reply_draft,
 // send_draft …) whether the mailbox is Gmail, Microsoft 365 or plain IMAP.
@@ -37,19 +38,37 @@ import (
 // message, so every conversation says whether the other side wrote last
 // (ball: "me", a reply is due) or this account did (ball: "them").
 //
+// A connection runs in one of two modes, decided by its configuration:
+//
+//   - Grant mode (grant_id set, or user set to the mailbox address): one
+//     mailbox, a key bound to its grant. The tools act on that mailbox.
+//   - Application mode (neither set): the key is the application's key, or an
+//     IAM key bound to the application, and serves every grant. The mail
+//     tools take the mailbox as an argument (address or grant id; the only
+//     valid grant is the default), list_mailboxes lists the grants, and the
+//     administration tools (get_grant, delete_grant, list_connectors,
+//     list_webhooks, api_get, api_request) exist only here.
+//
+// Per-mailbox state — the account's own address, the provider, the folder
+// cache — lives in a nylasMailbox; every handler resolves its mailbox first.
+//
 // The contract is the versioned REST API, not Nylas' hosted MCP server: the
 // endpoints, parameters and fields the type relies on are listed in
 // nylasEndpoints and nylasSchemaFields below and checked against Nylas'
 // published OpenAPI document by nylas_spec_test.go (vendored snapshot under
-// testdata, live document in the drift workflow).
+// testdata, live document in the drift workflow). The one path beside the
+// registry is the pass-through pair api_get/api_request, confined to /v3/.
 
 const (
 	nylasThreadPage         = 50               // Nylas caps thread pages at 50
 	nylasMessagePage        = 200              // and message pages at 200
+	nylasGrantPage          = 100              // grants are listed in pages of this size (offset paging)
 	nylasMaxBody            = 16 << 20         // largest JSON response read
 	nylasRequestTimeout     = 90 * time.Second // Nylas' own per-request limit; query_imap=true live reads can take most of it
 	nylasInlineAttachment   = 1 << 20          // attachments up to this size are returned inline (base64)
 	nylasFolderCacheTTL     = 5 * time.Minute  // folder ids are stable per grant; the cache saves a round trip per call
+	nylasGrantCacheTTL      = 5 * time.Minute  // application mode: the grant list changes rarely; list_mailboxes reads it fresh
+	nylasAPIInlineMax       = 1024 * 1024      // raw api_get/api_request responses are inlined up to this size
 	nylasDefaultListLimit   = 20
 	nylasDefaultSearchLimit = 25
 	nylasGrantStatusValid   = "valid"
@@ -65,31 +84,86 @@ IMAP-backed accounts: Nylas keeps a rolling 90-day cache, and conversations and 
 archive/delete/move act on the conversation's messages in the inbox (or source_folder); delete moves to Trash. On Gmail, archive removes the INBOX label and move swaps labels; other labels stay.
 Draft creation saves to the mailbox's Drafts folder and returns a draft_id — it does NOT send.`
 
+// NylasApplicationInstructions are appended in application mode, where the
+// connection serves every grant of the Nylas application.
+const NylasApplicationInstructions = `This connection serves every mailbox (grant) of the Nylas application. list_mailboxes without mailbox lists them — address, provider, status, grant id; the mail tools take mailbox (address or grant id), optional only while the application has exactly one valid grant. Each mailbox has its own address, ball position and folders; message and conversation ids belong to the mailbox they came from.
+get_grant, list_connectors, list_webhooks and api_get read the application's administration.`
+
+// NylasApplicationWriteInstructions follow NylasApplicationInstructions on
+// connections that are not read-only.
+const NylasApplicationWriteInstructions = `delete_grant disconnects a mailbox from Nylas for good; api_request sends raw writes to /v3/… — the message sends are refused there (the send tools are the way), and without allow_send so are the calendar writes that mail participants.`
+
+// NylasReadOnlyInstructions are appended on read-only connections.
+const NylasReadOnlyInstructions = `Read-only connection: reading and searching only — no archive, delete or move, no drafts, no sending.`
+
 // NylasSendInstructions are appended to DefaultNylasInstructions when the
 // connection may send (allow_send).
 const NylasSendInstructions = `Sending is enabled: send_draft sends a draft by its draft_id; reply_send and forward_send compose and send in one step.
 Sent mail cannot be recalled. sent=true means Nylas accepted the message — never send it again, even when warnings follow.`
 
-// Nylas wraps a mailbox behind the Nylas API as MCP tools.
+// NylasInstructions composes the default instructions of a connection from
+// its configuration: the mail vocabulary, then the mode and the gates.
+func NylasInstructions(conn config.Connection) string {
+	parts := []string{DefaultNylasInstructions}
+	if config.NylasApplicationMode(conn) {
+		parts = append(parts, NylasApplicationInstructions)
+		if !conn.ReadOnly {
+			parts = append(parts, NylasApplicationWriteInstructions)
+		}
+	}
+	switch {
+	case conn.ReadOnly:
+		parts = append(parts, NylasReadOnlyInstructions)
+	case conn.SendEnabled():
+		parts = append(parts, NylasSendInstructions)
+	}
+	return strings.Join(parts, "\n")
+}
+
+// Nylas wraps mailboxes behind the Nylas API as MCP tools.
 type Nylas struct {
 	name      string
 	baseURL   string // https://api.{region}.nylas.com
 	token     string
 	fromName  string // display name in the From header of drafts and sent mail
 	allowSend bool
+	readOnly  bool
 	client    *http.Client
 
-	// mu guards the lazily resolved grant (id, address, provider) and the
-	// folder cache. Both come from the API on first use and change rarely.
+	// appMode is application mode: the key serves every grant of the
+	// application. In grant mode grantID or email (the configured user,
+	// lower-case) names the one mailbox the connection serves.
+	appMode bool
+	grantID string
+	email   string
+
+	// mu guards the lazily resolved mailboxes and the grant list. Both come
+	// from the API on first use and change rarely. bound is the one mailbox
+	// of grant mode; mailboxes holds the per-grant state of application mode
+	// by grant id; grants is the application's grant list with its age.
 	mu        sync.Mutex
-	grantID   string
-	email     string // the account's own address, lower-case
-	provider  string // imap, google, microsoft, … as Nylas names them
-	folders   []nylasFolder
-	foldersAt time.Time
+	bound     *nylasMailbox
+	mailboxes map[string]*nylasMailbox
+	grants    []nylasGrant
+	grantsAt  time.Time
+	grantsGen uint64 // bumped by forgetGrant; a list fetched before the bump is not stored
 
 	// now is swappable for tests.
 	now func() time.Time
+}
+
+// nylasMailbox is the per-grant state every tool call starts from: the grant,
+// the account's own address (it drives fromMe, the reply recipients and the
+// From header), the provider (search syntax, label arithmetic) and the folder
+// cache. The identity fields are set once; the folder cache is guarded by
+// Nylas.mu.
+type nylasMailbox struct {
+	grantID  string
+	email    string // lower-case
+	provider string // imap, google, microsoft, … as Nylas names them
+
+	folders   []nylasFolder
+	foldersAt time.Time
 }
 
 // NewNylas creates a Nylas connection from config.
@@ -112,9 +186,12 @@ func NewNylas(conn config.Connection, dialer Dialer) (*Nylas, error) {
 		token:     conn.Token,
 		fromName:  strings.TrimSpace(conn.FromName),
 		allowSend: conn.SendEnabled(),
+		readOnly:  conn.ReadOnly,
 		client:    &http.Client{Transport: transport, Timeout: nylasRequestTimeout},
+		appMode:   config.NylasApplicationMode(conn),
 		grantID:   strings.TrimSpace(conn.GrantID),
 		email:     strings.ToLower(strings.TrimSpace(conn.User)),
+		mailboxes: map[string]*nylasMailbox{},
 		now:       time.Now,
 	}, nil
 }
@@ -122,6 +199,12 @@ func NewNylas(conn config.Connection, dialer Dialer) (*Nylas, error) {
 // SendEnabled reports whether the connection registers its send tools.
 func (n *Nylas) SendEnabled() bool {
 	return n.allowSend
+}
+
+// ApplicationMode reports whether the connection serves every grant of the
+// application rather than one mailbox.
+func (n *Nylas) ApplicationMode() bool {
+	return n.appMode
 }
 
 // --- Endpoint registry ---
@@ -140,10 +223,16 @@ type nylasEndpoint struct {
 
 // nylasEndpoints is the complete list of REST calls the type can make through
 // call. Handlers address entries by key; call refuses anything that is not
-// listed, so the spec test sees every path the type can send.
+// listed, so the spec test sees every path the type can send. The
+// pass-through (api_get/api_request) is the one path beside it: the caller
+// supplies the path, nylasAPIPath confines it to /v3/, and there is nothing
+// to resolve against the spec.
 var nylasEndpoints = map[string]nylasEndpoint{
-	"grants":              {Method: http.MethodGet, Path: "/v3/grants", Params: []string{"email", "limit"}},
-	"grant":               {Method: http.MethodGet, Path: "/v3/grants/{grantId}"},
+	"grants":              {Method: http.MethodGet, Path: "/v3/grants", Params: []string{"email", "limit", "offset"}},
+	"grant":               {Method: http.MethodGet, Path: "/v3/grants/{grantId}", Params: []string{"expose_aliases"}},
+	"grant.delete":        {Method: http.MethodDelete, Path: "/v3/grants/{grantId}"},
+	"connectors":          {Method: http.MethodGet, Path: "/v3/connectors", Params: []string{"limit", "offset"}},
+	"webhooks":            {Method: http.MethodGet, Path: "/v3/webhooks"},
 	"folders":             {Method: http.MethodGet, Path: "/v3/grants/{grant_id}/folders", Params: []string{"limit", "page_token"}},
 	"folders.create":      {Method: http.MethodPost, Path: "/v3/grants/{grant_id}/folders"},
 	"threads":             {Method: http.MethodGet, Path: "/v3/grants/{grant_id}/threads", Params: []string{"in", "limit", "page_token", "unread", "search_query_native"}},
@@ -162,7 +251,9 @@ var nylasEndpoints = map[string]nylasEndpoint{
 // nylasSchemaFields lists, per OpenAPI component schema, the properties the
 // type decodes. It is the field table of the contract: the spec test checks
 // every name against the schema, so a property Nylas removes or renames fails
-// a test before it fails a user.
+// a test before it fails a user. (The webhook list is described inline in
+// the document, not as a component schema; list_webhooks passes it through
+// as is.)
 var nylasSchemaFields = map[string][]string{
 	"thread":                {"id", "subject", "snippet", "participants", "message_ids", "draft_ids", "folders", "unread", "starred", "has_attachments", "has_drafts", "earliest_message_date", "latest_message_received_date", "latest_message_sent_date", "latest_draft_or_message"},
 	"message":               {"id", "thread_id", "subject", "snippet", "body", "from", "to", "cc", "bcc", "reply_to", "date", "folders", "unread", "starred", "attachments", "in_reply_to", "grant_id"},
@@ -170,6 +261,8 @@ var nylasSchemaFields = map[string][]string{
 	"attachment":            {"id", "filename", "content_type", "size", "is_inline", "content_id", "grant_id"},
 	"draft":                 {"id", "thread_id", "subject", "to", "cc", "folders"},
 	"message_send_response": {"id", "thread_id", "subject", "to", "cc", "date"},
+	"GrantObject":           {"id", "email", "name", "provider", "grant_status", "blocked", "scope", "email_aliases", "settings", "created_at", "updated_at"},
+	"ConnectorObject":       {"provider", "name", "scope", "settings", "active_credential_id"},
 }
 
 // --- HTTP ---
@@ -381,11 +474,31 @@ type nylasAddress struct {
 	Email string `json:"email"`
 }
 
+// nylasGrant is a connected mailbox as the grants API describes it. The
+// identity fields serve every mode; the rest is what get_grant and the
+// mailbox list report.
 type nylasGrant struct {
-	ID          string `json:"id"`
-	Email       string `json:"email"`
-	Provider    string `json:"provider"`
-	GrantStatus string `json:"grant_status"`
+	ID           string          `json:"id"`
+	Email        string          `json:"email"`
+	Name         string          `json:"name"`
+	Provider     string          `json:"provider"`
+	GrantStatus  string          `json:"grant_status"`
+	Blocked      bool            `json:"blocked"`
+	Scope        []string        `json:"scope"`
+	EmailAliases []string        `json:"email_aliases"`
+	Settings     json.RawMessage `json:"settings"`
+	CreatedAt    int64           `json:"created_at"`
+	UpdatedAt    int64           `json:"updated_at"`
+}
+
+// nylasConnector is a provider configuration of the application (one per
+// provider): how Nylas authenticates mailboxes of that provider.
+type nylasConnector struct {
+	Provider           string          `json:"provider"`
+	Name               string          `json:"name"`
+	Scope              []string        `json:"scope"`
+	Settings           json.RawMessage `json:"settings"`
+	ActiveCredentialID string          `json:"active_credential_id"`
 }
 
 type nylasFolder struct {
@@ -514,215 +627,484 @@ type nylasAttachmentInfo struct {
 	IsInline    bool   `json:"isInline"`
 }
 
+// nylasMailboxInfo is a grant as list_mailboxes and get_grant report it.
+type nylasMailboxInfo struct {
+	ID           string          `json:"id"`
+	Email        string          `json:"email"`
+	Name         string          `json:"name,omitempty"`
+	Provider     string          `json:"provider"`
+	GrantStatus  string          `json:"grantStatus"`
+	Blocked      bool            `json:"blocked,omitempty"`
+	Scope        []string        `json:"scope,omitempty"`
+	EmailAliases []string        `json:"emailAliases,omitempty"`
+	Settings     json.RawMessage `json:"settings,omitempty"`
+	CreatedAt    string          `json:"createdAt,omitempty"`
+	UpdatedAt    string          `json:"updatedAt,omitempty"`
+}
+
+func nylasMailboxInfoOf(g nylasGrant, full bool) nylasMailboxInfo {
+	info := nylasMailboxInfo{
+		ID:          g.ID,
+		Email:       g.Email,
+		Name:        g.Name,
+		Provider:    g.Provider,
+		GrantStatus: g.GrantStatus,
+		Blocked:     g.Blocked,
+		CreatedAt:   nylasTime(g.CreatedAt),
+		UpdatedAt:   nylasTime(g.UpdatedAt),
+	}
+	if full {
+		info.Scope = g.Scope
+		info.EmailAliases = g.EmailAliases
+		if len(bytes.TrimSpace(g.Settings)) > 0 && string(bytes.TrimSpace(g.Settings)) != "null" {
+			info.Settings = g.Settings
+		}
+	}
+	return info
+}
+
 // --- Tools ---
 
-// Tools returns the MCP tools for this Nylas connection. The send tools are
-// registered only when the connection may send.
-func (n *Nylas) Tools() []ToolDef {
-	tools := []ToolDef{
-		{
-			Tool: mcp.NewTool("list_conversations",
-				mcp.WithDescription("List conversations (Nylas threads) of a folder in Nylas' order (newest first; not guaranteed on Gmail), with this account's own replies included. Each conversation carries ball (\"me\": the other side wrote last, a reply is due; \"them\": this account wrote last) and lastFromMe. latestMessage.id is a message id unless latestMessage.isDraft is set. Returns {folder, conversations, nextPageToken}; pass nextPageToken as page_token to continue, an empty token is the last page."),
-				mcp.WithNumber("limit", mcp.Description("Max conversations per page (default: 20, max: 50)")),
-				mcp.WithString("page_token", mcp.Description("nextPageToken of the previous page")),
-				mcp.WithString("folder", mcp.Description("Folder name or id (default: the inbox); see list_mailboxes")),
-				mcp.WithBoolean("unread", mcp.Description("Only conversations with unread messages (default: all)")),
-			),
-			Handler: n.handleListConversations,
-		},
-		{
-			Tool: mcp.NewTool("get_conversation",
-				mcp.WithDescription("Get all messages of a conversation across folders (Sent included) with full body text, oldest first. Each message has the id the reply, forward and attachment tools take as message_id."),
-				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID (thread id)")),
-			),
-			Handler: n.handleGetConversation,
-		},
-		{
-			Tool: mcp.NewTool("search_messages",
-				mcp.WithDescription("Search conversations. The query is plain text: on IMAP-backed accounts mux wraps it in IMAP SEARCH (TEXT \"…\") unless native is set; Gmail and Microsoft accounts take their own search syntax as is. Results are conversations as in list_conversations, with ball. Only with live=true (IMAP server search beyond Nylas' cache) the result is the matching messages grouped by thread, marked scope: \"matches\" and without ball."),
-				mcp.WithString("query", mcp.Required(), mcp.Description("Search text (or provider-native query with native=true)")),
-				mcp.WithNumber("limit", mcp.Description("Max conversations to return (default: 25)")),
-				mcp.WithString("folder", mcp.Description("Folder name or id to search in (default: the inbox when live is set, else all folders)")),
-				mcp.WithBoolean("live", mcp.Description("IMAP-backed accounts: ask the IMAP server directly instead of Nylas' 90-day cache (slow, one folder at a time; default: false)")),
-				mcp.WithBoolean("native", mcp.Description("Pass query to the provider verbatim (IMAP SEARCH, Gmail or Microsoft syntax) instead of plain-text matching (default: false)")),
-			),
-			Handler: n.handleSearchMessages,
-		},
-		{
-			Tool: mcp.NewTool("list_mailboxes",
-				mcp.WithDescription("List all folders (labels) with their message and unread counts."),
-			),
-			Handler: n.handleListMailboxes,
-		},
-		{
-			Tool: mcp.NewTool("archive_conversation",
-				mcp.WithDescription("Archive a conversation: move its inbox messages to the Archive folder (Gmail: remove the INBOX label; other providers without an Archive folder: move to Trash — the result names the folder)."),
-				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
-			),
-			Handler: n.handleArchiveConversation,
-		},
-		{
-			Tool: mcp.NewTool("delete_conversation",
-				mcp.WithDescription("Delete a conversation: move its inbox messages to Trash (not permanent)."),
-				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
-			),
-			Handler: n.handleDeleteConversation,
-		},
-		{
-			Tool: mcp.NewTool("move_conversation",
-				mcp.WithDescription("Move the messages of a conversation from one folder to another (default source: the inbox; on Gmail the source label is swapped for the target label, other labels stay). Use it to file mail or to bring it back from Trash."),
-				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
-				mcp.WithString("folder", mcp.Required(), mcp.Description("Target folder name or id")),
-				mcp.WithString("source_folder", mcp.Description("Folder to move from, name or id (default: the inbox)")),
-				mcp.WithBoolean("create", mcp.Description("Create the target folder when it does not exist (default: false)")),
-			),
-			Handler: n.handleMoveConversation,
-		},
-		{
-			Tool: mcp.NewTool("list_attachments",
-				mcp.WithDescription("List the attachments of a message: id, file name, content type, size, inline flag."),
-				mcp.WithString("message_id", mcp.Required(), mcp.Description("Message ID (from get_conversation or latestMessage.id)")),
-			),
-			Handler: n.handleListAttachments,
-		},
-		{
-			Tool: mcp.NewTool("get_attachment",
-				mcp.WithDescription("Download an attachment. With output_file the content is written to that path (absolute, must not exist); without it, attachments up to 1 MiB are returned base64-encoded (contentBytes)."),
-				mcp.WithString("message_id", mcp.Required(), mcp.Description("Message ID")),
-				mcp.WithString("attachment_id", mcp.Required(), mcp.Description("Attachment ID from list_attachments or get_conversation")),
-				mcp.WithString("output_file", mcp.Description("Absolute path to save the attachment to instead of returning it inline")),
-			),
-			Handler: n.handleGetAttachment,
-		},
-		{
-			Tool: mcp.NewTool("create_reply_draft",
-				mcp.WithDescription("Create a reply draft to a message of a conversation (default: the latest). Saved to Drafts, does NOT send. The reply goes to the message's Reply-To (its sender when it has none) and is threaded on it. Returns draft_id."),
-				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
-				mcp.WithString("body", mcp.Required(), mcp.Description("Reply text (plain text)")),
-				mcp.WithBoolean("reply_all", mcp.Description("Also address everyone else on the message's To and Cc, except this account (default: false)")),
-				mcp.WithString("message_id", mcp.Description(nylasMessageIDDescription+" (default: the latest message of the conversation)")),
-			),
-			Handler: n.handleCreateReplyDraft,
-		},
-		{
-			Tool: mcp.NewTool("create_forward_draft",
-				mcp.WithDescription("Create a forward draft of a message of a conversation (default: the latest). Saved to Drafts, does NOT send. The message's attachments (up to 3 MB in total) are downloaded and attached unless include_attachments is false. Returns draft_id."),
-				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
-				mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address(es), comma-separated for multiple")),
-				mcp.WithString("body", mcp.Description("Optional comment to include above the forwarded message")),
-				mcp.WithString("message_id", mcp.Description(nylasMessageIDDescription+" (default: the latest message of the conversation)")),
-				mcp.WithBoolean("include_attachments", mcp.Description("Forward the message's attachments (default: true)")),
-			),
-			Handler: n.handleCreateForwardDraft,
-		},
+// nylasMailboxArg documents the mailbox argument the mail tools take in
+// application mode.
+const nylasMailboxArg = "Mailbox to act on: its address or grant id (list_mailboxes without mailbox lists them). Optional only while the application has exactly one valid grant."
+
+// mailTool builds a tool definition; in application mode every mail tool
+// takes the mailbox it acts on.
+func (n *Nylas) mailTool(name string, handler server.ToolHandlerFunc, opts ...mcp.ToolOption) ToolDef {
+	if n.appMode {
+		opts = append(opts, mcp.WithString("mailbox", mcp.Description(nylasMailboxArg)))
 	}
+	return ToolDef{Tool: mcp.NewTool(name, opts...), Handler: handler}
+}
+
+// Tools returns the MCP tools for this Nylas connection. The reading tools
+// are always present; the tools that change a mailbox (archive, delete,
+// move, drafts) only on connections that are not read-only; the send tools
+// only when the connection may send; the administration tools only in
+// application mode (the writing ones again only when not read-only).
+func (n *Nylas) Tools() []ToolDef {
+	listMailboxesDesc := "List all folders (labels) with their message and unread counts."
+	if n.appMode {
+		listMailboxesDesc = "Without mailbox: the mailboxes (grants) of the application — address, provider, grant status, id. With mailbox: that mailbox's folders (labels) with their message and unread counts."
+	}
+	tools := []ToolDef{
+		n.mailTool("list_conversations", n.handleListConversations,
+			mcp.WithDescription("List conversations (Nylas threads) of a folder in Nylas' order (newest first; not guaranteed on Gmail), with this account's own replies included. Each conversation carries ball (\"me\": the other side wrote last, a reply is due; \"them\": this account wrote last) and lastFromMe. latestMessage.id is a message id unless latestMessage.isDraft is set. Returns {folder, conversations, nextPageToken}; pass nextPageToken as page_token to continue, an empty token is the last page."),
+			mcp.WithNumber("limit", mcp.Description("Max conversations per page (default: 20, max: 50)")),
+			mcp.WithString("page_token", mcp.Description("nextPageToken of the previous page")),
+			mcp.WithString("folder", mcp.Description("Folder name or id (default: the inbox); see list_mailboxes")),
+			mcp.WithBoolean("unread", mcp.Description("Only conversations with unread messages (default: all)")),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		n.mailTool("get_conversation", n.handleGetConversation,
+			mcp.WithDescription("Get all messages of a conversation across folders (Sent included) with full body text, oldest first. Each message has the id the reply, forward and attachment tools take as message_id."),
+			mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID (thread id)")),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		n.mailTool("search_messages", n.handleSearchMessages,
+			mcp.WithDescription("Search conversations. The query is plain text: on IMAP-backed accounts mux wraps it in IMAP SEARCH (TEXT \"…\") unless native is set; Gmail and Microsoft accounts take their own search syntax as is. Results are conversations as in list_conversations, with ball. Only with live=true (IMAP server search beyond Nylas' cache) the result is the matching messages grouped by thread, marked scope: \"matches\" and without ball."),
+			mcp.WithString("query", mcp.Required(), mcp.Description("Search text (or provider-native query with native=true)")),
+			mcp.WithNumber("limit", mcp.Description("Max conversations to return (default: 25)")),
+			mcp.WithString("folder", mcp.Description("Folder name or id to search in (default: the inbox when live is set, else all folders)")),
+			mcp.WithBoolean("live", mcp.Description("IMAP-backed accounts: ask the IMAP server directly instead of Nylas' 90-day cache (slow, one folder at a time; default: false)")),
+			mcp.WithBoolean("native", mcp.Description("Pass query to the provider verbatim (IMAP SEARCH, Gmail or Microsoft syntax) instead of plain-text matching (default: false)")),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		n.mailTool("list_mailboxes", n.handleListMailboxes,
+			mcp.WithDescription(listMailboxesDesc),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		n.mailTool("list_attachments", n.handleListAttachments,
+			mcp.WithDescription("List the attachments of a message: id, file name, content type, size, inline flag."),
+			mcp.WithString("message_id", mcp.Required(), mcp.Description("Message ID (from get_conversation or latestMessage.id)")),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		n.mailTool("get_attachment", n.handleGetAttachment,
+			mcp.WithDescription("Download an attachment. With output_file the content is written to that path (absolute, must not exist); without it, attachments up to 1 MiB are returned base64-encoded (contentBytes)."),
+			mcp.WithString("message_id", mcp.Required(), mcp.Description("Message ID")),
+			mcp.WithString("attachment_id", mcp.Required(), mcp.Description("Attachment ID from list_attachments or get_conversation")),
+			mcp.WithString("output_file", mcp.Description("Absolute path to save the attachment to instead of returning it inline")),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+	}
+	if n.appMode {
+		tools = append(tools, n.adminReadTools()...)
+	}
+	if n.readOnly {
+		return tools
+	}
+	tools = append(tools,
+		n.mailTool("archive_conversation", n.handleArchiveConversation,
+			mcp.WithDescription("Archive a conversation: move its inbox messages to the Archive folder (Gmail: remove the INBOX label; other providers without an Archive folder: move to Trash — the result names the folder)."),
+			mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
+		),
+		n.mailTool("delete_conversation", n.handleDeleteConversation,
+			mcp.WithDescription("Delete a conversation: move its inbox messages to Trash (not permanent)."),
+			mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
+		),
+		n.mailTool("move_conversation", n.handleMoveConversation,
+			mcp.WithDescription("Move the messages of a conversation from one folder to another (default source: the inbox; on Gmail the source label is swapped for the target label, other labels stay). Use it to file mail or to bring it back from Trash."),
+			mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
+			mcp.WithString("folder", mcp.Required(), mcp.Description("Target folder name or id")),
+			mcp.WithString("source_folder", mcp.Description("Folder to move from, name or id (default: the inbox)")),
+			mcp.WithBoolean("create", mcp.Description("Create the target folder when it does not exist (default: false)")),
+		),
+		n.mailTool("create_reply_draft", n.handleCreateReplyDraft,
+			mcp.WithDescription("Create a reply draft to a message of a conversation (default: the latest). Saved to Drafts, does NOT send. The reply goes to the message's Reply-To (its sender when it has none) and is threaded on it. Returns draft_id."),
+			mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
+			mcp.WithString("body", mcp.Required(), mcp.Description("Reply text (plain text)")),
+			mcp.WithBoolean("reply_all", mcp.Description("Also address everyone else on the message's To and Cc, except this account (default: false)")),
+			mcp.WithString("message_id", mcp.Description(nylasMessageIDDescription+" (default: the latest message of the conversation)")),
+		),
+		n.mailTool("create_forward_draft", n.handleCreateForwardDraft,
+			mcp.WithDescription("Create a forward draft of a message of a conversation (default: the latest). Saved to Drafts, does NOT send. The message's attachments (up to 3 MB in total) are downloaded and attached unless include_attachments is false. Returns draft_id."),
+			mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
+			mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address(es), comma-separated for multiple")),
+			mcp.WithString("body", mcp.Description("Optional comment to include above the forwarded message")),
+			mcp.WithString("message_id", mcp.Description(nylasMessageIDDescription+" (default: the latest message of the conversation)")),
+			mcp.WithBoolean("include_attachments", mcp.Description("Forward the message's attachments (default: true)")),
+		),
+	)
 	if n.allowSend {
 		tools = append(tools, n.sendTools()...)
 	}
+	if n.appMode {
+		tools = append(tools, n.adminWriteTools()...)
+	}
 	return tools
+}
+
+// nylasConditionalToolNames are the registered names of every tool whose
+// presence depends on the configuration — the send tools, the tools that
+// change a mailbox, the administration tools. They are removed before every
+// registration, so switching allow_send off, read_only on or the mode takes
+// effect without a restart, also where the caller kept no list of the names.
+func nylasConditionalToolNames(connName string) []string {
+	always := map[string]bool{}
+	for _, td := range (&Nylas{readOnly: true}).Tools() {
+		always[td.Tool.Name] = true
+	}
+	var names []string
+	for _, td := range (&Nylas{appMode: true, allowSend: true}).Tools() {
+		if !always[td.Tool.Name] {
+			names = append(names, config.SanitizeToolName(connName+"_"+td.Tool.Name))
+		}
+	}
+	return names
 }
 
 // nylasMessageIDDescription documents the message_id argument of the reply
 // and forward tools.
 const nylasMessageIDDescription = "ID of the message to act on, from list_conversations (latestMessage.id) or get_conversation"
 
-// --- Grant ---
+// --- Grants and mailboxes ---
 
-// nylasVerifyInfo is what Verify learned about the mailbox.
-type nylasVerifyInfo struct {
-	GrantID  string
-	Email    string
-	Provider string
-	Folders  int
+// NylasVerifyInfo is what Verify learned: the mailbox in grant mode, the
+// application's grants in application mode.
+type NylasVerifyInfo struct {
+	Application bool
+	Grants      []nylasGrant // application mode: every grant of the application
+	GrantID     string       // grant mode
+	Email       string
+	Provider    string
+	Folders     int
 }
 
-// Verify resolves the grant and lists the folders — the connection test's way
-// to exercise exactly the auth and the two calls every tool starts with. A
-// key for the wrong region, an expired key or a revoked grant shows up here
-// and not on the first use.
-func (n *Nylas) Verify(ctx context.Context) (nylasVerifyInfo, error) {
-	if err := n.ensureGrant(ctx); err != nil {
-		return nylasVerifyInfo{}, err
+// Verify exercises exactly the auth and the calls every tool starts with —
+// the connection test's way to report a key for the wrong region, an expired
+// key or a revoked grant here and not on the first use. Grant mode resolves
+// the grant and lists the folders; application mode lists the grants.
+func (n *Nylas) Verify(ctx context.Context) (NylasVerifyInfo, error) {
+	if n.appMode {
+		grants, err := n.listGrants(ctx, true)
+		if err != nil {
+			return NylasVerifyInfo{}, err
+		}
+		return NylasVerifyInfo{Application: true, Grants: grants}, nil
 	}
-	folders, err := n.listFolders(ctx, true)
+	mb, err := n.boundMailbox(ctx)
 	if err != nil {
-		return nylasVerifyInfo{}, err
+		return NylasVerifyInfo{}, err
 	}
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return nylasVerifyInfo{GrantID: n.grantID, Email: n.email, Provider: n.provider, Folders: len(folders)}, nil
+	folders, err := n.listFolders(ctx, mb, true)
+	if err != nil {
+		return NylasVerifyInfo{}, err
+	}
+	return NylasVerifyInfo{GrantID: mb.grantID, Email: mb.email, Provider: mb.provider, Folders: len(folders)}, nil
 }
 
-// ensureGrant resolves the grant once: by id when configured, else by the
-// mailbox address through the grants list. It also fills in the account's own
-// address and provider, which the reply logic and the search syntax need. A
-// grant Nylas reports as anything but valid is an error — its tools would
-// fail one by one otherwise.
-func (n *Nylas) ensureGrant(ctx context.Context) error {
+// mailbox resolves the mailbox a tool call acts on. Grant mode: the one
+// mailbox the connection serves, resolved on first use — a mailbox argument
+// naming another is refused rather than ignored. Application mode: the grant
+// the mailbox argument names by id or address; without the argument, the
+// application's only valid grant.
+func (n *Nylas) mailbox(ctx context.Context, req mcp.CallToolRequest) (*nylasMailbox, error) {
+	ref := strings.TrimSpace(req.GetString("mailbox", ""))
+	if !n.appMode {
+		mb, err := n.boundMailbox(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if ref != "" && ref != mb.grantID && !strings.EqualFold(ref, mb.email) {
+			return nil, fmt.Errorf("this connection serves one mailbox (%s); mailbox %q is not it", mb.email, ref)
+		}
+		return mb, nil
+	}
+	g, err := n.findGrant(ctx, ref, true)
+	if err != nil {
+		return nil, err
+	}
+	if g.GrantStatus != "" && g.GrantStatus != nylasGrantStatusValid {
+		return nil, fmt.Errorf("grant %s (%s) is %s — reconnect the mailbox in the Nylas Dashboard", g.ID, g.Email, g.GrantStatus)
+	}
+	return n.mailboxOf(*g), nil
+}
+
+// boundMailbox resolves the one mailbox of grant mode once: by id when
+// configured, else by the mailbox address through the grants list. It also
+// fills in the account's own address and provider, which the reply logic and
+// the search syntax need. A grant Nylas reports as anything but valid is an
+// error — its tools would fail one by one otherwise.
+func (n *Nylas) boundMailbox(ctx context.Context) (*nylasMailbox, error) {
 	n.mu.Lock()
-	grantID, email, provider := n.grantID, n.email, n.provider
+	mb := n.bound
 	n.mu.Unlock()
-	if grantID != "" && email != "" && provider != "" {
-		return nil
+	if mb != nil {
+		return mb, nil
 	}
 
 	var g nylasGrant
-	if grantID == "" {
+	if n.grantID == "" {
 		q := url.Values{}
-		q.Set("email", email)
+		q.Set("email", n.email)
 		q.Set("limit", "50")
 		var grants []nylasGrant
 		if _, err := n.callJSON(ctx, "grants", nil, q, nil, &grants); err != nil {
-			return fmt.Errorf("look up the grant of %s: %w", email, err)
+			return nil, fmt.Errorf("look up the grant of %s: %w", n.email, err)
 		}
 		for _, cand := range grants {
-			if strings.EqualFold(cand.Email, email) && (g.ID == "" || cand.GrantStatus == nylasGrantStatusValid) {
+			if strings.EqualFold(cand.Email, n.email) && (g.ID == "" || cand.GrantStatus == nylasGrantStatusValid) {
 				g = cand
 			}
 		}
 		if g.ID == "" {
-			return fmt.Errorf("no Nylas grant for %s in this application and region — connect the mailbox in the Nylas Dashboard, or set grant_id", email)
+			return nil, fmt.Errorf("no Nylas grant for %s in this application and region — connect the mailbox in the Nylas Dashboard, or set grant_id", n.email)
 		}
 	} else {
-		if _, err := n.callJSON(ctx, "grant", map[string]string{"grantId": grantID}, nil, nil, &g); err != nil {
-			return fmt.Errorf("read grant %s: %w", grantID, err)
+		if _, err := n.callJSON(ctx, "grant", map[string]string{"grantId": n.grantID}, nil, nil, &g); err != nil {
+			return nil, fmt.Errorf("read grant %s: %w", n.grantID, err)
 		}
 	}
 	if g.GrantStatus != "" && g.GrantStatus != nylasGrantStatusValid {
-		return fmt.Errorf("grant %s (%s) is %s — reconnect the mailbox in the Nylas Dashboard", g.ID, g.Email, g.GrantStatus)
+		return nil, fmt.Errorf("grant %s (%s) is %s — reconnect the mailbox in the Nylas Dashboard", g.ID, g.Email, g.GrantStatus)
 	}
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.grantID = g.ID
+	if n.bound != nil { // resolved concurrently
+		return n.bound, nil
+	}
+	email := n.email
 	grantEmail := strings.ToLower(strings.TrimSpace(g.Email))
-	if n.email == "" {
-		n.email = grantEmail
-	} else if grantEmail != "" && n.email != grantEmail {
+	if email == "" {
+		email = grantEmail
+	} else if grantEmail != "" && email != grantEmail {
 		// The configured address wins (it may be an alias Nylas does not
 		// report), but a mismatch is worth a line in the log: it drives
 		// fromMe, the reply recipients and the From header.
-		log.Printf("[nylas] %s: configured address %s differs from the grant's %s", n.name, n.email, grantEmail)
+		log.Printf("[nylas] %s: configured address %s differs from the grant's %s", n.name, email, grantEmail)
 	}
-	n.provider = g.Provider
+	n.bound = &nylasMailbox{grantID: g.ID, email: email, provider: g.Provider}
 	log.Printf("[nylas] %s: grant %s (%s)", n.name, g.ID, g.Provider)
-	return nil
+	return n.bound, nil
+}
+
+// listGrants returns the application's grants (application mode), from the
+// cache unless force is set or the cache is older than nylasGrantCacheTTL.
+// Paged by offset, as the grants endpoint pages.
+func (n *Nylas) listGrants(ctx context.Context, force bool) ([]nylasGrant, error) {
+	n.mu.Lock()
+	if !force && n.grants != nil && n.now().Sub(n.grantsAt) < nylasGrantCacheTTL {
+		grants := n.grants
+		n.mu.Unlock()
+		return grants, nil
+	}
+	gen := n.grantsGen
+	n.mu.Unlock()
+
+	// Offset advances by what came back, and a page without a new grant
+	// ends the loop: the document gives limit no maximum, so a server cap
+	// below the page size must not skip grants, and a server that ignored
+	// the offset must not fill the list with repeats.
+	all := []nylasGrant{}
+	seen := map[string]bool{}
+	for page, offset := 0, 0; page < 20; page++ {
+		q := url.Values{}
+		q.Set("limit", fmt.Sprint(nylasGrantPage))
+		q.Set("offset", fmt.Sprint(offset))
+		var grants []nylasGrant
+		if _, err := n.callJSON(ctx, "grants", nil, q, nil, &grants); err != nil {
+			return nil, fmt.Errorf("list the application's grants: %w", err)
+		}
+		added := 0
+		for _, g := range grants {
+			if !seen[g.ID] {
+				seen[g.ID] = true
+				all = append(all, g)
+				added++
+			}
+		}
+		if added == 0 {
+			break
+		}
+		offset += len(grants)
+	}
+	n.mu.Lock()
+	if n.grantsGen == gen { // a grant deleted meanwhile would be back in the cache otherwise
+		n.grants = all
+		n.grantsAt = n.now()
+	}
+	n.mu.Unlock()
+	return all, nil
+}
+
+// findGrant picks a grant of the application by id or address (application
+// mode). An empty ref is the application's only valid grant; with several,
+// the error lists them. The cached list is refreshed once when it does not
+// know the ref, when it has no usable grant for an empty ref, or — with
+// needValid — when the grant it names is not valid: a mailbox connected or
+// reconnected a minute ago must not wait for the cache to expire. The status
+// is judged by the caller: get_grant works on invalid grants too.
+func (n *Nylas) findGrant(ctx context.Context, ref string, needValid bool) (*nylasGrant, error) {
+	grants, err := n.listGrants(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	g, err := pickNylasGrant(grants, ref)
+	if err != nil {
+		return nil, err
+	}
+	if g != nil && (!needValid || g.GrantStatus == "" || g.GrantStatus == nylasGrantStatusValid) {
+		return g, nil
+	}
+	if grants, err = n.listGrants(ctx, true); err != nil {
+		return nil, err
+	}
+	fresh, err := pickNylasGrant(grants, ref)
+	switch {
+	case err != nil:
+		return nil, err
+	case fresh != nil:
+		return fresh, nil
+	case g != nil:
+		return g, nil // still there, still not valid: the caller says so
+	case ref != "":
+		return nil, fmt.Errorf("no grant %q in this application — list_mailboxes shows the mailboxes (address, provider, status, id)", ref)
+	case len(grants) == 0:
+		return nil, fmt.Errorf("the application has no grants — connect a mailbox in the Nylas Dashboard")
+	}
+	return nil, fmt.Errorf("none of the application's %d grants is valid — reconnect a mailbox in the Nylas Dashboard; list_mailboxes shows them", len(grants))
+}
+
+// pickNylasGrant applies the mailbox rules to a grant list: by id, else by
+// address (a valid grant wins over an invalid one with the same address; two
+// valid ones need the id), else — without ref — the only valid grant. A nil
+// grant with a nil error means "nothing usable in this list"; only an
+// ambiguity is an error here, the rest is findGrant's after its refresh.
+func pickNylasGrant(grants []nylasGrant, ref string) (*nylasGrant, error) {
+	if ref == "" {
+		var valid []nylasGrant
+		for _, g := range grants {
+			if g.GrantStatus == nylasGrantStatusValid {
+				valid = append(valid, g)
+			}
+		}
+		switch {
+		case len(valid) == 1:
+			return &valid[0], nil
+		case len(valid) == 0:
+			return nil, nil
+		}
+		return nil, fmt.Errorf("pass mailbox: the application has %d valid grants — %s", len(valid), nylasGrantSummary(valid))
+	}
+	for i := range grants {
+		if grants[i].ID == ref {
+			return &grants[i], nil
+		}
+	}
+	var same, valid []*nylasGrant
+	for i := range grants {
+		if strings.EqualFold(strings.TrimSpace(grants[i].Email), ref) {
+			same = append(same, &grants[i])
+			if grants[i].GrantStatus == nylasGrantStatusValid {
+				valid = append(valid, &grants[i])
+			}
+		}
+	}
+	switch {
+	case len(valid) > 1:
+		ids := make([]string, 0, len(valid))
+		for _, g := range valid {
+			ids = append(ids, g.ID+" ("+g.Provider+")")
+		}
+		return nil, fmt.Errorf("%d valid grants carry the address %s — pass the grant id: %s", len(valid), ref, strings.Join(ids, ", "))
+	case len(valid) == 1:
+		return valid[0], nil
+	case len(same) > 0:
+		return same[0], nil
+	}
+	return nil, nil
+}
+
+// nylasGrantSummary renders grants for an error message: address, provider
+// and id, the first few.
+func nylasGrantSummary(grants []nylasGrant) string {
+	parts := make([]string, 0, len(grants))
+	for i, g := range grants {
+		if i == 8 {
+			parts = append(parts, fmt.Sprintf("… %d more", len(grants)-i))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s (%s, %s)", g.Email, g.Provider, g.ID))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// mailboxOf returns the per-grant state of a grant, created on first use.
+func (n *Nylas) mailboxOf(g nylasGrant) *nylasMailbox {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if mb, ok := n.mailboxes[g.ID]; ok {
+		return mb
+	}
+	mb := &nylasMailbox{grantID: g.ID, email: strings.ToLower(strings.TrimSpace(g.Email)), provider: g.Provider}
+	n.mailboxes[g.ID] = mb
+	return mb
+}
+
+// forgetGrant drops a grant from the caches after it was deleted.
+func (n *Nylas) forgetGrant(grantID string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	delete(n.mailboxes, grantID)
+	n.grants = nil
+	n.grantsGen++
 }
 
 // multiLabel reports whether the provider keeps a message in several folders
 // at once (Gmail labels). There, folders are a set to edit, not a location to
 // replace.
-func (n *Nylas) multiLabel() bool {
-	_, _, provider := n.grant()
-	return provider == "google"
+func (mb *nylasMailbox) multiLabel() bool {
+	return mb.provider == "google"
 }
 
 // newFolders computes the folder list a message gets when it leaves remove
 // and enters add. On single-folder providers that is just the target; on
 // Gmail the other labels stay. An empty add on Gmail removes the label only
 // (archiving: the message stays in All Mail).
-func (n *Nylas) newFolders(m nylasMessage, remove, add string) []string {
-	if !n.multiLabel() {
+func (mb *nylasMailbox) newFolders(m nylasMessage, remove, add string) []string {
+	if !mb.multiLabel() {
 		if add == "" {
 			return nil
 		}
@@ -743,39 +1125,30 @@ func (n *Nylas) newFolders(m nylasMessage, remove, add string) []string {
 	return out
 }
 
-// grant returns the resolved grant id and the account's address.
-func (n *Nylas) grant() (grantID, email, provider string) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.grantID, n.email, n.provider
-}
-
-// isMe reports whether an address is this account's own.
-func (n *Nylas) isMe(addr string) bool {
-	_, me, _ := n.grant()
-	return me != "" && strings.EqualFold(strings.TrimSpace(addr), me)
+// isMe reports whether an address is the mailbox's own.
+func (mb *nylasMailbox) isMe(addr string) bool {
+	return mb.email != "" && strings.EqualFold(strings.TrimSpace(addr), mb.email)
 }
 
 // --- Folders ---
 
-// listFolders returns the grant's folders, from the cache unless force is set
-// or the cache is older than nylasFolderCacheTTL.
-func (n *Nylas) listFolders(ctx context.Context, force bool) ([]nylasFolder, error) {
+// listFolders returns the mailbox's folders, from the cache unless force is
+// set or the cache is older than nylasFolderCacheTTL.
+func (n *Nylas) listFolders(ctx context.Context, mb *nylasMailbox, force bool) ([]nylasFolder, error) {
 	n.mu.Lock()
-	if !force && n.folders != nil && n.now().Sub(n.foldersAt) < nylasFolderCacheTTL {
-		folders := n.folders
+	if !force && mb.folders != nil && n.now().Sub(mb.foldersAt) < nylasFolderCacheTTL {
+		folders := mb.folders
 		n.mu.Unlock()
 		return folders, nil
 	}
 	n.mu.Unlock()
 
-	grantID, _, _ := n.grant()
 	var all []nylasFolder
 	q := url.Values{}
 	q.Set("limit", "200")
 	for page := 0; page < 20; page++ {
 		var folders []nylasFolder
-		env, err := n.callJSON(ctx, "folders", map[string]string{"grant_id": grantID}, q, nil, &folders)
+		env, err := n.callJSON(ctx, "folders", map[string]string{"grant_id": mb.grantID}, q, nil, &folders)
 		if err != nil {
 			return nil, fmt.Errorf("list folders: %w", err)
 		}
@@ -786,10 +1159,18 @@ func (n *Nylas) listFolders(ctx context.Context, force bool) ([]nylasFolder, err
 		q.Set("page_token", env.NextCursor)
 	}
 	n.mu.Lock()
-	n.folders = all
-	n.foldersAt = n.now()
+	mb.folders = all
+	mb.foldersAt = n.now()
 	n.mu.Unlock()
 	return all, nil
+}
+
+// forgetFolders drops the folder cache of a mailbox (after a folder was
+// created: the cache no longer knows every folder).
+func (n *Nylas) forgetFolders(mb *nylasMailbox) {
+	n.mu.Lock()
+	mb.folders = nil
+	n.mu.Unlock()
 }
 
 // nylasFolderByAttribute finds the folder carrying a special-use attribute
@@ -921,7 +1302,7 @@ func nylasDistinctReplyTo(m nylasMessage) []string {
 	return rt
 }
 
-func (n *Nylas) messageBrief(m *nylasMessage) nylasMessageBrief {
+func (mb *nylasMailbox) messageBrief(m *nylasMessage) nylasMessageBrief {
 	if m == nil {
 		return nylasMessageBrief{}
 	}
@@ -937,7 +1318,7 @@ func (n *Nylas) messageBrief(m *nylasMessage) nylasMessageBrief {
 	if len(m.From) > 0 {
 		b.Sender = m.From[0].Email
 		b.SenderName = m.From[0].Name
-		b.FromMe = n.isMe(m.From[0].Email)
+		b.FromMe = mb.isMe(m.From[0].Email)
 	}
 	if b.To == nil {
 		b.To = []string{}
@@ -945,7 +1326,7 @@ func (n *Nylas) messageBrief(m *nylasMessage) nylasMessageBrief {
 	return b
 }
 
-func (n *Nylas) messageFull(m nylasMessage, folders []nylasFolder) nylasMessageFull {
+func (mb *nylasMailbox) messageFull(m nylasMessage, folders []nylasFolder) nylasMessageFull {
 	f := nylasMessageFull{
 		ID:        m.ID,
 		ReplyTo:   nylasDistinctReplyTo(m),
@@ -961,7 +1342,7 @@ func (n *Nylas) messageFull(m nylasMessage, folders []nylasFolder) nylasMessageF
 	if len(m.From) > 0 {
 		f.Sender = m.From[0].Email
 		f.SenderName = m.From[0].Name
-		f.FromMe = n.isMe(m.From[0].Email)
+		f.FromMe = mb.isMe(m.From[0].Email)
 	}
 	if f.To == nil {
 		f.To = []string{}
@@ -976,7 +1357,7 @@ func (n *Nylas) messageFull(m nylasMessage, folders []nylasFolder) nylasMessageF
 // the thread's own dates: Nylas tracks the latest incoming and the latest
 // outgoing message separately. When both fall on the same second, the sender
 // of the latest message decides.
-func (n *Nylas) conversationFromThread(t nylasThread, folders []nylasFolder) nylasConversation {
+func (mb *nylasMailbox) conversationFromThread(t nylasThread, folders []nylasFolder) nylasConversation {
 	latestIsDraft := t.LatestDraftOrMessage != nil && t.LatestDraftOrMessage.Object == "draft"
 	lastFromMe := false
 	switch {
@@ -984,7 +1365,7 @@ func (n *Nylas) conversationFromThread(t nylasThread, folders []nylasFolder) nyl
 		if t.LatestMessageSentDate != t.LatestMessageReceivedDate {
 			lastFromMe = t.LatestMessageSentDate > t.LatestMessageReceivedDate
 		} else if !latestIsDraft && t.LatestDraftOrMessage != nil && len(t.LatestDraftOrMessage.From) > 0 {
-			lastFromMe = n.isMe(t.LatestDraftOrMessage.From[0].Email)
+			lastFromMe = mb.isMe(t.LatestDraftOrMessage.From[0].Email)
 		}
 	case t.LatestMessageSentDate > 0:
 		lastFromMe = true
@@ -1007,7 +1388,7 @@ func (n *Nylas) conversationFromThread(t nylasThread, folders []nylasFolder) nyl
 	sort.Strings(participants)
 
 	subject := t.Subject
-	latest := n.messageBrief(t.LatestDraftOrMessage)
+	latest := mb.messageBrief(t.LatestDraftOrMessage)
 	latest.IsDraft = latestIsDraft
 	if latest.Subject == "" {
 		latest.Subject = subject
@@ -1042,7 +1423,7 @@ func (n *Nylas) conversationFromThread(t nylasThread, folders []nylasFolder) nyl
 // search takes, where Nylas returns the matching messages, not threads. The
 // groups are marked scope "matches" and carry no ball: without the whole
 // thread, who wrote last is unknown.
-func (n *Nylas) conversationsFromMessages(msgs []nylasMessage, folders []nylasFolder, limit int) []nylasConversation {
+func (mb *nylasMailbox) conversationsFromMessages(msgs []nylasMessage, folders []nylasFolder, limit int) []nylasConversation {
 	groups := map[string][]nylasMessage{}
 	var order []string
 	for _, m := range msgs {
@@ -1114,7 +1495,7 @@ func (n *Nylas) conversationsFromMessages(msgs []nylasMessage, folders []nylasFo
 			MessageCount:   len(group),
 			MessageIDs:     ids,
 			Participants:   participants,
-			LatestMessage:  n.messageBrief(&latest),
+			LatestMessage:  mb.messageBrief(&latest),
 			IsRead:         allRead,
 			IsFlagged:      anyFlagged,
 			HasAttachments: anyAttach,
@@ -1198,8 +1579,7 @@ func htmlToText(s string) string {
 
 // threadMessages returns the messages of a thread, oldest first, optionally
 // confined to one folder.
-func (n *Nylas) threadMessages(ctx context.Context, threadID, folderID string) ([]nylasMessage, error) {
-	grantID, _, _ := n.grant()
+func (n *Nylas) threadMessages(ctx context.Context, mb *nylasMailbox, threadID, folderID string) ([]nylasMessage, error) {
 	q := url.Values{}
 	q.Set("thread_id", threadID)
 	q.Set("limit", fmt.Sprint(nylasMessagePage))
@@ -1209,7 +1589,7 @@ func (n *Nylas) threadMessages(ctx context.Context, threadID, folderID string) (
 	var all []nylasMessage
 	for page := 0; page < 10; page++ {
 		var msgs []nylasMessage
-		env, err := n.callJSON(ctx, "messages", map[string]string{"grant_id": grantID}, q, nil, &msgs)
+		env, err := n.callJSON(ctx, "messages", map[string]string{"grant_id": mb.grantID}, q, nil, &msgs)
 		if err != nil {
 			return nil, fmt.Errorf("read conversation %s: %w", threadID, err)
 		}
@@ -1259,10 +1639,11 @@ func pickNylasMessage(msgs []nylasMessage, convID, messageID string) (int, error
 
 func (n *Nylas) handleListConversations(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	limit := limitArg(req, "limit", nylasDefaultListLimit, nylasThreadPage)
-	if err := n.ensureGrant(ctx); err != nil {
+	mb, err := n.mailbox(ctx, req)
+	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	folders, err := n.listFolders(ctx, false)
+	folders, err := n.listFolders(ctx, mb, false)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1275,7 +1656,6 @@ func (n *Nylas) handleListConversations(ctx context.Context, req mcp.CallToolReq
 		return mcp.NewToolResultError("no inbox folder found — list_mailboxes shows the folders"), nil
 	}
 
-	grantID, _, _ := n.grant()
 	q := url.Values{}
 	q.Set("in", folder.ID)
 	q.Set("limit", fmt.Sprint(limit))
@@ -1286,19 +1666,23 @@ func (n *Nylas) handleListConversations(ctx context.Context, req mcp.CallToolReq
 		q.Set("unread", "true")
 	}
 	var threads []nylasThread
-	env, err := n.callJSON(ctx, "threads", map[string]string{"grant_id": grantID}, q, nil, &threads)
+	env, err := n.callJSON(ctx, "threads", map[string]string{"grant_id": mb.grantID}, q, nil, &threads)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	conversations := make([]nylasConversation, 0, len(threads))
 	for _, t := range threads {
-		conversations = append(conversations, n.conversationFromThread(t, folders))
+		conversations = append(conversations, mb.conversationFromThread(t, folders))
 	}
-	return jsonResult(map[string]any{
+	result := map[string]any{
 		"folder":        folder.Name,
 		"conversations": conversations,
 		"nextPageToken": env.NextCursor,
-	})
+	}
+	if n.appMode {
+		result["mailbox"] = mb.email
+	}
+	return jsonResult(result)
 }
 
 func (n *Nylas) handleGetConversation(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1306,14 +1690,15 @@ func (n *Nylas) handleGetConversation(ctx context.Context, req mcp.CallToolReque
 	if convID == "" {
 		return mcp.NewToolResultError("conversation_id is required"), nil
 	}
-	if err := n.ensureGrant(ctx); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	folders, err := n.listFolders(ctx, false)
+	mb, err := n.mailbox(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	msgs, err := n.threadMessages(ctx, convID, "")
+	folders, err := n.listFolders(ctx, mb, false)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	msgs, err := n.threadMessages(ctx, mb, convID, "")
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1322,7 +1707,7 @@ func (n *Nylas) handleGetConversation(ctx context.Context, req mcp.CallToolReque
 	}
 	out := make([]nylasMessageFull, 0, len(msgs))
 	for _, m := range msgs {
-		out = append(out, n.messageFull(m, folders))
+		out = append(out, mb.messageFull(m, folders))
 	}
 	return jsonResult(out)
 }
@@ -1351,17 +1736,17 @@ func (n *Nylas) handleSearchMessages(ctx context.Context, req mcp.CallToolReques
 	limit := limitArg(req, "limit", nylasDefaultSearchLimit, 0)
 	live := req.GetBool("live", false)
 	native := req.GetBool("native", false)
-	if err := n.ensureGrant(ctx); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	folders, err := n.listFolders(ctx, false)
+	mb, err := n.mailbox(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	grantID, _, provider := n.grant()
+	folders, err := n.listFolders(ctx, mb, false)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	q := url.Values{}
-	if nylasIMAPProviders[provider] && !native {
+	if nylasIMAPProviders[mb.provider] && !native {
 		wrapped, err := imapSearchText(query)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -1392,7 +1777,7 @@ func (n *Nylas) handleSearchMessages(ctx context.Context, req mcp.CallToolReques
 		}
 		q.Set("limit", fmt.Sprint(page))
 		var threads []nylasThread
-		if _, err := n.callJSON(ctx, "threads", map[string]string{"grant_id": grantID}, q, nil, &threads); err != nil {
+		if _, err := n.callJSON(ctx, "threads", map[string]string{"grant_id": mb.grantID}, q, nil, &threads); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		conversations := make([]nylasConversation, 0, len(threads))
@@ -1400,30 +1785,47 @@ func (n *Nylas) handleSearchMessages(ctx context.Context, req mcp.CallToolReques
 			if len(conversations) >= limit {
 				break
 			}
-			conversations = append(conversations, n.conversationFromThread(t, folders))
+			conversations = append(conversations, mb.conversationFromThread(t, folders))
 		}
 		return jsonResult(conversations)
 	}
 
 	// Live: the IMAP server searches, Nylas returns the matching messages
 	// (threads have no query_imap). Grouped by thread, marked as matches.
-	if !nylasIMAPProviders[provider] {
-		return mcp.NewToolResultError(fmt.Sprintf("live applies to IMAP-backed accounts; this grant's provider is %s", provider)), nil
+	if !nylasIMAPProviders[mb.provider] {
+		return mcp.NewToolResultError(fmt.Sprintf("live applies to IMAP-backed accounts; this grant's provider is %s", mb.provider)), nil
 	}
 	q.Set("query_imap", "true")
 	q.Set("limit", fmt.Sprint(nylasMessagePage))
 	var msgs []nylasMessage
-	if _, err := n.callJSON(ctx, "messages", map[string]string{"grant_id": grantID}, q, nil, &msgs); err != nil {
+	if _, err := n.callJSON(ctx, "messages", map[string]string{"grant_id": mb.grantID}, q, nil, &msgs); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return jsonResult(n.conversationsFromMessages(msgs, folders, limit))
+	return jsonResult(mb.conversationsFromMessages(msgs, folders, limit))
 }
 
-func (n *Nylas) handleListMailboxes(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := n.ensureGrant(ctx); err != nil {
+// handleListMailboxes lists folders — in application mode without mailbox,
+// the application's grants instead.
+func (n *Nylas) handleListMailboxes(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if n.appMode && strings.TrimSpace(req.GetString("mailbox", "")) == "" {
+		grants, err := n.listGrants(ctx, true)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		mailboxes := make([]nylasMailboxInfo, 0, len(grants))
+		for _, g := range grants {
+			mailboxes = append(mailboxes, nylasMailboxInfoOf(g, false))
+		}
+		return jsonResult(map[string]any{
+			"mailboxes": mailboxes,
+			"note":      "pass mailbox (address or grant id) to list a mailbox's folders",
+		})
+	}
+	mb, err := n.mailbox(ctx, req)
+	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	folders, err := n.listFolders(ctx, true)
+	folders, err := n.listFolders(ctx, mb, true)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1455,16 +1857,15 @@ func (n *Nylas) handleListMailboxes(ctx context.Context, _ mcp.CallToolRequest) 
 // target (see newFolders) and returns how many moved; the first failure stops
 // the loop and is returned with the count so far, because a half-moved
 // conversation must be reported as such.
-func (n *Nylas) moveMessages(ctx context.Context, msgs []nylasMessage, sourceFolderID, targetFolderID string) (int, error) {
-	grantID, _, _ := n.grant()
+func (n *Nylas) moveMessages(ctx context.Context, mb *nylasMailbox, msgs []nylasMessage, sourceFolderID, targetFolderID string) (int, error) {
 	moved := 0
 	for _, m := range msgs {
-		folders := n.newFolders(m, sourceFolderID, targetFolderID)
+		folders := mb.newFolders(m, sourceFolderID, targetFolderID)
 		if folders == nil {
 			return moved, fmt.Errorf("move message %s: no target folder", m.ID)
 		}
 		body := map[string]any{"folders": folders}
-		if _, err := n.callJSON(ctx, "message.update", map[string]string{"grant_id": grantID, "message_id": m.ID}, nil, body, nil); err != nil {
+		if _, err := n.callJSON(ctx, "message.update", map[string]string{"grant_id": mb.grantID, "message_id": m.ID}, nil, body, nil); err != nil {
 			return moved, fmt.Errorf("move message %s: %w", m.ID, err)
 		}
 		moved++
@@ -1477,10 +1878,11 @@ func (n *Nylas) handleArchiveConversation(ctx context.Context, req mcp.CallToolR
 	if convID == "" {
 		return mcp.NewToolResultError("conversation_id is required"), nil
 	}
-	if err := n.ensureGrant(ctx); err != nil {
+	mb, err := n.mailbox(ctx, req)
+	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	folders, err := n.listFolders(ctx, false)
+	folders, err := n.listFolders(ctx, mb, false)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1497,7 +1899,7 @@ func (n *Nylas) handleArchiveConversation(ctx context.Context, req mcp.CallToolR
 	switch {
 	case target != nil:
 		targetID, targetName = target.ID, target.Name
-	case n.multiLabel():
+	case mb.multiLabel():
 		targetName = "" // label removed, nothing added
 	default:
 		trash := trashFolder(folders)
@@ -1506,14 +1908,14 @@ func (n *Nylas) handleArchiveConversation(ctx context.Context, req mcp.CallToolR
 		}
 		targetID, targetName = trash.ID, trash.Name
 	}
-	msgs, err := n.threadMessages(ctx, convID, inbox.ID)
+	msgs, err := n.threadMessages(ctx, mb, convID, inbox.ID)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if len(msgs) == 0 {
 		return mcp.NewToolResultError(fmt.Sprintf("no inbox messages found for conversation %s (wrong id, or already archived)", convID)), nil
 	}
-	moved, err := n.moveMessages(ctx, msgs, inbox.ID, targetID)
+	moved, err := n.moveMessages(ctx, mb, msgs, inbox.ID, targetID)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("%v (%d of %d archived)", err, moved, len(msgs))), nil
 	}
@@ -1529,10 +1931,11 @@ func (n *Nylas) handleDeleteConversation(ctx context.Context, req mcp.CallToolRe
 	if convID == "" {
 		return mcp.NewToolResultError("conversation_id is required"), nil
 	}
-	if err := n.ensureGrant(ctx); err != nil {
+	mb, err := n.mailbox(ctx, req)
+	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	folders, err := n.listFolders(ctx, false)
+	folders, err := n.listFolders(ctx, mb, false)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1540,18 +1943,17 @@ func (n *Nylas) handleDeleteConversation(ctx context.Context, req mcp.CallToolRe
 	if inbox == nil {
 		return mcp.NewToolResultError("no inbox folder found"), nil
 	}
-	msgs, err := n.threadMessages(ctx, convID, inbox.ID)
+	msgs, err := n.threadMessages(ctx, mb, convID, inbox.ID)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if len(msgs) == 0 {
 		return mcp.NewToolResultError(fmt.Sprintf("no inbox messages found for conversation %s (wrong id, or already removed)", convID)), nil
 	}
-	grantID, _, _ := n.grant()
 	deleted := 0
 	for _, m := range msgs {
 		// No hard_delete: Nylas moves the message to the provider's Trash.
-		if _, err := n.callJSON(ctx, "message.delete", map[string]string{"grant_id": grantID, "message_id": m.ID}, nil, nil, nil); err != nil {
+		if _, err := n.callJSON(ctx, "message.delete", map[string]string{"grant_id": mb.grantID, "message_id": m.ID}, nil, nil, nil); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("delete message %s: %v (%d of %d deleted)", m.ID, err, deleted, len(msgs))), nil
 		}
 		deleted++
@@ -1569,10 +1971,11 @@ func (n *Nylas) handleMoveConversation(ctx context.Context, req mcp.CallToolRequ
 	if convID == "" || strings.TrimSpace(target) == "" {
 		return mcp.NewToolResultError("conversation_id and folder are required"), nil
 	}
-	if err := n.ensureGrant(ctx); err != nil {
+	mb, err := n.mailbox(ctx, req)
+	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	folders, err := n.listFolders(ctx, true)
+	folders, err := n.listFolders(ctx, mb, true)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1591,7 +1994,7 @@ func (n *Nylas) handleMoveConversation(ctx context.Context, req mcp.CallToolRequ
 	if dest != nil && dest.ID == source.ID {
 		return mcp.NewToolResultError(fmt.Sprintf("source and target are both %s", dest.Name)), nil
 	}
-	msgs, err := n.threadMessages(ctx, convID, source.ID)
+	msgs, err := n.threadMessages(ctx, mb, convID, source.ID)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1600,17 +2003,14 @@ func (n *Nylas) handleMoveConversation(ctx context.Context, req mcp.CallToolRequ
 	}
 	if dest == nil {
 		// Created only now that there is something to move into it.
-		grantID, _, _ := n.grant()
 		var created nylasFolder
-		if _, err := n.callJSON(ctx, "folders.create", map[string]string{"grant_id": grantID}, nil, map[string]any{"name": strings.TrimSpace(target)}, &created); err != nil {
+		if _, err := n.callJSON(ctx, "folders.create", map[string]string{"grant_id": mb.grantID}, nil, map[string]any{"name": strings.TrimSpace(target)}, &created); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("create folder %q: %v", target, err)), nil
 		}
-		n.mu.Lock()
-		n.folders = nil // the cache no longer knows every folder
-		n.mu.Unlock()
+		n.forgetFolders(mb)
 		dest = &created
 	}
-	moved, err := n.moveMessages(ctx, msgs, source.ID, dest.ID)
+	moved, err := n.moveMessages(ctx, mb, msgs, source.ID, dest.ID)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("%v (%d of %d moved to %s)", err, moved, len(msgs), dest.Name)), nil
 	}
@@ -1622,12 +2022,12 @@ func (n *Nylas) handleListAttachments(ctx context.Context, req mcp.CallToolReque
 	if msgID == "" {
 		return mcp.NewToolResultError("message_id is required"), nil
 	}
-	if err := n.ensureGrant(ctx); err != nil {
+	mb, err := n.mailbox(ctx, req)
+	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	grantID, _, _ := n.grant()
 	var m nylasMessage
-	if _, err := n.callJSON(ctx, "message", map[string]string{"grant_id": grantID, "message_id": msgID}, nil, nil, &m); err != nil {
+	if _, err := n.callJSON(ctx, "message", map[string]string{"grant_id": mb.grantID, "message_id": msgID}, nil, nil, &m); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	out := make([]nylasAttachmentInfo, 0, len(m.Attachments))
@@ -1649,11 +2049,11 @@ func (n *Nylas) handleGetAttachment(ctx context.Context, req mcp.CallToolRequest
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 	}
-	if err := n.ensureGrant(ctx); err != nil {
+	mb, err := n.mailbox(ctx, req)
+	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	grantID, _, _ := n.grant()
-	params := map[string]string{"grant_id": grantID, "attachment_id": attID}
+	params := map[string]string{"grant_id": mb.grantID, "attachment_id": attID}
 	q := url.Values{}
 	q.Set("message_id", msgID)
 
