@@ -60,10 +60,15 @@ type hcSpecSchema struct {
 }
 
 type hcSpecParam struct {
-	Name     string        `json:"name"`
-	In       string        `json:"in"`
-	Required bool          `json:"required"`
-	Schema   *hcSpecSchema `json:"schema"`
+	Name       string        `json:"name"`
+	In         string        `json:"in"`
+	Required   bool          `json:"required"`
+	Deprecated bool          `json:"deprecated"`
+	Schema     *hcSpecSchema `json:"schema"`
+}
+
+func (p hcSpecParam) deprecated() bool {
+	return p.Deprecated || (p.Schema != nil && p.Schema.Deprecated)
 }
 
 type hcSpecOp struct {
@@ -304,7 +309,7 @@ func TestHetznerCloud_SpecEndpoints(t *testing.T) {
 				t.Errorf("%s: query parameter %q is not documented for %s %s (documented: %s)", key, p, ep.Method, ep.Path, strings.Join(hcSpecKeys(documented), ", "))
 				continue
 			}
-			if q.Schema != nil && q.Schema.Deprecated {
+			if q.deprecated() {
 				t.Errorf("%s: query parameter %q is deprecated in the document", key, p)
 			}
 		}
@@ -316,7 +321,7 @@ func TestHetznerCloud_SpecEndpoints(t *testing.T) {
 				pages = true
 				continue
 			}
-			if !registered[name] && !(q.Schema != nil && q.Schema.Deprecated) {
+			if !registered[name] && !q.deprecated() {
 				t.Errorf("%s: %s %s documents the query parameter %q that the registry does not offer", key, ep.Method, ep.Path, name)
 			}
 		}
@@ -598,18 +603,25 @@ func TestHetznerCloud_SpecResponseFields(t *testing.T) {
 		resp := op.responseSchema()
 		switch {
 		case key == "actions.list":
-			must(key, resp, "actions")
+			must(key, resp, "actions.id", "actions.status")
 		case key == "actions.get":
 			must(key, resp, "action.id", "action.command", "action.status", "action.progress", "action.started", "action.finished", "action.resources", "action.error")
 		case key == "pricing":
-			must(key, resp, "pricing.currency", "pricing.server_types.name", "pricing.server_types.prices.location", "pricing.load_balancer_types.prices.location")
+			must(key, resp, "pricing.currency", "pricing.vat_rate", "pricing.server_types.name", "pricing.server_types.prices.location", "pricing.load_balancer_types.prices.location", "pricing.primary_ips.prices.location", "pricing.floating_ips.prices.location")
 		case key == "zone.zonefile":
 			must(key, resp, "zonefile")
 		case strings.HasSuffix(key, ".metrics"):
 			must(key, resp, "metrics.start", "metrics.end", "metrics.step", "metrics.time_series")
 		case key == "network.members":
 			must(key, resp, "members", "meta.pagination.page")
-		case strings.HasSuffix(key, ".list") || strings.HasSuffix(key, ".actions") || strings.HasSuffix(key, ".actions.of"):
+		case strings.HasSuffix(key, ".actions") || strings.HasSuffix(key, ".actions.of"):
+			must(key, resp, "meta.pagination.page", "meta.pagination.per_page", "meta.pagination.next_page", "meta.pagination.last_page", "meta.pagination.total_entries",
+				"actions.id", "actions.command", "actions.status", "actions.progress", "actions.started", "actions.finished", "actions.resources", "actions.error")
+		case key == "rrset.list":
+			must(key, resp, "meta.pagination.page", "meta.pagination.next_page", "rrsets.id", "rrsets.name", "rrsets.type", "rrsets.ttl", "rrsets.records", "rrsets.zone")
+		case key == "rrset.get":
+			must(key, resp, "rrset.id", "rrset.name", "rrset.type", "rrset.ttl", "rrset.records.value", "rrset.records.comment")
+		case strings.HasSuffix(key, ".list"):
 			must(key, resp, "meta.pagination.page", "meta.pagination.per_page", "meta.pagination.next_page", "meta.pagination.last_page", "meta.pagination.total_entries")
 		case strings.Contains(key, ".action."):
 			props := spec.properties(resp)

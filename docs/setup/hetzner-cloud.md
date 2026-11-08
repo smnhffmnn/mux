@@ -13,7 +13,7 @@
 | API Token | The project's token, stored in the Keychain as `{name}-token`. |
 | API URL | `https://api.hetzner.cloud` (default). The host only — mux appends `/v1`. |
 | Allow lifecycle operations (cost money or destroy data: create, resize, rebuild, power off, delete) | Off by default. On, the connection may run what costs money or destroys data or availability: creating servers, volumes, IPs and load balancers, deleting anything, resizing, changing a server's type, rebuilding, hard power cuts, snapshots and backups, converting a backup into a snapshot, importing a zone file. Not together with `read_only`. |
-| Protected resources (optional) | One per line: `name`, `kind:name` or a pattern with `*` (`server:prod-*`, `my-cell-01`, `zone:example.com`). These are never changed, acted on or deleted through this connection, whatever the other switches say; reading them is fine. Kinds: server, image, iso, volume, network, firewall, floating_ip, primary_ip, load_balancer, load_balancer_type, certificate, placement_group, ssh_key, location, server_type, zone. |
+| Protected resources (optional) | One per line: `name`, `kind:name` or a pattern with `*` (`server:prod-*`, `my-cell-01`, `zone:example.com`). These are never changed, acted on or deleted through this connection, whatever the other switches say; reading them is fine. Snapshots and backups have no name — an `image:` entry matches their description. Kinds: server, image, iso, volume, network, firewall, floating_ip, primary_ip, load_balancer, load_balancer_type, certificate, placement_group, ssh_key, location, server_type, zone. |
 
 `read_only = true` (TOML or provisioning) keeps the reading tools only: list, get, actions, metrics, pricing, record sets, zone file, `api_get`.
 

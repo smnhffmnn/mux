@@ -2407,8 +2407,9 @@ func (a *App) testSupabase(conn config.Connection) testResponse {
 }
 
 // testHetznerCloud reads the project the way the tools do — one page of
-// servers and one of zones — so a wrong, revoked or foreign-project token
-// is reported here with the API's message.
+// servers and one of zones — so a wrong or revoked token is reported here
+// with the API's message; a valid token of another project answers with that
+// project's counts, which is how the projects are told apart.
 func (a *App) testHetznerCloud(conn config.Connection) testResponse {
 	if conn.Token == "" {
 		return testResponse{Connection: conn.Name, Connected: false, Message: "API token not configured"}

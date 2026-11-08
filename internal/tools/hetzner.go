@@ -715,10 +715,10 @@ type hcResponse struct {
 // body. A conflict (409: the resource changed during the request, the API
 // asks for a retry and applied nothing) is retried once for every method; a
 // gateway failure (502, 504) and a transport failure are retried once for
-// GET, PUT and DELETE only — a POST creates a resource or starts an action,
-// and the first request may have gone through. A 429 is never retried: the
-// budget refills by one request per second, the error says when it is full
-// again.
+// GET and PUT only — a POST creates a resource or starts an action, a DELETE
+// answers 404 the second time, and the first request may have gone through.
+// A 429 is never retried: the budget refills by one request per second, the
+// error says when it is full again.
 func (h *HetznerCloud) do(ctx context.Context, method, path string, query url.Values, body any) (*hcResponse, error) {
 	var payload []byte
 	if body != nil {
@@ -775,13 +775,16 @@ func (h *HetznerCloud) do(ctx context.Context, method, path string, query url.Va
 	}
 }
 
-// hcIdempotent reports whether a method may be sent twice without a second
-// effect: a GET reads, a PUT sets the same fields again, a DELETE answers
-// 404 the second time. A POST is not — it creates a resource or starts an
-// action, and a lost response does not mean a lost request.
+// hcIdempotent reports whether a method may be sent twice and read the same
+// way: a GET reads, a PUT sets the same fields again. A POST is not — it
+// creates a resource or starts an action, and a lost response does not mean
+// a lost request. A DELETE is not retried either: the second attempt would
+// answer 404 for a delete that went through, and the action of the first
+// answer (servers, load balancers, zones) would be lost — the caller sees the
+// gateway error and reads the resource.
 func hcIdempotent(method string) bool {
 	switch method {
-	case http.MethodGet, http.MethodPut, http.MethodDelete:
+	case http.MethodGet, http.MethodPut:
 		return true
 	}
 	return false
@@ -1006,6 +1009,9 @@ func (h *HetznerCloud) resolve(ctx context.Context, res *hcResource, idOrName st
 		return v, nil, nil
 	}
 	if res.IDParam == "id_or_name" {
+		if err := hcPathValue(v, res.Kind); err != nil {
+			return "", nil, err
+		}
 		return v, nil, nil
 	}
 	q := url.Values{"name": {v}, "per_page": {"2"}}
@@ -1087,11 +1093,27 @@ func (h *HetznerCloud) protect(ctx context.Context, res *hcResource, id string, 
 			}
 			return fmt.Errorf("cannot check the protected_resources guard — reading %s %s failed: %w", res.Kind, id, err)
 		}
-		name = hcName(raw[res.Item])
+		obj = raw[res.Item]
+		if obj == nil {
+			// Fail closed: an answer without the item is not the resource the
+			// guard has to judge.
+			return fmt.Errorf("cannot check the protected_resources guard — reading %s %s answered without a %s", res.Kind, id, res.Item)
+		}
+		name = hcName(obj)
+	}
+	// Snapshots and backups carry no name — their identity is the
+	// description; an image guard matches either.
+	candidates := []string{name}
+	if res.Kind == "image" {
+		if d, _ := obj["description"].(string); d != "" {
+			candidates = append(candidates, d)
+		}
 	}
 	for _, g := range h.guards {
-		if g.Matches(res.Kind, name) {
-			return fmt.Errorf("%s %q is protected on this connection (protected_resources) — mux does not change, act on or delete it", res.Kind, name)
+		for _, c := range candidates {
+			if g.Matches(res.Kind, c) {
+				return fmt.Errorf("%s %q is protected on this connection (protected_resources) — mux does not change, act on or delete it", res.Kind, c)
+			}
 		}
 	}
 	return nil
@@ -1288,6 +1310,20 @@ func hcAPIPath(raw string) (string, error) {
 	return pathPart, nil
 }
 
+// hcHasLifecycleKey reports whether an update body carries one of the
+// resource's UpdateLifecycle keys — compared without regard to case, as a
+// lenient JSON decoder on the server would.
+func hcHasLifecycleKey(res *hcResource, body map[string]any) bool {
+	for _, k := range res.UpdateLifecycle {
+		for bk := range body {
+			if strings.EqualFold(bk, k) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // hcPathValue validates a value that goes into a path segment (a zone, a
 // record set name): no slash, no whitespace or control character, no dot
 // segment — a value that would change the path's shape is refused before
@@ -1355,10 +1391,8 @@ func hcClassify(method, path string, body map[string]any) hcTarget {
 		case http.MethodPut:
 			if res.Update != nil {
 				t.Class, t.Known = hcWrite, true
-				for _, k := range res.UpdateLifecycle {
-					if _, ok := body[k]; ok {
-						t.Class = hcLifecycle
-					}
+				if hcHasLifecycleKey(res, body) {
+					t.Class = hcLifecycle
 				}
 			}
 		case http.MethodDelete:

@@ -299,6 +299,10 @@ func newHCFake(t *testing.T) *hcFake {
 				case "set_records":
 					rs["records"] = body["records"]
 				case "change_ttl":
+					if body["ttl"] == 61.0 {
+						apiErr(w, 422, "invalid_input", "invalid input in field 'ttl'", nil)
+						return
+					}
 					rs["ttl"] = body["ttl"]
 				case "add_records":
 				default:
@@ -602,6 +606,22 @@ func TestHetznerCloud_Guards(t *testing.T) {
 		t.Errorf("records of a protected zone by id: %s", resultText(t, res))
 	}
 
+	// Snapshots and backups have no name: an image guard matches their
+	// description.
+	hi := newTestHetznerCloud(t, f, func(c *config.Connection) { c.AllowLifecycle = true; c.ProtectedResources = []string{"image:night*"} })
+	res, _ = hi.handleDelete(ctx, toolRequest(map[string]any{"resource": "image", "id": "5"}))
+	if !res.IsError || !strings.Contains(resultText(t, res), `image "nightly" is protected`) {
+		t.Errorf("snapshot guarded by description: %s", resultText(t, res))
+	}
+	res, _ = hi.handleUpdate(ctx, toolRequest(map[string]any{"resource": "image", "id": "5", "body": map[string]any{"Type": "snapshot"}}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "is protected") {
+		t.Errorf("snapshot update guarded: %s", resultText(t, res))
+	}
+	res, _ = newTestHetznerCloud(t, f, nil).handleUpdate(ctx, toolRequest(map[string]any{"resource": "image", "id": "5", "body": map[string]any{"Type": "snapshot"}}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "allow_lifecycle") {
+		t.Errorf("lifecycle key matched case-insensitively: %s", resultText(t, res))
+	}
+
 	// Lifecycle allowed: the switch opens the operations, the guard still holds.
 	h3 := newTestHetznerCloud(t, f, func(c *config.Connection) { c.AllowLifecycle = true; c.ProtectedResources = []string{"my-cell-01"} })
 	res, _ = h3.handleDelete(ctx, toolRequest(map[string]any{"resource": "server", "id": "1"}))
@@ -723,6 +743,23 @@ func TestHetznerCloud_RecordsAndZones(t *testing.T) {
 		t.Errorf("records stored = %v", recs)
 	}
 
+	// A TTL outside the range is refused before anything is written; a
+	// change_ttl that fails after the records were replaced is reported next
+	// to the set_records action, as an error result.
+	before := f.count(http.MethodPost, "/v1/zones/example.com/rrsets/www/A/actions/set_records")
+	res, _ = h.handleSetRecords(ctx, toolRequest(map[string]any{"zone": "example.com", "name": "www", "type": "A", "records": []any{"203.0.113.9"}, "ttl": float64(30)}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "between 60 and") || f.count(http.MethodPost, "/v1/zones/example.com/rrsets/www/A/actions/set_records") != before {
+		t.Errorf("ttl 30: %s", resultText(t, res))
+	}
+	res, _ = h.handleSetRecords(ctx, toolRequest(map[string]any{"zone": "example.com", "name": "www", "type": "A", "records": []any{"203.0.113.9"}, "ttl": float64(61)}))
+	if !res.IsError {
+		t.Fatalf("failed change_ttl not flagged: %s", resultText(t, res))
+	}
+	out = hcDecode(t, res)
+	if out["replaced"] != "rrset" || len(out["actions"].([]any)) != 1 || !strings.Contains(out["note"].(string), "records were replaced, the TTL was not changed") || !strings.Contains(out["note"].(string), "422") {
+		t.Errorf("failed change_ttl result = %s", resultText(t, res))
+	}
+
 	// set_records on a missing set creates it with the TTL.
 	res, _ = h.handleSetRecords(ctx, toolRequest(map[string]any{"zone": "example.com", "name": "api", "type": "AAAA", "records": []any{"2001:db8::1"}, "ttl": float64(120)}))
 	if res.IsError || hcDecode(t, res)["created"] != "rrset" {
@@ -733,7 +770,7 @@ func TestHetznerCloud_RecordsAndZones(t *testing.T) {
 	}
 
 	// Same TTL: no change_ttl call.
-	before := f.count(http.MethodPost, "/v1/zones/example.com/rrsets/api/AAAA/actions/change_ttl")
+	before = f.count(http.MethodPost, "/v1/zones/example.com/rrsets/api/AAAA/actions/change_ttl")
 	res, _ = h.handleSetRecords(ctx, toolRequest(map[string]any{"zone": "example.com", "name": "api", "type": "AAAA", "records": []any{"2001:db8::2"}, "ttl": float64(120)}))
 	if res.IsError || f.count(http.MethodPost, "/v1/zones/example.com/rrsets/api/AAAA/actions/change_ttl") != before {
 		t.Errorf("change_ttl called for an equal TTL: %s", resultText(t, res))
@@ -788,8 +825,9 @@ func TestHetznerCloud_RecordsAndZones(t *testing.T) {
 	if res.IsError || hcDecode(t, res)["created"] != "zone" {
 		t.Errorf("zone create (a plain write): %s", resultText(t, res))
 	}
+	before = f.count(http.MethodPost, "/v1/zones")
 	res, _ = h.handleCreate(ctx, toolRequest(map[string]any{"resource": "zone", "body": map[string]any{"name": "new.example"}}))
-	if !res.IsError || !strings.Contains(resultText(t, res), "mode") {
+	if !res.IsError || !strings.Contains(resultText(t, res), "needs mode") || f.count(http.MethodPost, "/v1/zones") != before {
 		t.Errorf("zone create without mode: %s", resultText(t, res))
 	}
 	res, _ = h.handleRRSetAction(ctx, toolRequest(map[string]any{"zone": "example.com", "name": "www", "type": "A", "action": "update_records", "params": map[string]any{"records": []any{"203.0.113.7"}}}))
@@ -809,9 +847,28 @@ func TestHetznerCloud_RecordsAndZones(t *testing.T) {
 	if !res.IsError || !strings.Contains(resultText(t, res), "cannot be combined") {
 		t.Errorf("ids with a resource id: %s", resultText(t, res))
 	}
-	res, _ = h.handleListActions(ctx, toolRequest(map[string]any{"ids": []any{float64(1001)}, "status": []any{"running"}, "sort": "id:desc", "page": float64(2)}))
+	res, _ = h.handleListActions(ctx, toolRequest(map[string]any{"ids": []any{float64(1001)}, "status": []any{"running"}}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "no effect with ids alone") {
+		t.Errorf("ids with status: %s", resultText(t, res))
+	}
+	res, _ = h.handleListActions(ctx, toolRequest(map[string]any{"ids": []any{float64(1001)}}))
 	if res.IsError || f.last().Query != "id=1001" {
 		t.Errorf("project-wide list query = %q (%s)", f.last().Query, resultText(t, res))
+	}
+	res, _ = h.handleGetAction(ctx, toolRequest(map[string]any{"id": "4711"}))
+	if res.IsError || f.last().Path != "/v1/actions/4711" {
+		t.Errorf("get_action with a string id: %s", resultText(t, res))
+	}
+	res, _ = h.handleWaitAction(ctx, toolRequest(map[string]any{"ids": []any{float64(1001), float64(1001)}}))
+	if res.IsError {
+		t.Errorf("duplicate ids: %s", resultText(t, res))
+	}
+
+	// A zone id that would change the path's shape is refused by the generic
+	// tools too.
+	res, _ = h.handleAction(ctx, toolRequest(map[string]any{"resource": "zone", "id": "example.com/rrsets/www/A", "action": "change_ttl", "params": map[string]any{"ttl": 60}}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "cannot stand in a path") {
+		t.Errorf("zone id with a slash: %s", resultText(t, res))
 	}
 
 	// A protected zone stays protected under an alias of its name: the guard
@@ -1039,7 +1096,11 @@ func TestHetznerCloud_ErrorsAndRetry(t *testing.T) {
 	h := newTestHetznerCloud(t, f, func(c *config.Connection) { c.AllowLifecycle = true })
 	ctx := context.Background()
 
-	res, _ := h.handleCreate(ctx, toolRequest(map[string]any{"resource": "server", "body": map[string]any{"name": "", "server_type": "cx23", "image": "x"}}))
+	res, _ := h.handleCreate(ctx, toolRequest(map[string]any{"resource": "server", "body": map[string]any{"server_type": "cx23", "image": "x"}}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "needs name in the body") || f.count(http.MethodPost, "/v1/servers") != 0 {
+		t.Errorf("missing required create field: %s", resultText(t, res))
+	}
+	res, _ = h.handleCreate(ctx, toolRequest(map[string]any{"resource": "server", "body": map[string]any{"name": "", "server_type": "cx23", "image": "x"}}))
 	text := resultText(t, res)
 	if !res.IsError || !strings.Contains(text, "Hetzner API 422 invalid_input") || !strings.Contains(text, "is required") || !strings.Contains(text, `"fields"`) {
 		t.Errorf("422 rendering: %s", text)
@@ -1094,8 +1155,18 @@ func TestHetznerCloud_ErrorsAndRetry(t *testing.T) {
 	if !res.IsError || !strings.Contains(resultText(t, res), "request failed") || f.count(http.MethodPost, "/v1/ssh_keys") != 1 {
 		t.Errorf("POST on a dropped connection: %s / %d attempts", resultText(t, res), f.count(http.MethodPost, "/v1/ssh_keys"))
 	}
-	if !hcRetryNetError(http.MethodGet, fmt.Errorf("reset")) || hcRetryNetError(http.MethodPost, fmt.Errorf("reset")) {
-		t.Error("transport retries must depend on the method")
+	if !hcRetryNetError(http.MethodGet, fmt.Errorf("reset")) || hcRetryNetError(http.MethodPost, fmt.Errorf("reset")) || hcRetryNetError(http.MethodDelete, fmt.Errorf("reset")) {
+		t.Error("transport retries are for GET and PUT only")
+	}
+	if _, ok := hcRetryAfter(http.MethodDelete, 504, nil); ok {
+		t.Error("a DELETE is not retried after a gateway timeout — the second attempt would answer 404 for a delete that went through")
+	}
+	f.mu.Lock()
+	f.gateway502["DELETE /ssh_keys/42"] = 1
+	f.mu.Unlock()
+	res, _ = h.handleDelete(ctx, toolRequest(map[string]any{"resource": "ssh_key", "id": "42"}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "502") || f.count(http.MethodDelete, "/v1/ssh_keys/42") != 1 {
+		t.Errorf("DELETE after 502: %s / %d attempts", resultText(t, res), f.count(http.MethodDelete, "/v1/ssh_keys/42"))
 	}
 	if _, ok := hcRetryAfter(http.MethodPost, 409, []byte(`{"error":{"code":"conflict","message":"x"}}`)); !ok {
 		t.Error("a conflict is retried for every method")

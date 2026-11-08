@@ -24,6 +24,12 @@ import (
 // before a request goes out. Descriptions are generated from the registry,
 // so what the tools say they take is what the spec test checks.
 
+// TTL bounds of a record set or zone, as the document states them.
+const (
+	hcTTLMin = 60
+	hcTTLMax = 2147483647
+)
+
 // DefaultHetznerCloudInstructions provides guidance for LLMs using the tools.
 const DefaultHetznerCloudInstructions = `Hetzner Cloud project behind the Cloud API. Resources are servers, images, ISOs, volumes, networks, firewalls, floating_ips, primary_ips, load_balancers, certificates, placement_groups, ssh_keys, locations, server_types and DNS zones with their record sets (rrsets). list, get, create, update, delete and action take the resource kind as an argument; an id may be given as the id or the name.
 Start with list (compact rows) and get (the full object). Server availability and prices per location come from list server_type (locations[].deprecation and prices[]), the rest of the price list from pricing. Changes to the infrastructure are asynchronous actions: the tools wait for them by default and return the action's final status; wait_action continues a wait that timed out.
@@ -582,20 +588,20 @@ func hcWaitArgs(req mcp.CallToolRequest) (bool, time.Duration) {
 	}
 	timeout := hcWaitDefault
 	if v, ok := req.GetArguments()["timeout"].(float64); ok && v > 0 {
+		if v > hcWaitMax.Seconds() {
+			v = hcWaitMax.Seconds()
+		}
 		timeout = time.Duration(v * float64(time.Second))
-	}
-	if timeout > hcWaitMax {
-		timeout = hcWaitMax
 	}
 	return wait, timeout
 }
 
 func hcPageArgs(req mcp.CallToolRequest, q url.Values) {
 	if v, ok := req.GetArguments()["page"].(float64); ok && v >= 1 {
-		q.Set("page", strconv.Itoa(int(v)))
+		q.Set("page", strconv.Itoa(int(min(v, 1e9))))
 	}
 	if v, ok := req.GetArguments()["per_page"].(float64); ok && v >= 1 {
-		q.Set("per_page", strconv.Itoa(min(int(v), hcPerPageMax)))
+		q.Set("per_page", strconv.Itoa(int(min(v, hcPerPageMax))))
 	}
 }
 
@@ -835,6 +841,13 @@ func (h *HetznerCloud) handleListActions(ctx context.Context, req mcp.CallToolRe
 	if kind == "" && !hasIDs {
 		return hcErr(fmt.Errorf("give a resource (and optionally its id) or action ids — the project-wide list takes ids only"))
 	}
+	if kind == "" {
+		for _, k := range []string{"status", "sort", "page", "per_page", "id"} {
+			if v, ok := req.GetArguments()[k]; ok && v != nil && hcScalar(v) != "" {
+				return hcErr(fmt.Errorf("%s has no effect with ids alone — the project-wide GET /actions takes ids and nothing else; give a resource to filter, sort or page", k))
+			}
+		}
+	}
 	if kind != "" && idArg != "" && hasIDs {
 		return hcErr(fmt.Errorf("ids cannot be combined with a resource id — one resource's actions are listed by resource and id, specific actions by ids"))
 	}
@@ -896,12 +909,12 @@ func (h *HetznerCloud) handleListActions(ctx context.Context, req mcp.CallToolRe
 }
 
 func (h *HetznerCloud) handleGetAction(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, ok := req.GetArguments()["id"].(float64)
-	if !ok || id < 1 {
-		return hcErr(fmt.Errorf("id (a number) is required"))
+	id := strings.TrimSpace(hcIDArg(req))
+	if !hcNumeric(id) {
+		return hcErr(fmt.Errorf("id (an action id) is required"))
 	}
 	var raw map[string]any
-	if _, err := h.callJSON(ctx, http.MethodGet, "/actions/"+strconv.FormatInt(int64(id), 10), nil, nil, &raw); err != nil {
+	if _, err := h.callJSON(ctx, http.MethodGet, "/actions/"+id, nil, nil, &raw); err != nil {
 		return hcErr(err)
 	}
 	return h.result(raw)
@@ -912,6 +925,7 @@ func (h *HetznerCloud) handleWaitAction(ctx context.Context, req mcp.CallToolReq
 	if err != nil || len(ids) == 0 {
 		return hcErr(fmt.Errorf("ids (a non-empty array of action ids) is required"))
 	}
+	ids = hcUnique(ids)
 	_, timeout := hcWaitArgs(req)
 	var actions []map[string]any
 	for start := 0; start < len(ids); start += hcActionIDsChunk {
@@ -926,6 +940,24 @@ func (h *HetznerCloud) handleWaitAction(ctx context.Context, req mcp.CallToolReq
 		return hcErr(fmt.Errorf("%d of %d actions found — unknown ids: %s", len(actions), len(ids), strings.Join(hcMissingIDs(ids, actions), ", ")))
 	}
 	return h.actionResult(ctx, actions, map[string]any{}, true, timeout)
+}
+
+// hcSplitActionsOnly is hcSplitActions for callers that keep their own extras.
+func hcSplitActionsOnly(data []byte) ([]map[string]any, error) {
+	actions, _, err := hcSplitActions(data)
+	return actions, err
+}
+
+func hcUnique(ids []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 func hcMissingIDs(ids []string, actions []map[string]any) []string {
@@ -1043,7 +1075,9 @@ func (h *HetznerCloud) handlePricing(ctx context.Context, req mcp.CallToolReques
 		}
 		if kept == nil {
 			kept = []any{}
-			notes = append(notes, fmt.Sprintf("%s: nothing matches the filter", key))
+			if len(list) > 0 {
+				notes = append(notes, fmt.Sprintf("%s: nothing matches the filter", key))
+			}
 		}
 		raw.Pricing[key] = kept
 	}
@@ -1203,10 +1237,12 @@ func (h *HetznerCloud) actionResult(ctx context.Context, actions []map[string]an
 	}
 	done := true
 	var notes []string
+	waitFailed := false
 	if wait && len(actions) > 0 {
 		var err error
 		actions, done, err = h.waitActions(ctx, actions, timeout)
 		if err != nil {
+			waitFailed = true
 			notes = append(notes, "waiting for the actions failed: "+err.Error())
 		}
 	}
@@ -1226,7 +1262,14 @@ func (h *HetznerCloud) actionResult(ctx context.Context, actions []map[string]an
 				ids = append(ids, hcID(a))
 			}
 		}
-		notes = append(notes, fmt.Sprintf("still running after %s — continue with wait_action ids [%s]", timeout.Round(time.Second), strings.Join(ids, ", ")))
+		if waitFailed {
+			notes = append(notes, fmt.Sprintf("the actions may still be running — continue with wait_action ids [%s]", strings.Join(ids, ", ")))
+		} else {
+			notes = append(notes, fmt.Sprintf("still running after %s — continue with wait_action ids [%s]", timeout.Round(time.Second), strings.Join(ids, ", ")))
+		}
+	}
+	if prior, ok := out["note"].(string); ok && prior != "" {
+		notes = append([]string{prior}, notes...)
 	}
 	if len(notes) > 0 {
 		out["note"] = strings.Join(notes, "; ")
@@ -1249,6 +1292,13 @@ func (h *HetznerCloud) handleCreate(ctx context.Context, req mcp.CallToolRequest
 	body, err := hcObjectArg(req, "body", true)
 	if err != nil {
 		return hcErr(err)
+	}
+	for _, f := range res.Create {
+		if f.Required {
+			if _, ok := body[f.Name]; !ok {
+				return hcErr(fmt.Errorf("creating a %s needs %s in the body (%s)", res.Kind, f.Name, hcDescribeFields(res.Create)))
+			}
+		}
 	}
 	if err := h.permit(res.CreateClass, "creating a "+res.Kind); err != nil {
 		return hcErr(err)
@@ -1282,10 +1332,8 @@ func (h *HetznerCloud) handleUpdate(ctx context.Context, req mcp.CallToolRequest
 		return hcErr(fmt.Errorf("body is empty — fields: %s", hcDescribeFields(res.Update)))
 	}
 	class := hcWrite
-	for _, k := range res.UpdateLifecycle {
-		if _, ok := body[k]; ok {
-			class = hcLifecycle
-		}
+	if hcHasLifecycleKey(res, body) {
+		class = hcLifecycle
 	}
 	if err := h.permit(class, "updating a "+res.Kind); err != nil {
 		return hcErr(err)
@@ -1416,6 +1464,9 @@ func (h *HetznerCloud) handleSetRecords(ctx context.Context, req mcp.CallToolReq
 	}
 	wait, timeout := hcWaitArgs(req)
 	ttl, hasTTL := req.GetArguments()["ttl"].(float64)
+	if hasTTL && (ttl < hcTTLMin || ttl > hcTTLMax || ttl != float64(int64(ttl))) {
+		return hcErr(fmt.Errorf("ttl must be a whole number of seconds between %d and %d", hcTTLMin, hcTTLMax))
+	}
 	var existing map[string]map[string]any
 	resp, err := h.do(ctx, http.MethodGet, path, nil, nil)
 	if err != nil {
@@ -1457,24 +1508,36 @@ func (h *HetznerCloud) handleSetRecords(ctx context.Context, req mcp.CallToolReq
 	if err != nil {
 		return hcErr(err)
 	}
-	if hasTTL {
-		if cur, _ := existing["rrset"]["ttl"].(float64); cur != ttl {
-			ttlResp, err := h.do(ctx, http.MethodPost, path+"/actions/change_ttl", nil, map[string]any{"ttl": int(ttl)})
-			if err != nil {
-				return hcErr(err)
-			}
-			if ttlResp.Status < 200 || ttlResp.Status >= 300 {
-				return hcErr(h.errorOf(ttlResp))
-			}
-			more, _, err := hcSplitActions(ttlResp.Body)
-			if err != nil {
-				return hcErr(err)
-			}
-			actions = append(actions, more...)
-		}
-	}
 	extra["replaced"] = "rrset"
 	extra["rrset"] = map[string]any{"name": name, "type": typ, "records": records}
+	if hasTTL {
+		if cur, _ := existing["rrset"]["ttl"].(float64); cur != ttl {
+			// The records are replaced by now: a TTL change that fails is
+			// reported next to the set_records action, not instead of it.
+			ttlResp, err := h.do(ctx, http.MethodPost, path+"/actions/change_ttl", nil, map[string]any{"ttl": int(ttl)})
+			var ttlErr error
+			switch {
+			case err != nil:
+				ttlErr = err
+			case ttlResp.Status < 200 || ttlResp.Status >= 300:
+				ttlErr = h.errorOf(ttlResp)
+			default:
+				more, splitErr := hcSplitActionsOnly(ttlResp.Body)
+				if splitErr != nil {
+					ttlErr = splitErr
+				}
+				actions = append(actions, more...)
+			}
+			if ttlErr != nil {
+				extra["note"] = "the records were replaced, the TTL was not changed: " + ttlErr.Error()
+				res, rerr := h.actionResult(ctx, actions, extra, wait, timeout)
+				if res != nil {
+					res.IsError = true
+				}
+				return res, rerr
+			}
+		}
+	}
 	return h.actionResult(ctx, actions, extra, wait, timeout)
 }
 
