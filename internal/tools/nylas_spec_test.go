@@ -59,6 +59,14 @@ func loadNylasSpec(t *testing.T) *nylasSpec {
 	if path == "" {
 		path = nylasSpecSnapshot
 	}
+	return loadSpecFile(t, path, "Nylas")
+}
+
+// loadSpecFile reads an OpenAPI document into the structure the spec tests
+// walk (paths, component schemas and parameters). Shared by the types that
+// are checked against a published document (nylas, bunq).
+func loadSpecFile(t *testing.T, path, label string) *nylasSpec {
+	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read OpenAPI document %s: %v", path, err)
@@ -70,7 +78,7 @@ func loadNylasSpec(t *testing.T) *nylasSpec {
 	if len(spec.Paths) == 0 || len(spec.Components.Schemas) == 0 {
 		t.Fatalf("OpenAPI document %s carries no paths or schemas", path)
 	}
-	t.Logf("Nylas OpenAPI %s from %s: %d paths, %d schemas", spec.Info.Version, filepath.Base(path), len(spec.Paths), len(spec.Components.Schemas))
+	t.Logf("%s OpenAPI %s from %s: %d paths, %d schemas", label, spec.Info.Version, filepath.Base(path), len(spec.Paths), len(spec.Components.Schemas))
 	return &spec
 }
 

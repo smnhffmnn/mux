@@ -87,7 +87,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description(typeDesc),
 			),
 			mcp.WithString("url",
-				mcp.Description("URL for the connection (required for proxy/http/api types, optional for types with defaults like firecrawl/brave)."),
+				mcp.Description("URL for the connection (required for proxy/http/api types, optional for types with defaults like firecrawl/brave; bunq: https://api.bunq.com by default, https://public-api.sandbox.bunq.com for the sandbox)."),
 			),
 			mcp.WithString("host",
 				mcp.Description("Host (for mariadb, postgresql, clickhouse, imap, meilisearch, ssh)."),
@@ -120,7 +120,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("Extra HTTP headers sent with every request (http and proxy types), one 'Name: Value' per line (e.g. 'Notion-Version: 2022-06-28')."),
 			),
 			mcp.WithBoolean("read_only",
-				mcp.Description("Expose reading tools only (databases: no execute; http: no request; youtrack-rest: no write and no admin tools; ssh: no upload, exec limited to allow_commands or the built-in list of reading commands; supabase: no deploy, delete, migrations_apply or secret writes, SQL on the read-only endpoint; nylas: reading and searching only — no archive/delete/move, no drafts, no sending, no delete_grant or api_request). Default false."),
+				mcp.Description("Expose reading tools only (databases: no execute; http: no request; youtrack-rest: no write and no admin tools; ssh: no upload, exec limited to allow_commands or the built-in list of reading commands; supabase: no deploy, delete, migrations_apply or secret writes, SQL on the read-only endpoint; nylas: reading and searching only — no archive/delete/move, no drafts, no sending, no delete_grant or api_request; bunq: no create_draft_payment, no api_request). Default false."),
 			),
 			mcp.WithString("protected_fields",
 				mcp.Description("youtrack-rest: fields this connection never writes, one per line as 'Project:Field' or 'Field' (e.g. 'P:Sprint priority')."),
@@ -385,6 +385,12 @@ func (ct *ConfigTools) handleConnectionList(_ context.Context, _ mcp.CallToolReq
 		if c.Type == config.TypeSupabase && c.ProjectRef != "" {
 			entry["project_ref"] = c.ProjectRef
 		}
+		if c.Type == config.TypeBunq {
+			if config.BunqSandbox(c) {
+				entry["sandbox"] = true
+			}
+			secrets["private_key"] = c.PrivateKey != "" // the RSA key mux generated (or was given)
+		}
 		if c.Type == config.TypeNylas {
 			entry["region"] = c.Region
 			if c.GrantID != "" {
@@ -646,6 +652,9 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 	if err := config.ValidateNylas(conn); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	if err := config.ValidateBunq(conn); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	config.ApplyConnectionDefaults(&conn)
 	// A key stored before the connection was added (secret_set first,
@@ -664,6 +673,9 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 	msg := fmt.Sprintf("connection %q (%s) created", name, typ)
 	if typ == config.TypeSupabase && conn.Token == "" {
 		msg += fmt.Sprintf(". Next: store the access token with secret_set %q; the connection registers once the token is there.", name+"-token")
+	}
+	if typ == config.TypeBunq && conn.Token == "" {
+		msg += fmt.Sprintf(". Next: store the API key with secret_set %q; the connection registers once the key is there and does bunq's installation, device and session itself on first use (the RSA key and the API context land in the secret store as %q and %q).", name+"-token", name+"-private-key", name+"-api-context")
 	}
 	if typ == config.TypeSSH && conn.Auth != sshclient.AuthAgent && conn.KeyFile == "" {
 		if conn.PrivateKey != "" {
@@ -855,7 +867,7 @@ func (ct *ConfigTools) handleSecretSet(_ context.Context, req mcp.CallToolReques
 	}
 
 	if !config.ValidSecretKey(key) {
-		return mcp.NewToolResultError("invalid key: must match '{name}-password', '{name}-token', '{name}-private-key', '{name}-private-key-passphrase', 'provisioning-token', 'tunnel-{name}-private-key', 'tunnel-{name}-private-key-passphrase', or 'tunnel-{name}-preshared-key'"), nil
+		return mcp.NewToolResultError("invalid key: must match '{name}-password', '{name}-token', '{name}-private-key', '{name}-private-key-passphrase', '{name}-api-context' (bunq, written by mux), 'provisioning-token', 'tunnel-{name}-private-key', 'tunnel-{name}-private-key-passphrase', or 'tunnel-{name}-preshared-key'"), nil
 	}
 
 	if err := config.SaveSecret(key, value); err != nil {
@@ -879,7 +891,7 @@ func (ct *ConfigTools) updateInMemorySecret(key, value string) {
 		}
 		passphrase := strings.HasSuffix(key, "-private-key-passphrase")
 		name := strings.TrimSuffix(strings.TrimSuffix(key, "-passphrase"), "-private-key")
-		if c := ct.cfg.FindAnyConnection(name); c != nil && c.Type == config.TypeSSH {
+		if c := ct.cfg.FindAnyConnection(name); c != nil && (c.Type == config.TypeSSH || c.Type == config.TypeBunq) {
 			if passphrase {
 				c.Passphrase = value
 			} else {
@@ -888,6 +900,15 @@ func (ct *ConfigTools) updateInMemorySecret(key, value string) {
 			if ct.reloader != nil {
 				ct.reloader.ReloadConnection(*c)
 			}
+		}
+		return
+	}
+	if strings.HasSuffix(key, "-api-context") {
+		// The bunq type reads its context from the store on first use; a
+		// reload makes the next call start from the stored one.
+		name := strings.TrimSuffix(key, "-api-context")
+		if c := ct.cfg.FindAnyConnection(name); c != nil && ct.reloader != nil {
+			ct.reloader.ReloadConnection(*c)
 		}
 		return
 	}

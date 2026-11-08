@@ -10,12 +10,14 @@ import (
 // connectionSecretSuffixes are the secret-store keys a connection can hold,
 // as suffixes of its name — the same list ValidSecretKey accepts: password
 // and token, the OAuth tokens and the client of a dynamically registered
-// OAuth flow, the ssh key and its passphrase.
+// OAuth flow, the ssh (or bunq) key and its passphrase, the API context of a
+// bunq connection.
 var connectionSecretSuffixes = []string{
 	"-password", "-token",
 	"-oauth-token", "-oauth-refresh-token",
 	"-oauth-client-id", "-oauth-client-secret",
 	"-private-key", "-private-key-passphrase",
+	"-api-context",
 }
 
 // reservedSecretPrefixes are key namespaces of other owners — tunnels, the

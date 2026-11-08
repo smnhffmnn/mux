@@ -1,0 +1,1 @@
+[\[deprecated since 20260309\] Payment Service Provider Draft Payment](https://doc.bunq.com/payment-service-provider/deprecated-since-20260309-payment-service-provider-draft-payment.md)

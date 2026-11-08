@@ -1,4 +1,4 @@
-# Normalization shared by nylas-openapi-snapshot.sh and nylas-openapi-report.sh:
+# Normalization shared by the OpenAPI snapshot and report scripts (nylas, bunq):
 # drop prose (string-valued "description") and examples, keep structure.
 walk(
   if type == "object" then

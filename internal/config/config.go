@@ -215,7 +215,8 @@ type Connection struct {
 	DenyCommands  []string `toml:"deny_commands,omitempty" json:"denyCommands,omitempty"`
 	// PrivateKey (PEM, may be encrypted) and Passphrase come from the secret
 	// store ({name}-private-key, {name}-private-key-passphrase) or inbound
-	// from provisioning; never serialized.
+	// from provisioning; never serialized. The bunq type keeps the RSA key
+	// it signs requests with under the same secret (generated on first use).
 	PrivateKey string `toml:"-" json:"-"`
 	Passphrase string `toml:"-" json:"-"`
 }
@@ -254,6 +255,10 @@ func (c *Connection) Enabled() bool {
 		// The URL has a default; the token and the project are what a
 		// connection needs.
 		return c.Token != "" && c.ProjectRef != ""
+	case c.Type == TypeBunq:
+		// The URL has a default; the API key is what a connection needs. The
+		// RSA key and the API context are created on first use.
+		return c.Token != ""
 	case c.Type == TypeSSH:
 		// With auth = "agent" the key lives in the user's ssh-agent, so no
 		// stored key is needed for the connection to count as configured.
@@ -521,7 +526,7 @@ func (cfg *Config) SetProvisioned(endpointName string, tunnels []TunnelConfig, c
 		// shape: the server knows host, user and host key, the key stays with
 		// the user. Without this lookup such a connection never counts as
 		// enabled and silently registers nothing.
-		if connections[i].Type == TypeSSH {
+		if connections[i].Type == TypeSSH || connections[i].Type == TypeBunq {
 			if connections[i].PrivateKey == "" {
 				if v, err := getSecret(connections[i].Name + "-private-key"); err == nil {
 					connections[i].PrivateKey = v
@@ -911,6 +916,10 @@ func ApplyConnectionDefaults(c *Connection) {
 		if c.URL == "" {
 			c.URL = SupabaseDefaultURL
 		}
+	case TypeBunq:
+		if c.URL == "" {
+			c.URL = BunqProductionURL
+		}
 	}
 }
 
@@ -974,7 +983,7 @@ func LoadConnectionSecrets(c *Connection) {
 			c.Token = v
 		}
 	}
-	if c.Type == TypeSSH {
+	if c.Type == TypeSSH || c.Type == TypeBunq {
 		if c.PrivateKey == "" {
 			if v, err := getSecret(c.Name + "-private-key"); err == nil {
 				c.PrivateKey = v
@@ -1012,7 +1021,7 @@ func loadKeychain(cfg *Config) {
 			cfg.Connections[i].Token = v
 			secretsLoaded++
 		}
-		if cfg.Connections[i].Type == TypeSSH {
+		if cfg.Connections[i].Type == TypeSSH || cfg.Connections[i].Type == TypeBunq {
 			if v, err := getSecret(name + "-private-key"); err == nil {
 				cfg.Connections[i].PrivateKey = v
 				secretsLoaded++
@@ -1335,8 +1344,11 @@ func ValidSecretKey(key string) bool {
 		"-password", "-token", "-oauth-token", "-oauth-refresh-token",
 		"-oauth-client-id", "-oauth-client-secret",
 		// SSH connections: {name}-private-key, {name}-private-key-passphrase.
-		// Tunnels use the same suffixes under the tunnel- prefix.
+		// Tunnels use the same suffixes under the tunnel- prefix. bunq
+		// connections hold their RSA key under -private-key as well and the
+		// API context (installation, device, session) under -api-context.
 		"-private-key", "-private-key-passphrase",
+		"-api-context",
 	} {
 		if strings.HasSuffix(key, suffix) {
 			return len(key) > len(suffix) // must have a prefix
