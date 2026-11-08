@@ -93,6 +93,8 @@ func TestBunq_SpecPaymentNotRegistered(t *testing.T) {
 		"/v1/user/1/card/3",
 		"/v1/user/1/monetary-account/2/payment/5/note-text", // a note, but under payment
 		"/v1/user/1",
+		"/v1/user/1/monetary-account-bank/2", // the daily limit lives here; raising it is the app's job
+		"/v1/user/1/monetary-account/2",
 	} {
 		if r, ok := bunqWriteAllowed(p); ok {
 			t.Errorf("bunqWriteAllowed(%s) = %q, true; want refused", p, r)
