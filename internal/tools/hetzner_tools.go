@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -24,7 +25,7 @@ import (
 // so what the tools say they take is what the spec test checks.
 
 // DefaultHetznerCloudInstructions provides guidance for LLMs using the tools.
-const DefaultHetznerCloudInstructions = `Hetzner Cloud project behind the Cloud API. Resources are servers, images, ISOs, volumes, networks, firewalls, floating_ips, primary_ips, load_balancers, certificates, placement_groups, ssh_keys, locations, server_types and DNS zones with their record sets (rrsets). Every tool takes the resource kind as an argument; an id may be given as the id or the name.
+const DefaultHetznerCloudInstructions = `Hetzner Cloud project behind the Cloud API. Resources are servers, images, ISOs, volumes, networks, firewalls, floating_ips, primary_ips, load_balancers, certificates, placement_groups, ssh_keys, locations, server_types and DNS zones with their record sets (rrsets). list, get, create, update, delete and action take the resource kind as an argument; an id may be given as the id or the name.
 Start with list (compact rows) and get (the full object). Server availability and prices per location come from list server_type (locations[].deprecation and prices[]), the rest of the price list from pricing. Changes to the infrastructure are asynchronous actions: the tools wait for them by default and return the action's final status; wait_action continues a wait that timed out.
 DNS: a record is an rrset (name + type) with one or more records; set_records creates the rrset or replaces its records in one step. The apex is "@", names are relative to the zone.
 The project's budget is 3600 requests per hour; results say when it runs low.`
@@ -39,7 +40,7 @@ func HetznerCloudInstructions(conn config.Connection) string {
 	case conn.AllowLifecycle:
 		parts = append(parts, "This connection may run lifecycle operations — creating servers, volumes, IPs and load balancers, deleting, resizing, rebuilding, hard power cuts, snapshots and backups, zone imports. They cost money or destroy data: name the resource and the consequence before you run one, and prefer the graceful variant (shutdown over poweroff, reboot over reset).")
 	default:
-		parts = append(parts, "Writing connection without lifecycle operations: it changes labels, names, reverse DNS, firewall rules, routes, attachments, protection, DNS records and the like, and creates the free resources (networks, firewalls, SSH keys, placement groups, certificates, zones). Creating servers, volumes, IPs or load balancers, deleting anything, resizing, rebuilding, hard power cuts, snapshots, backups and zone imports are refused until a human switches allow_lifecycle on.")
+		parts = append(parts, "Writing connection without lifecycle operations: it changes labels, names, reverse DNS, firewall rules, routes, attachments, protection and DNS record sets (create, set, remove, delete), and creates the free resources (networks, firewalls, SSH keys, placement groups, certificates, zones). Creating servers, volumes, IPs or load balancers, deleting a resource, resizing, rebuilding, hard power cuts, snapshots, backups and zone imports are refused until a human switches allow_lifecycle on.")
 	}
 	if len(conn.ProtectedResources) > 0 {
 		parts = append(parts, "Protected resources ("+strings.Join(conn.ProtectedResources, ", ")+") are never changed, acted on or deleted through this connection; reading them is fine.")
@@ -83,16 +84,35 @@ func hcListDescription() string {
 		b.WriteString(r.Kind + ": ")
 		parts := make([]string, 0, len(r.Filters))
 		for _, f := range r.Filters {
-			if vals, ok := r.FilterEnums[f]; ok && f != "sort" {
+			vals, ok := r.FilterEnums[f]
+			switch {
+			case ok && f == "sort":
+				parts = append(parts, "sort="+strings.Join(hcSortFields(vals), "|"))
+			case ok:
 				parts = append(parts, f+"="+strings.Join(vals, "|"))
-			} else {
+			default:
 				parts = append(parts, f)
 			}
 		}
 		b.WriteString(strings.Join(parts, ", "))
 	}
-	b.WriteString(". name is an exact match; label_selector is Hetzner's selector language (k=v, k!=v, k, !k, k in (a,b)); sort takes field or field:desc, several comma-separated.")
+	b.WriteString(". name is an exact match; label_selector is Hetzner's selector language (k=v, k!=v, k, !k, k in (a,b)); sort takes a listed field, optionally :asc or :desc, several comma-separated.")
 	return b.String()
+}
+
+// hcSortFields reduces the document's sort enum (id, id:asc, id:desc, …) to
+// the field names.
+func hcSortFields(vals []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, v := range vals {
+		f, _, _ := strings.Cut(v, ":")
+		if !seen[f] {
+			seen[f] = true
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func hcCreateDescription() string {
@@ -218,7 +238,7 @@ func (h *HetznerCloud) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("list_actions",
-				mcp.WithDescription("Actions — the asynchronous tasks the API ran or runs: command, status (running, success, error), progress, started, finished, the resources concerned, the error. With resource and id: the actions of that resource; with resource alone: the project's actions on that kind; with ids alone: those actions. Newest last unless sorted."),
+				mcp.WithDescription("Actions — the asynchronous tasks the API ran or runs: command, status (running, success, error), progress, started, finished, the resources concerned, the error. With resource and id: the actions of that resource; with resource alone: the project's actions on that kind — both page at 25 and list oldest first unless sorted (sort id:desc for the newest); with ids alone: exactly those actions, no paging or sorting."),
 				mcp.WithString("resource", mcp.Description("Resource kind"), mcp.Enum(hcKinds(func(r *hcResource) bool { return r.ActionLists })...)),
 				mcp.WithString("id", mcp.Description("Id or name of the resource (with resource)")),
 				mcp.WithArray("ids", mcp.Description("Action ids (without resource)"), mcp.WithNumberItems()),
@@ -364,9 +384,10 @@ func (h *HetznerCloud) Tools() []ToolDef {
 				mcp.WithString("zone", mcp.Required(), mcp.Description("Zone id or name")),
 				mcp.WithString("name", mcp.Required(), mcp.Description("Record set name, relative to the zone; @ for the apex; lower case")),
 				mcp.WithString("type", mcp.Required(), mcp.Description("Record type"), mcp.Enum(hcRRSetTypes...)),
-				mcp.WithArray("records", mcp.Required(), mcp.Description("Record values (\"198.51.100.1\") or objects {value, comment}; TXT values quoted as in a zone file"), mcp.WithStringItems()),
+				mcp.WithArray("records", mcp.Required(), mcp.Description("Record values (\"198.51.100.1\") or objects {value, comment}; TXT values quoted as in a zone file"), mcp.Items(hcRecordItems())),
 				mcp.WithNumber("ttl", mcp.Description("TTL in seconds (60…2147483647); omitted: the zone's default for a new set, unchanged for an existing one")),
 				mcp.WithBoolean("wait", mcp.Description("Wait for the action (default true)")),
+				mcp.WithNumber("timeout", mcp.Description("Seconds to wait (default 60, max 600)")),
 			),
 			Handler: h.handleSetRecords,
 		},
@@ -376,10 +397,11 @@ func (h *HetznerCloud) Tools() []ToolDef {
 				mcp.WithString("zone", mcp.Required(), mcp.Description("Zone id or name")),
 				mcp.WithString("name", mcp.Required(), mcp.Description("Record set name, relative to the zone; @ for the apex")),
 				mcp.WithString("type", mcp.Required(), mcp.Description("Record type"), mcp.Enum(hcRRSetTypes...)),
-				mcp.WithArray("records", mcp.Required(), mcp.Description("Record values or objects {value, comment}"), mcp.WithStringItems()),
+				mcp.WithArray("records", mcp.Required(), mcp.Description("Record values or objects {value, comment}"), mcp.Items(hcRecordItems())),
 				mcp.WithNumber("ttl", mcp.Description("TTL in seconds; omitted: the zone's default")),
 				mcp.WithObject("labels", mcp.Description("Labels"), mcp.AdditionalProperties(true)),
 				mcp.WithBoolean("wait", mcp.Description("Wait for the action (default true)")),
+				mcp.WithNumber("timeout", mcp.Description("Seconds to wait (default 60, max 600)")),
 			),
 			Handler: h.handleCreateRRSet,
 		},
@@ -400,6 +422,7 @@ func (h *HetznerCloud) Tools() []ToolDef {
 				mcp.WithString("name", mcp.Required(), mcp.Description("Record set name")),
 				mcp.WithString("type", mcp.Required(), mcp.Description("Record type"), mcp.Enum(hcRRSetTypes...)),
 				mcp.WithBoolean("wait", mcp.Description("Wait for the action (default true)")),
+				mcp.WithNumber("timeout", mcp.Description("Seconds to wait (default 60, max 600)")),
 				mcp.WithDestructiveHintAnnotation(true),
 			),
 			Handler: h.handleDeleteRRSet,
@@ -413,6 +436,7 @@ func (h *HetznerCloud) Tools() []ToolDef {
 				mcp.WithString("action", mcp.Required(), mcp.Description("Action name"), mcp.Enum(hcRRSetActionNames()...)),
 				mcp.WithObject("params", mcp.Description("The action's body"), mcp.AdditionalProperties(true)),
 				mcp.WithBoolean("wait", mcp.Description("Wait for the action (default true)")),
+				mcp.WithNumber("timeout", mcp.Description("Seconds to wait (default 60, max 600)")),
 			),
 			Handler: h.handleRRSetAction,
 		},
@@ -438,6 +462,18 @@ func (h *HetznerCloud) Tools() []ToolDef {
 			Handler: h.handleAPIRequest,
 		},
 	)
+}
+
+// hcRecordItems is the schema of a records argument: a value string or a
+// {value, comment} object.
+func hcRecordItems() map[string]any {
+	return map[string]any{"anyOf": []any{
+		map[string]any{"type": "string", "description": "the record value"},
+		map[string]any{"type": "object", "properties": map[string]any{
+			"value":   map[string]any{"type": "string"},
+			"comment": map[string]any{"type": "string"},
+		}, "required": []string{"value"}, "additionalProperties": false},
+	}}
 }
 
 func hcRRSetActionNames() []string {
@@ -527,6 +563,16 @@ func hcObjectArg(req mcp.CallToolRequest, key string, required bool) (map[string
 		return m, nil
 	}
 	return nil, fmt.Errorf("%s must be a JSON object, got %T", key, v)
+}
+
+// hcIDArg reads the id argument as a string whether the client sent a
+// string or a number.
+func hcIDArg(req mcp.CallToolRequest) string {
+	v, ok := req.GetArguments()["id"]
+	if !ok || v == nil {
+		return ""
+	}
+	return hcScalar(v)
 }
 
 func hcWaitArgs(req mcp.CallToolRequest) (bool, time.Duration) {
@@ -648,6 +694,12 @@ func (h *HetznerCloud) hcRRSetArgs(req mcp.CallToolRequest) (zone, name, typ, pa
 	if zone == "" || name == "" || typ == "" {
 		return "", "", "", "", fmt.Errorf("zone, name and type are required")
 	}
+	if err := hcPathValue(zone, "zone"); err != nil {
+		return "", "", "", "", err
+	}
+	if err := hcPathValue(name, "record set name"); err != nil {
+		return "", "", "", "", err
+	}
 	ok := false
 	for _, t := range hcRRSetTypes {
 		if t == typ {
@@ -759,7 +811,7 @@ func (h *HetznerCloud) handleGet(ctx context.Context, req mcp.CallToolRequest) (
 	if err != nil {
 		return hcErr(err)
 	}
-	id, obj, err := h.resolve(ctx, res, req.GetString("id", ""))
+	id, obj, err := h.resolve(ctx, res, hcIDArg(req))
 	if err != nil {
 		return hcErr(err)
 	}
@@ -776,24 +828,24 @@ func (h *HetznerCloud) handleGet(ctx context.Context, req mcp.CallToolRequest) (
 }
 
 func (h *HetznerCloud) handleListActions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	q := url.Values{}
-	for _, s := range hcStringList(req.GetArguments()["status"]) {
-		q.Add("status", s)
-	}
-	if v := req.GetString("sort", ""); strings.TrimSpace(v) != "" {
-		hcAddSort(q, v)
-	}
-	path := "/actions"
 	kind := strings.TrimSpace(req.GetString("resource", ""))
-	if kind != "" {
-		hcPageArgs(req, q) // the project-wide GET /actions takes ids only
+	idArg := strings.TrimSpace(hcIDArg(req))
+	idsArg, hasIDs := req.GetArguments()["ids"]
+	hasIDs = hasIDs && idsArg != nil
+	if kind == "" && !hasIDs {
+		return hcErr(fmt.Errorf("give a resource (and optionally its id) or action ids — the project-wide list takes ids only"))
 	}
+	if kind != "" && idArg != "" && hasIDs {
+		return hcErr(fmt.Errorf("ids cannot be combined with a resource id — one resource's actions are listed by resource and id, specific actions by ids"))
+	}
+	q := url.Values{}
+	path := "/actions"
 	if kind != "" {
 		res := hcResourceByKind(kind)
 		if res == nil || !res.ActionLists {
 			return hcErr(fmt.Errorf("resource %q has no action list", kind))
 		}
-		if idArg := strings.TrimSpace(req.GetString("id", "")); idArg != "" {
+		if idArg != "" {
 			id, _, err := h.resolve(ctx, res, idArg)
 			if err != nil {
 				return hcErr(err)
@@ -802,18 +854,25 @@ func (h *HetznerCloud) handleListActions(ctx context.Context, req mcp.CallToolRe
 		} else {
 			path = "/" + res.Collection + "/actions"
 		}
+		// The per-kind and per-resource lists filter, sort and page; the
+		// project-wide GET /actions takes ids and nothing else.
+		for _, st := range hcStringList(req.GetArguments()["status"]) {
+			q.Add("status", st)
+		}
+		if v := req.GetString("sort", ""); strings.TrimSpace(v) != "" {
+			hcAddSort(q, v)
+		}
+		hcPageArgs(req, q)
 	}
-	if ids, ok := req.GetArguments()["ids"]; ok && ids != nil {
-		list, err := hcNumberList(ids)
+	if hasIDs {
+		list, err := hcNumberList(idsArg)
 		if err != nil {
 			return hcErr(err)
 		}
-		if kind != "" && strings.HasSuffix(path, "/actions") && !strings.HasSuffix(path, "s/actions") {
-			return hcErr(fmt.Errorf("ids cannot be combined with a resource id"))
+		if len(list) == 0 {
+			return hcErr(fmt.Errorf("ids is empty"))
 		}
 		q["id"] = list
-	} else if kind == "" {
-		return hcErr(fmt.Errorf("give a resource (and optionally its id) or action ids — the project-wide list takes ids only"))
 	}
 	items, pg, err := h.listPage(ctx, path, "actions", q)
 	if err != nil {
@@ -888,7 +947,7 @@ func (h *HetznerCloud) handleMetrics(ctx context.Context, req mcp.CallToolReques
 	if err != nil {
 		return hcErr(err)
 	}
-	id, _, err := h.resolve(ctx, res, req.GetString("id", ""))
+	id, _, err := h.resolve(ctx, res, hcIDArg(req))
 	if err != nil {
 		return hcErr(err)
 	}
@@ -932,54 +991,74 @@ func (h *HetznerCloud) handlePricing(ctx context.Context, req mcp.CallToolReques
 	if _, err := h.callJSON(ctx, http.MethodGet, "/pricing", nil, nil, &raw); err != nil {
 		return hcErr(err)
 	}
+	if raw.Pricing == nil {
+		return hcErr(fmt.Errorf("the response carries no pricing"))
+	}
 	wanted := map[string]bool{}
 	for _, s := range hcStringList(req.GetArguments()["server_types"]) {
 		wanted[strings.ToLower(strings.TrimSpace(s))] = true
 	}
 	location := strings.TrimSpace(req.GetString("location", ""))
-	if len(wanted) > 0 || location != "" {
-		for _, key := range []string{"server_types", "load_balancer_types"} {
-			list, _ := raw.Pricing[key].([]any)
-			var kept []any
-			for _, e := range list {
-				m, _ := e.(map[string]any)
-				if m == nil {
-					continue
-				}
-				if key == "server_types" && len(wanted) > 0 && !wanted[strings.ToLower(hcName(m))] {
-					continue
-				}
-				if location != "" {
-					prices, _ := m["prices"].([]any)
-					var at []any
-					for _, p := range prices {
-						pm, _ := p.(map[string]any)
-						if pm != nil && strings.EqualFold(hcScalar(pm["location"]), location) {
-							at = append(at, p)
-						}
-					}
-					if len(at) == 0 {
-						continue
-					}
-					cp := map[string]any{}
-					for k, v := range m {
-						cp[k] = v
-					}
-					cp["prices"] = at
-					m = cp
-				}
-				kept = append(kept, m)
-			}
-			raw.Pricing[key] = kept
-		}
+	if len(wanted) == 0 && location == "" {
+		return h.result(map[string]any{"pricing": raw.Pricing})
 	}
-	return h.result(map[string]any{"pricing": raw.Pricing})
+	// server_types narrows the server type list; location narrows every list
+	// whose entries carry prices per location (server types, load balancer
+	// types, Primary IPs, …) to that location's entries.
+	notes := []string{}
+	for key, v := range raw.Pricing {
+		list, ok := v.([]any)
+		if !ok {
+			continue
+		}
+		var kept []any
+		for _, e := range list {
+			m, _ := e.(map[string]any)
+			if m == nil {
+				kept = append(kept, e)
+				continue
+			}
+			if key == "server_types" && len(wanted) > 0 && !wanted[strings.ToLower(hcName(m))] {
+				continue
+			}
+			if prices, ok := m["prices"].([]any); ok && location != "" {
+				var at []any
+				for _, p := range prices {
+					pm, _ := p.(map[string]any)
+					if pm != nil && strings.EqualFold(hcScalar(pm["location"]), location) {
+						at = append(at, p)
+					}
+				}
+				if len(at) == 0 {
+					continue
+				}
+				cp := make(map[string]any, len(m))
+				for k, val := range m {
+					cp[k] = val
+				}
+				cp["prices"] = at
+				m = cp
+			}
+			kept = append(kept, m)
+		}
+		if kept == nil {
+			kept = []any{}
+			notes = append(notes, fmt.Sprintf("%s: nothing matches the filter", key))
+		}
+		raw.Pricing[key] = kept
+	}
+	out := map[string]any{"pricing": raw.Pricing}
+	if len(notes) > 0 {
+		sort.Strings(notes)
+		out["note"] = strings.Join(notes, "; ")
+	}
+	return h.result(out)
 }
 
 func (h *HetznerCloud) handleListRRSets(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	zone := strings.TrimSpace(req.GetString("zone", ""))
-	if zone == "" {
-		return hcErr(fmt.Errorf("zone is required"))
+	if err := hcPathValue(zone, "zone"); err != nil {
+		return hcErr(err)
 	}
 	q := url.Values{}
 	if v := strings.TrimSpace(req.GetString("name", "")); v != "" {
@@ -1050,8 +1129,8 @@ func (h *HetznerCloud) handleGetRRSet(ctx context.Context, req mcp.CallToolReque
 
 func (h *HetznerCloud) handleZonefile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	zone := strings.TrimSpace(req.GetString("zone", ""))
-	if zone == "" {
-		return hcErr(fmt.Errorf("zone is required"))
+	if err := hcPathValue(zone, "zone"); err != nil {
+		return hcErr(err)
 	}
 	var raw struct {
 		Zonefile string `json:"zonefile"`
@@ -1123,11 +1202,12 @@ func (h *HetznerCloud) actionResult(ctx context.Context, actions []map[string]an
 		out[k] = v
 	}
 	done := true
-	var err error
+	var notes []string
 	if wait && len(actions) > 0 {
+		var err error
 		actions, done, err = h.waitActions(ctx, actions, timeout)
 		if err != nil {
-			out["note"] = "waiting for the actions failed: " + err.Error()
+			notes = append(notes, "waiting for the actions failed: "+err.Error())
 		}
 	}
 	rows := make([]map[string]any, 0, len(actions))
@@ -1146,7 +1226,10 @@ func (h *HetznerCloud) actionResult(ctx context.Context, actions []map[string]an
 				ids = append(ids, hcID(a))
 			}
 		}
-		out["note"] = fmt.Sprintf("still running after %s — continue with wait_action ids [%s]", timeout.Round(time.Second), strings.Join(ids, ", "))
+		notes = append(notes, fmt.Sprintf("still running after %s — continue with wait_action ids [%s]", timeout.Round(time.Second), strings.Join(ids, ", ")))
+	}
+	if len(notes) > 0 {
+		out["note"] = strings.Join(notes, "; ")
 	}
 	if failed > 0 {
 		out["failed"] = failed
@@ -1207,7 +1290,7 @@ func (h *HetznerCloud) handleUpdate(ctx context.Context, req mcp.CallToolRequest
 	if err := h.permit(class, "updating a "+res.Kind); err != nil {
 		return hcErr(err)
 	}
-	id, obj, err := h.resolve(ctx, res, req.GetString("id", ""))
+	id, obj, err := h.resolve(ctx, res, hcIDArg(req))
 	if err != nil {
 		return hcErr(err)
 	}
@@ -1229,7 +1312,7 @@ func (h *HetznerCloud) handleDelete(ctx context.Context, req mcp.CallToolRequest
 	if err := h.permit(hcLifecycle, "deleting a "+res.Kind); err != nil {
 		return hcErr(err)
 	}
-	id, obj, err := h.resolve(ctx, res, req.GetString("id", ""))
+	id, obj, err := h.resolve(ctx, res, hcIDArg(req))
 	if err != nil {
 		return hcErr(err)
 	}
@@ -1284,7 +1367,7 @@ func (h *HetznerCloud) handleAction(ctx context.Context, req mcp.CallToolRequest
 	if err := h.permit(act.Class, fmt.Sprintf("%s on a %s", act.Name, res.Kind)); err != nil {
 		return hcErr(err)
 	}
-	id, obj, err := h.resolve(ctx, res, req.GetString("id", ""))
+	id, obj, err := h.resolve(ctx, res, hcIDArg(req))
 	if err != nil {
 		return hcErr(err)
 	}
@@ -1493,6 +1576,13 @@ func (h *HetznerCloud) handleRRSetAction(ctx context.Context, req mcp.CallToolRe
 		if err != nil {
 			return hcErr(err)
 		}
+		if act.Name == "update_records" {
+			for _, r := range normalized {
+				if _, ok := r["comment"]; !ok {
+					return hcErr(fmt.Errorf("update_records sets comments: every record needs {value, comment}"))
+				}
+			}
+		}
 		params["records"] = normalized
 	}
 	for _, f := range act.Body {
@@ -1523,8 +1613,11 @@ func (h *HetznerCloud) handleRRSetAction(ctx context.Context, req mcp.CallToolRe
 func (h *HetznerCloud) handleImportZonefile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	zone := strings.TrimSpace(req.GetString("zone", ""))
 	zonefile := req.GetString("zonefile", "")
-	if zone == "" || strings.TrimSpace(zonefile) == "" {
-		return hcErr(fmt.Errorf("zone and zonefile are required"))
+	if err := hcPathValue(zone, "zone"); err != nil {
+		return hcErr(err)
+	}
+	if strings.TrimSpace(zonefile) == "" {
+		return hcErr(fmt.Errorf("zonefile is required"))
 	}
 	if err := h.zoneGuard(ctx, hcLifecycle, "importing a zone file into zone "+zone, zone); err != nil {
 		return hcErr(err)
@@ -1560,17 +1653,19 @@ func (h *HetznerCloud) handleAPIRequest(ctx context.Context, req mcp.CallToolReq
 		return hcErr(fmt.Errorf("a writing request takes no query string"))
 	}
 	var body json.RawMessage
+	var bodyObj map[string]any
 	if v, ok := req.GetArguments()["body"]; ok && v != nil {
 		obj, err := hcObjectArg(req, "body", true)
 		if err != nil {
 			return hcErr(err)
 		}
+		bodyObj = obj
 		body, _ = json.Marshal(obj)
 	}
-	target := hcClassify(method, path)
+	target := hcClassify(method, path, bodyObj)
 	if !target.Known {
 		if err := h.permit(hcLifecycle, target.What); err != nil {
-			return hcErr(fmt.Errorf("%s is not in this build's registry of the API; %v", target.What, err))
+			return hcErr(fmt.Errorf("%s is not in this build's registry of the API; %w", target.What, err))
 		}
 	} else if err := h.permit(target.Class, target.What); err != nil {
 		return hcErr(err)
@@ -1587,15 +1682,15 @@ func (h *HetznerCloud) handleAPIRequest(ctx context.Context, req mcp.CallToolReq
 
 // HetznerCloudInfo is what Verify learned about the project.
 type HetznerCloudInfo struct {
-	Servers         int
-	Zones           int
-	RateRemaining   int
-	RateLimit       int
-	CollectionsRead []string
+	Servers       int
+	Zones         int
+	RateRemaining int
+	RateLimit     int
 }
 
 // Verify reads the project the way the tools do: one page of servers and
-// one of zones. A wrong or revoked token fails here with the API's message.
+// one of zones. A wrong or revoked token fails here with the API's message;
+// the counts tell which project a valid token belongs to.
 func (h *HetznerCloud) Verify(ctx context.Context) (*HetznerCloudInfo, error) {
 	info := &HetznerCloudInfo{}
 	for _, coll := range []string{"servers", "zones"} {
@@ -1612,7 +1707,6 @@ func (h *HetznerCloud) Verify(ctx context.Context) (*HetznerCloudInfo, error) {
 		} else {
 			info.Zones = n
 		}
-		info.CollectionsRead = append(info.CollectionsRead, coll)
 	}
 	h.mu.Lock()
 	info.RateRemaining, info.RateLimit = h.rateRemaining, h.rateLimit

@@ -133,7 +133,7 @@ All fields use **camelCase** JSON keys.
 | `user` | string | databases | Database username |
 | `password` | string | no | Database password. If omitted, mux checks the secret store for `{name}-password`. |
 | `database` | string | no | Database name (ClickHouse defaults to `"default"`) |
-| `readOnly` | boolean | no | Reading tools only (default: false). What that means per type is in [connections.md](connections.md); for nylas: no archive/delete/move, no drafts, no sending, no `delete_grant`, no `api_request` — refused together with `allowSend`; for bunq: no `create_draft_payment`, no `api_request`; for hetzner-cloud: list, get, actions, metrics, pricing, record sets and `api_get` only. |
+| `readOnly` | boolean | no | Reading tools only (default: false). What that means per type is in [connections.md](connections.md); for nylas: no archive/delete/move, no drafts, no sending, no `delete_grant`, no `api_request` — refused together with `allowSend`; for bunq: no `create_draft_payment`, no `api_request`; for hetzner-cloud: list, get, actions (`list_actions`, `get_action`, `wait_action`), metrics, pricing, record sets, `zonefile` and `api_get` only. |
 | `secure` | boolean | no | TLS for ClickHouse HTTP (default: false) |
 | `url` | string | proxy/http/api | Endpoint URL. bunq: `https://api.bunq.com` (default) or the sandbox host. hetzner-cloud: `https://api.hetzner.cloud` (default). |
 | `token` | string | no | API key or Bearer token. If omitted, mux checks the secret store for `{name}-token`. |

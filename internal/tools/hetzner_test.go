@@ -21,14 +21,17 @@ import (
 // a protected cell host), a zone with one record set, actions that run for
 // one poll before they succeed, and the error envelopes the type renders.
 type hcFake struct {
-	srv      *httptest.Server
-	mu       sync.Mutex
-	requests []hcFakeRequest
-	actions  map[int]int // action id → polls until success
-	nextID   int
-	rrsets   map[string]map[string]any // "name/TYPE" → rrset
-	conflict int                       // answer the first N PUTs with 409 conflict
-	rateLow  bool                      // send a low RateLimit-Remaining
+	srv        *httptest.Server
+	mu         sync.Mutex
+	requests   []hcFakeRequest
+	actions    map[int]int // action id → polls until success
+	nextID     int
+	rrsets     map[string]map[string]any // "name/TYPE" → rrset
+	conflict   int                       // answer the first N PUTs with 409 conflict
+	rateLow    bool                      // send a low RateLimit-Remaining
+	imagePages int                       // pages the image listing spans (per_page rows each)
+	gateway502 map[string]int            // method+path → remaining 502 answers
+	dropOnce   map[string]bool           // method+path → close the connection once without an answer
 }
 
 type hcFakeRequest struct {
@@ -41,7 +44,7 @@ type hcFakeRequest struct {
 
 func newHCFake(t *testing.T) *hcFake {
 	t.Helper()
-	f := &hcFake{actions: map[int]int{}, nextID: 1000, rrsets: map[string]map[string]any{
+	f := &hcFake{actions: map[int]int{}, nextID: 1000, imagePages: 3, gateway502: map[string]int{}, dropOnce: map[string]bool{}, rrsets: map[string]map[string]any{
 		"www/A": {"id": "www/A", "name": "www", "type": "A", "ttl": 300, "records": []any{map[string]any{"value": "198.51.100.1"}}, "labels": map[string]any{}, "protection": map[string]any{"change": false}, "zone": 7},
 	}}
 	servers := []map[string]any{
@@ -97,7 +100,51 @@ func newHCFake(t *testing.T) *hcFake {
 		q := r.URL.Query()
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		key := r.Method + " " + p
+		if f.gateway502[key] > 0 {
+			f.gateway502[key]--
+			w.WriteHeader(502)
+			io.WriteString(w, "<html>bad gateway</html>")
+			return
+		}
+		if f.dropOnce[key] {
+			delete(f.dropOnce, key)
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, err := hj.Hijack()
+				if err == nil {
+					conn.Close()
+					return
+				}
+			}
+			panic("cannot hijack")
+		}
 		switch {
+		case p == "/images" && r.Method == http.MethodGet:
+			page, perPage := 1, 25
+			fmt.Sscan(q.Get("page"), &page)
+			fmt.Sscan(q.Get("per_page"), &perPage)
+			var out []any
+			for i := 0; i < perPage; i++ {
+				out = append(out, map[string]any{"id": (page-1)*perPage + i + 1, "name": fmt.Sprintf("img-%d-%d", page, i), "type": "snapshot", "status": "available", "labels": map[string]any{}})
+			}
+			var next any
+			if page < f.imagePages {
+				next = page + 1
+			}
+			write(w, 200, map[string]any{"images": out, "meta": map[string]any{"pagination": map[string]any{"page": page, "per_page": perPage, "previous_page": nil, "next_page": next, "last_page": f.imagePages, "total_entries": f.imagePages * perPage}}})
+		case p == "/images/5" && r.Method == http.MethodGet:
+			write(w, 200, map[string]any{"image": map[string]any{"id": 5, "name": nil, "description": "nightly", "type": "backup", "status": "available", "labels": map[string]any{}}})
+		case p == "/images/5" && r.Method == http.MethodPut:
+			write(w, 200, map[string]any{"image": map[string]any{"id": 5, "description": body["description"], "type": body["type"], "status": "available"}})
+		case p == "/zones" && r.Method == http.MethodPost:
+			if body["mode"] == nil {
+				apiErr(w, 422, "invalid_input", "invalid input in field 'mode': is required", nil)
+				return
+			}
+			write(w, 201, map[string]any{"zone": map[string]any{"id": 8, "name": body["name"], "mode": body["mode"], "ttl": 3600}, "action": newAction("create_zone", 0)})
+		case p == "/zones/EXAMPLE.COM." && r.Method == http.MethodGet:
+			// the API resolves aliases of the zone name; the guard must match the name it answers with
+			write(w, 200, map[string]any{"zone": map[string]any{"id": 7, "name": "example.com", "mode": "primary", "ttl": 3600}})
 		case p == "/servers" && r.Method == http.MethodGet:
 			var out []map[string]any
 			for _, s := range servers {
@@ -737,9 +784,135 @@ func TestHetznerCloud_RecordsAndZones(t *testing.T) {
 	if !res.IsError || !strings.Contains(resultText(t, res), "allow_lifecycle") {
 		t.Errorf("import without lifecycle: %s", resultText(t, res))
 	}
+	res, _ = h.handleCreate(ctx, toolRequest(map[string]any{"resource": "zone", "body": map[string]any{"name": "new.example", "mode": "primary"}}))
+	if res.IsError || hcDecode(t, res)["created"] != "zone" {
+		t.Errorf("zone create (a plain write): %s", resultText(t, res))
+	}
 	res, _ = h.handleCreate(ctx, toolRequest(map[string]any{"resource": "zone", "body": map[string]any{"name": "new.example"}}))
-	if res.IsError && strings.Contains(resultText(t, res), "allow_lifecycle") {
-		t.Errorf("zone create needs no lifecycle: %s", resultText(t, res))
+	if !res.IsError || !strings.Contains(resultText(t, res), "mode") {
+		t.Errorf("zone create without mode: %s", resultText(t, res))
+	}
+	res, _ = h.handleRRSetAction(ctx, toolRequest(map[string]any{"zone": "example.com", "name": "www", "type": "A", "action": "update_records", "params": map[string]any{"records": []any{"203.0.113.7"}}}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "comment") {
+		t.Errorf("update_records without comments: %s", resultText(t, res))
+	}
+	for _, bad := range []map[string]any{{"zone": "example.com/rrsets/www/A", "name": "x", "type": "A"}, {"zone": "example.com", "name": "a b", "type": "A"}, {"zone": "..", "name": "x", "type": "A"}} {
+		res, _ = h.handleGetRRSet(ctx, toolRequest(bad))
+		if !res.IsError || !(strings.Contains(resultText(t, res), "path") || strings.Contains(resultText(t, res), "dot segment")) {
+			t.Errorf("path value %v accepted: %s", bad, resultText(t, res))
+		}
+	}
+
+	// list_actions on one resource refuses ids whatever the resource's name
+	// looks like, and the project-wide list carries ids only.
+	res, _ = h.handleListActions(ctx, toolRequest(map[string]any{"resource": "zone", "id": "example.es", "ids": []any{float64(1)}}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "cannot be combined") {
+		t.Errorf("ids with a resource id: %s", resultText(t, res))
+	}
+	res, _ = h.handleListActions(ctx, toolRequest(map[string]any{"ids": []any{float64(1001)}, "status": []any{"running"}, "sort": "id:desc", "page": float64(2)}))
+	if res.IsError || f.last().Query != "id=1001" {
+		t.Errorf("project-wide list query = %q (%s)", f.last().Query, resultText(t, res))
+	}
+
+	// A protected zone stays protected under an alias of its name: the guard
+	// reads the zone and matches the name the API answers with.
+	hz := newTestHetznerCloud(t, f, func(c *config.Connection) { c.ProtectedResources = []string{"zone:example.com"} })
+	res, _ = hz.handleSetRecords(ctx, toolRequest(map[string]any{"zone": "EXAMPLE.COM.", "name": "www", "type": "A", "records": []any{"203.0.113.1"}}))
+	if !res.IsError || !strings.Contains(resultText(t, res), `zone "example.com" is protected`) {
+		t.Errorf("alias of a protected zone: %s", resultText(t, res))
+	}
+	res, _ = hz.handleSetRecords(ctx, toolRequest(map[string]any{"zone": "nope.example", "name": "www", "type": "A", "records": []any{"203.0.113.1"}}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "404") || strings.Contains(resultText(t, res), "guard") {
+		t.Errorf("unknown zone under guards reports the 404, not a guard failure: %s", resultText(t, res))
+	}
+}
+
+func TestHetznerCloud_ListAllPaging(t *testing.T) {
+	f := newHCFake(t)
+	h := newTestHetznerCloud(t, f, nil)
+	ctx := context.Background()
+
+	res, err := h.handleList(ctx, toolRequest(map[string]any{"resource": "image", "all": true}))
+	if err != nil || res.IsError {
+		t.Fatalf("list all: %v / %s", err, resultText(t, res))
+	}
+	out := hcDecode(t, res)
+	if out["count"] != float64(3*hcPerPageMax) || out["total_entries"] != float64(3*hcPerPageMax) || out["note"] != nil {
+		t.Errorf("all = count %v total %v note %v", out["count"], out["total_entries"], out["note"])
+	}
+	if f.count(http.MethodGet, "/v1/images") != 3 || !strings.Contains(f.last().Query, "page=3") || !strings.Contains(f.last().Query, "per_page=50") {
+		t.Errorf("paging requests = %d, last query %s", f.count(http.MethodGet, "/v1/images"), f.last().Query)
+	}
+
+	// One page by default, with the paging figures.
+	res, _ = h.handleList(ctx, toolRequest(map[string]any{"resource": "image", "page": float64(2), "per_page": float64(10)}))
+	out = hcDecode(t, res)
+	if out["count"] != 10.0 || out["page"] != 2.0 || out["next_page"] != 3.0 || out["last_page"] != 3.0 {
+		t.Errorf("one page = %s", resultText(t, res))
+	}
+
+	// A listing that never ends stops at the cap and says so.
+	f.mu.Lock()
+	f.imagePages = 1000
+	f.mu.Unlock()
+	saved := hcMaxPages
+	hcMaxPages = 3
+	t.Cleanup(func() { hcMaxPages = saved })
+	before := f.count(http.MethodGet, "/v1/images")
+	res, _ = h.handleList(ctx, toolRequest(map[string]any{"resource": "image", "all": true}))
+	out = hcDecode(t, res)
+	if note, _ := out["note"].(string); !strings.Contains(note, "stopped after 3 pages") || out["count"] != float64(3*hcPerPageMax) {
+		t.Errorf("cap = count %v note %q", out["count"], out["note"])
+	}
+	if f.count(http.MethodGet, "/v1/images")-before != 3 {
+		t.Errorf("cap requests = %d", f.count(http.MethodGet, "/v1/images")-before)
+	}
+}
+
+func TestConnectionAddHetznerCloud(t *testing.T) {
+	isolateConfigDir(t)
+	ct := NewConfigTools(&config.Config{}, nil)
+	add := func(args map[string]any) (string, bool) {
+		t.Helper()
+		res, err := ct.handleConnectionAdd(context.Background(), toolRequest(args))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resultText(t, res), res.IsError
+	}
+	if text, isErr := add(map[string]any{"name": "db", "type": config.TypeMariaDB, "host": "x", "allow_lifecycle": true}); !isErr || !strings.Contains(text, "allow_lifecycle applies to type") {
+		t.Errorf("hetzner field on another type: %q", text)
+	}
+	if text, isErr := add(map[string]any{"name": "h0", "type": config.TypeHetznerCloud, "read_only": true, "allow_lifecycle": true}); !isErr || !strings.Contains(text, "allow_lifecycle") {
+		t.Errorf("read_only with allow_lifecycle: %q", text)
+	}
+	if text, isErr := add(map[string]any{"name": "h1", "type": config.TypeHetznerCloud, "protected_resources": []any{"server:prod-*", 7}}); !isErr || !strings.Contains(text, "not a string") {
+		t.Errorf("list with a number: %q", text)
+	}
+	if text, isErr := add(map[string]any{"name": "h1", "type": config.TypeHetznerCloud, "protected_resources": map[string]any{"a": "b"}}); !isErr || !strings.Contains(text, "list of strings") {
+		t.Errorf("object instead of a list: %q", text)
+	}
+	if text, isErr := add(map[string]any{"name": "h1", "type": config.TypeHetznerCloud, "protected_resources": []any{"sever:x"}}); !isErr || !strings.Contains(text, "unknown kind") {
+		t.Errorf("bad kind in the list: %q", text)
+	}
+	text, isErr := add(map[string]any{"name": "h2", "type": config.TypeHetznerCloud, "protected_resources": []any{"server:prod-*", " zone:example.com "}, "allow_lifecycle": true})
+	if isErr {
+		t.Fatal(text)
+	}
+	if !strings.Contains(text, "h2-token") {
+		t.Errorf("no hint to store the token: %q", text)
+	}
+	c := ct.cfg.FindAnyConnection("h2")
+	if c == nil || !c.AllowLifecycle || c.URL != config.HetznerCloudDefaultURL || len(c.ProtectedResources) != 2 || c.ProtectedResources[1] != "zone:example.com" {
+		t.Errorf("stored connection = %+v", c)
+	}
+	text, isErr = add(map[string]any{"name": "h3", "type": config.TypeHetznerCloud, "protected_resources": "my-cell-01\nserver:prod-*\n", "url": "https://api.hetzner.cloud/"})
+	if isErr {
+		t.Fatal(text)
+	}
+	c = ct.cfg.FindAnyConnection("h3")
+	if c == nil || c.AllowLifecycle || len(c.ProtectedResources) != 2 || c.URL != "https://api.hetzner.cloud/" {
+		t.Errorf("stored connection = %+v", c)
 	}
 }
 
@@ -786,6 +959,17 @@ func TestHetznerCloud_PassThrough(t *testing.T) {
 	if res.IsError {
 		t.Errorf("pass-through rrset write: %s", resultText(t, res))
 	}
+	res, _ = h.handleAPIRequest(ctx, toolRequest(map[string]any{"method": "PUT", "path": "/v1/images/5", "body": map[string]any{"type": "snapshot"}}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "allow_lifecycle") {
+		t.Errorf("pass-through backup→snapshot conversion without lifecycle: %s", resultText(t, res))
+	}
+	if f.count(http.MethodPut, "/v1/images/5") != 0 {
+		t.Error("the refused image PUT reached the API")
+	}
+	res, _ = h.handleAPIRequest(ctx, toolRequest(map[string]any{"method": "PUT", "path": "/v1/images/5", "body": map[string]any{"description": "renamed"}}))
+	if res.IsError || !strings.Contains(resultText(t, res), "HTTP 200") {
+		t.Errorf("pass-through image description: %s", resultText(t, res))
+	}
 	res, _ = h.handleAPIRequest(ctx, toolRequest(map[string]any{"method": "POST", "path": "/v1/zones/example.com/actions/import_zonefile", "body": map[string]any{"zonefile": "x"}}))
 	if !res.IsError || !strings.Contains(resultText(t, res), "allow_lifecycle") {
 		t.Errorf("pass-through import: %s", resultText(t, res))
@@ -831,10 +1015,22 @@ func TestHetznerCloud_Classify(t *testing.T) {
 		{"PUT", "/v1/pricing", hcRead, false, ""},
 	}
 	for _, c := range cases {
-		got := hcClassify(c.method, c.path)
+		got := hcClassify(c.method, c.path, nil)
 		if got.Known != c.known || (c.known && got.Class != c.class) || got.ID != c.id {
 			t.Errorf("%s %s: got class %s known %v id %q; want %s %v %q", c.method, c.path, got.Class, got.Known, got.ID, c.class, c.known, c.id)
 		}
+	}
+	// A PUT on an image is a plain write — unless the body converts a backup
+	// into a billed snapshot, which the update tool treats as lifecycle.
+	if got := hcClassify("PUT", "/v1/images/5", map[string]any{"description": "x"}); got.Class != hcWrite || !got.Known {
+		t.Errorf("PUT image description: %+v", got)
+	}
+	if got := hcClassify("PUT", "/v1/images/5", map[string]any{"type": "snapshot"}); got.Class != hcLifecycle || !got.Known || got.ID != "5" {
+		t.Errorf("PUT image type: %+v", got)
+	}
+	// Unknown write shapes still name the resource addressed, so the guard runs.
+	if got := hcClassify("POST", "/v1/servers/42/magic/7", nil); got.Known || got.ID != "42" || got.Res == nil {
+		t.Errorf("unknown shape: %+v", got)
 	}
 }
 
@@ -875,6 +1071,34 @@ func TestHetznerCloud_ErrorsAndRetry(t *testing.T) {
 	}
 	if f.count(http.MethodPut, "/v1/servers/2") != 2 {
 		t.Errorf("PUT count = %d, want 2", f.count(http.MethodPut, "/v1/servers/2"))
+	}
+
+	// A gateway failure is retried for a GET, never for a POST; a dropped
+	// connection likewise — the POST may have gone through.
+	f.mu.Lock()
+	f.gateway502["GET /locations"] = 1
+	f.gateway502["POST /volumes"] = 1
+	f.mu.Unlock()
+	res, _ = h.handleAPIGet(ctx, toolRequest(map[string]any{"path": "/v1/locations"}))
+	if res.IsError || f.count(http.MethodGet, "/v1/locations") != 2 {
+		t.Errorf("GET after 502: %s / %d attempts", resultText(t, res), f.count(http.MethodGet, "/v1/locations"))
+	}
+	res, _ = h.handleCreate(ctx, toolRequest(map[string]any{"resource": "volume", "body": map[string]any{"name": "v", "size": 10, "location": "fsn1"}}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "502") || f.count(http.MethodPost, "/v1/volumes") != 1 {
+		t.Errorf("POST after 502: %s / %d attempts", resultText(t, res), f.count(http.MethodPost, "/v1/volumes"))
+	}
+	f.mu.Lock()
+	f.dropOnce["POST /ssh_keys"] = true
+	f.mu.Unlock()
+	res, _ = h.handleCreate(ctx, toolRequest(map[string]any{"resource": "ssh_key", "body": map[string]any{"name": "k2", "public_key": "ssh-ed25519 AAAA"}}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "request failed") || f.count(http.MethodPost, "/v1/ssh_keys") != 1 {
+		t.Errorf("POST on a dropped connection: %s / %d attempts", resultText(t, res), f.count(http.MethodPost, "/v1/ssh_keys"))
+	}
+	if !hcRetryNetError(http.MethodGet, fmt.Errorf("reset")) || hcRetryNetError(http.MethodPost, fmt.Errorf("reset")) {
+		t.Error("transport retries must depend on the method")
+	}
+	if _, ok := hcRetryAfter(http.MethodPost, 409, []byte(`{"error":{"code":"conflict","message":"x"}}`)); !ok {
+		t.Error("a conflict is retried for every method")
 	}
 
 	wrong := newTestHetznerCloud(t, f, func(c *config.Connection) { c.Token = "tok_wrong" })

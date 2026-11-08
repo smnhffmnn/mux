@@ -52,7 +52,6 @@ const (
 	hcMaxBody        = 16 << 20  // largest response read
 	hcPerPageDefault = 25        // the API's default page size
 	hcPerPageMax     = 50        // the API's cap
-	hcMaxPages       = 40        // all=true stops here (40 × 50 items)
 	hcInlineMax      = 256 << 10 // JSON results inlined up to this size; larger ones go to a blob
 	hcRawInlineMax   = 1 << 20   // pass-through responses inlined up to this size
 	hcWaitDefault    = 60 * time.Second
@@ -61,6 +60,10 @@ const (
 	hcRateLimitWarn  = 360 // results mention the remaining request budget below this (10 % of the default 3600/h)
 	hcActionIDsChunk = 25  // ids per GET /actions poll (the API takes many; hcloud-go uses 25)
 )
+
+// hcMaxPages is where all=true stops (40 × 50 items); a variable so tests
+// can shorten the walk.
+var hcMaxPages = 40
 
 // hcPollIntervals paces the action polling: quick at first, then every
 // five seconds. The API's budget refills by one request per second.
@@ -74,7 +77,7 @@ type hcClass uint8
 const (
 	hcRead      hcClass = iota // always allowed
 	hcWrite                    // not on read_only connections: reversible changes without cost — labels, names, DNS records, rules, attachments, protection, graceful reboots
-	hcLifecycle                // additionally needs allow_lifecycle: costs money or destroys data or availability
+	hcLifecycle                // additionally needs allow_lifecycle: costs money, destroys data, or cuts power hard (graceful shutdown and reboot are writes)
 )
 
 func (c hcClass) String() string {
@@ -284,7 +287,7 @@ var hcResources = []hcResource{
 		FilterEnums: map[string][]string{"sort": hcSortNameCreated},
 		Create: []hcField{
 			hcF("name", true, ""),
-			hcF("rules", false, "[{direction: in|out, protocol: tcp|udp|icmp|esp|gre, port: \"22\" or \"80-85\" or \"any\", source_ips: [cidr…] for in, destination_ips for out, description}]"),
+			hcF("rules", false, "[{direction: in|out, protocol: tcp|udp|icmp|esp|gre, port: \"22\" or \"1024-5000\" (tcp and udp only), source_ips: [cidr…] for in, destination_ips for out, description}]"),
 			hcF("apply_to", false, "[{type: server, server: {id}} | {type: label_selector, label_selector: {selector}}]"),
 			hcF("labels", false, ""),
 		},
@@ -367,7 +370,7 @@ var hcResources = []hcResource{
 			{Name: "delete_service", Class: hcWrite, Body: []hcField{hcF("listen_port", true, "")}},
 			{Name: "add_target", Class: hcWrite, Body: []hcField{hcF("type", true, "server, label_selector or ip"), hcF("server", false, "{id}"), hcF("label_selector", false, "{selector}"), hcF("ip", false, "{ip}"), hcF("use_private_ip", false, "")}},
 			{Name: "remove_target", Class: hcWrite, Body: []hcField{hcF("type", true, ""), hcF("server", false, "{id}"), hcF("label_selector", false, "{selector}"), hcF("ip", false, "{ip}")}},
-			{Name: "attach_to_network", Class: hcWrite, Body: []hcField{hcF("network", true, "id"), hcF("ip", false, "")}},
+			{Name: "attach_to_network", Class: hcWrite, Body: []hcField{hcF("network", true, "id"), hcF("ip", false, ""), hcF("ip_range", false, "")}},
 			{Name: "detach_from_network", Class: hcWrite, Body: []hcField{hcF("network", true, "id")}},
 			{Name: "change_algorithm", Class: hcWrite, Body: []hcField{hcF("type", true, "round_robin or least_connections")}},
 			hcDNSPtr,
@@ -439,7 +442,7 @@ var hcResources = []hcResource{
 		Kind: "server_type", Collection: "server_types", Item: "server_type", IDParam: "id",
 		Doc:     "sizes with prices per location and availability",
 		Filters: []string{"name"},
-		Summary: []string{"id", "name", "description", "cores", "memory", "disk", "cpu_type", "architecture", "category", "storage_type", "deprecation", "locations", "prices"},
+		Summary: []string{"id", "name", "description", "cores", "memory", "disk", "cpu_type", "architecture", "category", "storage_type", "locations", "prices"},
 	},
 	{
 		Kind: "zone", Collection: "zones", Item: "zone", IDParam: "id_or_name",
@@ -447,9 +450,11 @@ var hcResources = []hcResource{
 		Filters:     []string{"name", "mode", "label_selector", "sort"},
 		FilterEnums: map[string][]string{"mode": {"primary", "secondary"}, "sort": hcSortNameCreated},
 		Create: []hcField{
-			hcF("name", true, "the domain, lower case, no trailing dot"), hcF("mode", false, "primary (default) or secondary"),
+			hcF("name", true, "the domain, lower case, no trailing dot"), hcF("mode", true, "primary or secondary"),
 			hcF("ttl", false, "default TTL, 60…2147483647, default 3600"), hcF("labels", false, ""),
 			hcF("primary_nameservers", false, "secondary mode: [{address, port, tsig_key, tsig_algorithm}]"),
+			hcF("rrsets", false, "primary mode: [{name, type, ttl, records}] created with the zone"),
+			hcF("zonefile", false, "primary mode: a BIND zone file imported at creation (not together with rrsets)"),
 		},
 		CreateClass: hcWrite,
 		CreateExtra: []string{"action"},
@@ -643,8 +648,12 @@ func NewHetznerCloud(conn config.Connection, dialer Dialer) (*HetznerCloud, erro
 		readOnly:       conn.ReadOnly,
 		allowLifecycle: conn.AllowLifecycle && !conn.ReadOnly,
 		guards:         guards,
-		client:         &http.Client{Transport: transport, Timeout: hcRequestTimeout},
-		poll:           hcPollIntervals,
+		// Redirects are not followed: the token would travel to wherever the
+		// response points, and the API answers no 3xx.
+		client: &http.Client{Transport: transport, Timeout: hcRequestTimeout, CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}},
+		poll: hcPollIntervals,
 	}, nil
 }
 
@@ -703,9 +712,13 @@ type hcResponse struct {
 }
 
 // do sends one request under /v1 with the connection's token and reads the
-// body. A conflict (the resource changed during the request) and a gateway
-// failure are retried once; a 429 is not — the budget refills by one
-// request per second, the error says when it is full again.
+// body. A conflict (409: the resource changed during the request, the API
+// asks for a retry and applied nothing) is retried once for every method; a
+// gateway failure (502, 504) and a transport failure are retried once for
+// GET, PUT and DELETE only — a POST creates a resource or starts an action,
+// and the first request may have gone through. A 429 is never retried: the
+// budget refills by one request per second, the error says when it is full
+// again.
 func (h *HetznerCloud) do(ctx context.Context, method, path string, query url.Values, body any) (*hcResponse, error) {
 	var payload []byte
 	if body != nil {
@@ -737,7 +750,7 @@ func (h *HetznerCloud) do(ctx context.Context, method, path string, query url.Va
 		}
 		resp, err := h.client.Do(req)
 		if err != nil {
-			if attempt == 0 && ctx.Err() == nil && hcRetryNetError(err) {
+			if attempt == 0 && ctx.Err() == nil && hcRetryNetError(method, err) {
 				if hcSleep(ctx, time.Second) {
 					continue
 				}
@@ -754,7 +767,7 @@ func (h *HetznerCloud) do(ctx context.Context, method, path string, query url.Va
 		}
 		h.noteRateLimit(resp.Header)
 		if attempt == 0 && ctx.Err() == nil {
-			if wait, ok := hcRetryAfter(resp.StatusCode, data); ok && hcSleep(ctx, wait) {
+			if wait, ok := hcRetryAfter(method, resp.StatusCode, data); ok && hcSleep(ctx, wait) {
 				continue
 			}
 		}
@@ -762,25 +775,48 @@ func (h *HetznerCloud) do(ctx context.Context, method, path string, query url.Va
 	}
 }
 
-func hcRetryNetError(err error) bool {
+// hcIdempotent reports whether a method may be sent twice without a second
+// effect: a GET reads, a PUT sets the same fields again, a DELETE answers
+// 404 the second time. A POST is not — it creates a resource or starts an
+// action, and a lost response does not mean a lost request.
+func hcIdempotent(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodPut, http.MethodDelete:
+		return true
+	}
+	return false
+}
+
+// hcRetryNetError decides whether a transport failure is retried once: only
+// for idempotent methods, and not after a timeout (60 s are not worth a
+// second minute). Every error http.Client returns is a *url.Error and thus a
+// net.Error, so the method, not the error type, is the deciding factor.
+func hcRetryNetError(method string, err error) bool {
+	if !hcIdempotent(method) {
+		return false
+	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
-		return false // a timeout of 60 s is not worth a second minute
+		return false
 	}
-	return errors.As(err, &ne) || errors.Is(err, io.ErrUnexpectedEOF)
+	return true
 }
 
 // hcRetryAfter decides whether a response is retried and after how long:
-// conflict (409) after half a second, bad gateway and gateway timeout after
-// a second. Everything else — the rate limit included — is reported.
-func hcRetryAfter(status int, data []byte) (time.Duration, bool) {
+// conflict (409, the API applied nothing and asks for a retry) after half a
+// second for every method; bad gateway and gateway timeout after a second
+// for idempotent methods. Everything else — the rate limit included — is
+// reported.
+func hcRetryAfter(method string, status int, data []byte) (time.Duration, bool) {
 	switch status {
 	case http.StatusConflict:
 		if e := hcParseError(status, data); e.Code == "conflict" {
 			return 500 * time.Millisecond, true
 		}
 	case http.StatusBadGateway, http.StatusGatewayTimeout:
-		return time.Second, true
+		if hcIdempotent(method) {
+			return time.Second, true
+		}
 	}
 	return 0, false
 }
@@ -1039,11 +1075,16 @@ func (h *HetznerCloud) protect(ctx context.Context, res *hcResource, id string, 
 	name := ""
 	if obj != nil {
 		name = hcName(obj)
-	} else if res.IDParam == "id_or_name" && !hcNumeric(id) {
-		name = id
 	} else {
+		// One read — also for a zone addressed by name: the guard matches the
+		// name Hetzner knows, not the spelling the caller used (trailing dot,
+		// upper case, punycode).
 		var raw map[string]map[string]any
 		if _, err := h.callJSON(ctx, http.MethodGet, "/"+res.Collection+"/"+url.PathEscape(id), nil, nil, &raw); err != nil {
+			var apiErr *hcAPIError
+			if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+				return err // the resource does not exist — that is the answer, not a guard failure
+			}
 			return fmt.Errorf("cannot check the protected_resources guard — reading %s %s failed: %w", res.Kind, id, err)
 		}
 		name = hcName(raw[res.Item])
@@ -1070,18 +1111,24 @@ func hcSplitActions(data []byte) (actions []map[string]any, extra map[string]any
 		return nil, nil, fmt.Errorf("decode Hetzner response: %w", err)
 	}
 	extra = map[string]any{}
-	for k, v := range raw {
-		switch k {
-		case "action":
-			var a map[string]any
-			if json.Unmarshal(v, &a) == nil && a != nil {
-				actions = append(actions, a)
-			}
-		case "actions", "next_actions":
+	// Fixed order: the action of the call first, then the lists.
+	if v, ok := raw["action"]; ok {
+		var a map[string]any
+		if json.Unmarshal(v, &a) == nil && a != nil {
+			actions = append(actions, a)
+		}
+	}
+	for _, k := range []string{"actions", "next_actions"} {
+		if v, ok := raw[k]; ok {
 			var list []map[string]any
 			if json.Unmarshal(v, &list) == nil {
 				actions = append(actions, list...)
 			}
+		}
+	}
+	for k, v := range raw {
+		switch k {
+		case "action", "actions", "next_actions":
 		default:
 			var x any
 			_ = json.Unmarshal(v, &x)
@@ -1241,11 +1288,33 @@ func hcAPIPath(raw string) (string, error) {
 	return pathPart, nil
 }
 
+// hcPathValue validates a value that goes into a path segment (a zone, a
+// record set name): no slash, no whitespace or control character, no dot
+// segment — a value that would change the path's shape is refused before
+// escaping, whatever the server would make of it.
+func hcPathValue(v, what string) error {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return fmt.Errorf("%s is required", what)
+	}
+	if v == "." || v == ".." {
+		return fmt.Errorf("%s %q is a dot segment", what, v)
+	}
+	for _, r := range v {
+		if r == '/' || r == '\\' || r == '%' || r == '?' || r == '#' || r <= ' ' || r == 0x7f {
+			return fmt.Errorf("%s %q carries a character that cannot stand in a path (slash, percent, whitespace, control)", what, v)
+		}
+	}
+	return nil
+}
+
 // hcClassify maps method and /v1 path onto the registry. A GET is always a
 // read. A write the registry does not know is reported as unknown — the
 // caller admits it only with allow_lifecycle, because mux cannot tell what
-// it does.
-func hcClassify(method, path string) hcTarget {
+// it does. The body matters for one case: a PUT whose body carries a key
+// the resource lists under UpdateLifecycle (an image's type) is a lifecycle
+// operation, as the update tool treats it.
+func hcClassify(method, path string, body map[string]any) hcTarget {
 	path, _, _ = strings.Cut(path, "?")
 	segs := strings.Split(strings.Trim(strings.TrimPrefix(path, hcVersionPath), "/"), "/")
 	t := hcTarget{What: method + " " + path}
@@ -1255,6 +1324,9 @@ func hcClassify(method, path string) hcTarget {
 	}
 	if len(segs) == 0 || segs[0] == "" {
 		return t
+	}
+	if len(segs) >= 2 && segs[1] != "actions" {
+		t.ID = segs[1] // whatever the shape, the second segment addresses a resource of the collection
 	}
 	// DNS record sets: /zones/{zone}/rrsets[/{name}/{type}[/actions/{a}]]
 	if segs[0] == "zones" && len(segs) >= 3 && segs[2] == "rrsets" {
@@ -1279,11 +1351,15 @@ func hcClassify(method, path string) hcTarget {
 	case len(segs) == 1 && method == http.MethodPost && res.Create != nil:
 		t.Class, t.Known = res.CreateClass, true
 	case len(segs) == 2 && segs[1] != "actions":
-		t.ID = segs[1]
 		switch method {
 		case http.MethodPut:
 			if res.Update != nil {
 				t.Class, t.Known = hcWrite, true
+				for _, k := range res.UpdateLifecycle {
+					if _, ok := body[k]; ok {
+						t.Class = hcLifecycle
+					}
+				}
 			}
 		case http.MethodDelete:
 			if res.Deletable {
@@ -1291,7 +1367,6 @@ func hcClassify(method, path string) hcTarget {
 			}
 		}
 	case len(segs) == 4 && segs[2] == "actions" && method == http.MethodPost:
-		t.ID = segs[1]
 		if a := res.action(segs[3]); a != nil {
 			t.Class, t.Known = a.Class, true
 		}

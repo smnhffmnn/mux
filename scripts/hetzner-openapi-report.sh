@@ -25,8 +25,8 @@ paths_snap="$(jq -r '.paths | keys[]' "$snap" | sort)"
 added="$(comm -13 <(echo "$paths_snap") <(echo "$paths_live"))"
 removed="$(comm -23 <(echo "$paths_snap") <(echo "$paths_live"))"
 count() { if [[ -n "$1" ]]; then printf '%s\n' "$1" | wc -l | tr -d ' '; else echo 0; fi; }
-echo "paths added ($(count "$added")):"; echo "${added:-  none}" | sed 's/^/  /'
-echo "paths removed ($(count "$removed")):"; echo "${removed:-  none}" | sed 's/^/  /'
+echo "paths added ($(count "$added")):"; echo "${added:-none}" | sed 's/^/  /'
+echo "paths removed ($(count "$removed")):"; echo "${removed:-none}" | sed 's/^/  /'
 echo
 
 echo "methods changed on common paths:"
@@ -46,7 +46,7 @@ dep_filter='[.paths | to_entries[] | .key as $p | .value | to_entries[] | select
 dep_live="$(jq -r "$dep_filter" "$live" | sort)"
 dep_snap="$(jq -r "$dep_filter" "$snap" | sort)"
 echo "operations newly deprecated:"; comm -13 <(echo "$dep_snap") <(echo "$dep_live") | sed 's/^/  /' | grep . || echo "  none"
-echo "deprecated operations in the live document ($(count "$dep_live")):"; echo "${dep_live:-  none}" | sed 's/^/  /'
+echo "deprecated operations in the live document ($(count "$dep_live")):"; echo "${dep_live:-none}" | sed 's/^/  /'
 echo
 
 if diff -q <(jq -S --indent 1 -f "$norm" "$live") "$snap" >/dev/null; then

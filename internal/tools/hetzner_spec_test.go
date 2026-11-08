@@ -54,6 +54,7 @@ type hcSpecSchema struct {
 	AnyOf      []*hcSpecSchema          `json:"anyOf"`
 	Items      *hcSpecSchema            `json:"items"`
 	Properties map[string]*hcSpecSchema `json:"properties"`
+	Required   []string                 `json:"required"`
 	Enum       []any                    `json:"enum"`
 	Deprecated bool                     `json:"deprecated"`
 }
@@ -250,21 +251,26 @@ func (s *hcSpec) enumValues(sc *hcSpecSchema) map[string]bool {
 }
 
 // resolvePath follows a dotted summary path into a schema: properties by
-// name, arrays through their items.
-func (s *hcSpec) resolvePath(sc *hcSpecSchema, path string) bool {
+// name, arrays through their items. It returns the schema the path ends on
+// and whether any property on the way is deprecated.
+func (s *hcSpec) resolvePath(sc *hcSpecSchema, path string) (*hcSpecSchema, bool, bool) {
 	cur := sc
+	deprecated := false
 	for _, seg := range strings.Split(path, ".") {
 		props := s.properties(cur)
 		next, ok := props[seg]
 		if !ok {
-			return false
+			return nil, false, false
+		}
+		if r := s.resolve(next); r != nil && r.Deprecated {
+			deprecated = true
 		}
 		cur = next
 		if it := s.items(cur); it != nil {
 			cur = it
 		}
 	}
-	return true
+	return cur, true, deprecated
 }
 
 func hcSpecKeys[V any](m map[string]V) []string {
@@ -290,29 +296,70 @@ func TestHetznerCloud_SpecEndpoints(t *testing.T) {
 			t.Errorf("%s: %s %s is deprecated in the OpenAPI document — move the registry to its successor", key, ep.Method, ep.Path)
 		}
 		documented := op.queryParams()
+		registered := map[string]bool{}
 		for _, p := range ep.Params {
-			if _, ok := documented[p]; !ok {
+			registered[p] = true
+			q, ok := documented[p]
+			if !ok {
 				t.Errorf("%s: query parameter %q is not documented for %s %s (documented: %s)", key, p, ep.Method, ep.Path, strings.Join(hcSpecKeys(documented), ", "))
+				continue
+			}
+			if q.Schema != nil && q.Schema.Deprecated {
+				t.Errorf("%s: query parameter %q is deprecated in the document", key, p)
+			}
+		}
+		// Both directions: a documented query parameter the registry lacks is
+		// a filter an agent cannot use — new API surface, reported as such.
+		pages := false
+		for name, q := range documented {
+			if name == "page" || name == "per_page" {
+				pages = true
+				continue
+			}
+			if !registered[name] && !(q.Schema != nil && q.Schema.Deprecated) {
+				t.Errorf("%s: %s %s documents the query parameter %q that the registry does not offer", key, ep.Method, ep.Path, name)
 			}
 		}
 		// Lists page: the registry sends page and per_page on every list call
 		// but the project-wide GET /actions, which takes ids only.
-		if key != "actions.list" && (strings.HasSuffix(key, ".list") || strings.HasSuffix(key, ".actions") || strings.HasSuffix(key, ".actions.of")) {
-			for _, p := range []string{"page", "per_page"} {
-				if _, ok := documented[p]; !ok {
-					t.Errorf("%s: %s %s does not document %s", key, ep.Method, ep.Path, p)
-				}
-			}
+		isList := key != "actions.list" && (strings.HasSuffix(key, ".list") || strings.HasSuffix(key, ".actions") || strings.HasSuffix(key, ".actions.of") || key == "network.members")
+		if isList && !pages {
+			t.Errorf("%s: %s %s does not document page/per_page", key, ep.Method, ep.Path)
+		}
+		if !isList && pages {
+			t.Errorf("%s: %s %s documents page/per_page but the registry does not page it", key, ep.Method, ep.Path)
 		}
 	}
+}
+
+// requiredProps collects the required property names of a schema through
+// $ref and allOf (the union a request must satisfy).
+func (s *hcSpec) requiredProps(sc *hcSpecSchema) map[string]bool {
+	out := map[string]bool{}
+	var walk func(*hcSpecSchema, int)
+	walk = func(sc *hcSpecSchema, depth int) {
+		sc = s.resolve(sc)
+		if sc == nil || depth > 10 {
+			return
+		}
+		for _, r := range sc.Required {
+			out[r] = true
+		}
+		for _, sub := range sc.AllOf {
+			walk(sub, depth+1)
+		}
+	}
+	walk(sc, 0)
+	return out
 }
 
 func TestHetznerCloud_SpecBodyFields(t *testing.T) {
 	spec := loadHetznerSpec(t)
 	eps := hcEndpoints()
+	var optionalMissing []string
 	for _, key := range hcSpecKeys(eps) {
 		ep := eps[key]
-		if len(ep.Body) == 0 {
+		if ep.Method == http.MethodGet || ep.Method == http.MethodDelete {
 			continue
 		}
 		op, ok := spec.op(t, ep.Method, ep.Path)
@@ -321,14 +368,51 @@ func TestHetznerCloud_SpecBodyFields(t *testing.T) {
 		}
 		body := op.bodySchema()
 		if body == nil {
-			t.Errorf("%s: %s %s documents no JSON request body, the registry names %d fields", key, ep.Method, ep.Path, len(ep.Body))
+			if len(ep.Body) > 0 {
+				t.Errorf("%s: %s %s documents no JSON request body, the registry names %d fields", key, ep.Method, ep.Path, len(ep.Body))
+			}
 			continue
 		}
 		props := spec.properties(body)
+		required := spec.requiredProps(body)
+		registered := map[string]hcField{}
 		for _, f := range ep.Body {
-			if _, ok := props[f.Name]; !ok {
+			registered[f.Name] = f
+			sc, ok := props[f.Name]
+			if !ok {
 				t.Errorf("%s: body field %q is not in the request body of %s %s (documented: %s)", key, f.Name, ep.Method, ep.Path, strings.Join(hcSpecKeys(props), ", "))
+				continue
 			}
+			if r := spec.resolve(sc); r != nil && r.Deprecated {
+				t.Errorf("%s: body field %q is deprecated in the document", key, f.Name)
+			}
+			if f.Required != required[f.Name] {
+				t.Errorf("%s: body field %q: registry required=%v, document required=%v", key, f.Name, f.Required, required[f.Name])
+			}
+		}
+		// A documented field the registry does not name: required ones fail
+		// (a call without it fails at the API), optional ones are new surface.
+		for name, sc := range props {
+			if _, ok := registered[name]; ok {
+				continue
+			}
+			if r := spec.resolve(sc); r != nil && r.Deprecated {
+				continue
+			}
+			if required[name] {
+				t.Errorf("%s: %s %s requires the body field %q that the registry does not name", key, ep.Method, ep.Path, name)
+			} else {
+				optionalMissing = append(optionalMissing, key+": "+name)
+			}
+		}
+	}
+	if len(optionalMissing) > 0 {
+		sort.Strings(optionalMissing)
+		msg := fmt.Sprintf("%d optional body fields of the document are not in the registry (not described to agents):\n  %s", len(optionalMissing), strings.Join(optionalMissing, "\n  "))
+		if hcSpecLive() && os.Getenv("HETZNER_COVERAGE") != "strict" {
+			t.Log(msg)
+		} else {
+			t.Error(msg)
 		}
 	}
 }
@@ -357,8 +441,11 @@ func TestHetznerCloud_SpecSummaryFields(t *testing.T) {
 			if !found {
 				path = f
 			}
-			if !spec.resolvePath(item, path) {
+			_, ok, deprecated := spec.resolvePath(item, path)
+			if !ok {
 				t.Errorf("%s: summary field %q does not resolve in the %s schema", r.Kind, path, r.Item)
+			} else if deprecated {
+				t.Errorf("%s: summary field %q is deprecated in the document", r.Kind, path)
 			}
 		}
 		// The list response wraps the items under the collection name.
@@ -483,6 +570,62 @@ func TestHetznerCloud_SpecResponseExtras(t *testing.T) {
 					t.Errorf("%s: DeleteAction = %v, the document says %v", r.Kind, r.DeleteAction, hasAction)
 				}
 			}
+		}
+	}
+}
+
+// TestHetznerCloud_SpecResponseFields pins the response shapes the handlers
+// decode: the list wrapper and meta.pagination of every list, the action
+// (or actions) of every action and delete-with-action response, the zone
+// file, the metrics and pricing paths, and the fields hcActionSummary reads.
+func TestHetznerCloud_SpecResponseFields(t *testing.T) {
+	spec := loadHetznerSpec(t)
+	eps := hcEndpoints()
+	must := func(key string, sc *hcSpecSchema, paths ...string) {
+		t.Helper()
+		for _, p := range paths {
+			if _, ok, _ := spec.resolvePath(sc, p); !ok {
+				t.Errorf("%s: response has no %q", key, p)
+			}
+		}
+	}
+	for _, key := range hcSpecKeys(eps) {
+		ep := eps[key]
+		op, ok := spec.op(t, ep.Method, ep.Path)
+		if !ok {
+			continue
+		}
+		resp := op.responseSchema()
+		switch {
+		case key == "actions.list":
+			must(key, resp, "actions")
+		case key == "actions.get":
+			must(key, resp, "action.id", "action.command", "action.status", "action.progress", "action.started", "action.finished", "action.resources", "action.error")
+		case key == "pricing":
+			must(key, resp, "pricing.currency", "pricing.server_types.name", "pricing.server_types.prices.location", "pricing.load_balancer_types.prices.location")
+		case key == "zone.zonefile":
+			must(key, resp, "zonefile")
+		case strings.HasSuffix(key, ".metrics"):
+			must(key, resp, "metrics.start", "metrics.end", "metrics.step", "metrics.time_series")
+		case key == "network.members":
+			must(key, resp, "members", "meta.pagination.page")
+		case strings.HasSuffix(key, ".list") || strings.HasSuffix(key, ".actions") || strings.HasSuffix(key, ".actions.of"):
+			must(key, resp, "meta.pagination.page", "meta.pagination.per_page", "meta.pagination.next_page", "meta.pagination.last_page", "meta.pagination.total_entries")
+		case strings.Contains(key, ".action."):
+			props := spec.properties(resp)
+			if _, ok := props["action"]; !ok {
+				if _, ok := props["actions"]; !ok {
+					t.Errorf("%s: response carries neither action nor actions", key)
+				}
+			}
+		case strings.HasSuffix(key, ".delete"):
+			// Reported in TestHetznerCloud_SpecResponseExtras through DeleteAction;
+			// record sets answer with an action as the handler expects.
+			if key == "rrset.delete" {
+				must(key, resp, "action")
+			}
+		case key == "rrset.create":
+			must(key, resp, "rrset", "action")
 		}
 	}
 }

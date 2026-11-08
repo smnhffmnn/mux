@@ -87,7 +87,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description(typeDesc),
 			),
 			mcp.WithString("url",
-				mcp.Description("URL for the connection (required for proxy/http/api types, optional for types with defaults like firecrawl/brave; bunq: https://api.bunq.com by default, https://public-api.sandbox.bunq.com for the sandbox)."),
+				mcp.Description("URL for the connection (required for proxy/http/api types, optional for types with defaults like firecrawl/brave; bunq: https://api.bunq.com by default, https://public-api.sandbox.bunq.com for the sandbox; hetzner-cloud: https://api.hetzner.cloud by default)."),
 			),
 			mcp.WithString("host",
 				mcp.Description("Host (for mariadb, postgresql, clickhouse, imap, meilisearch, ssh)."),
@@ -120,7 +120,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("Extra HTTP headers sent with every request (http and proxy types), one 'Name: Value' per line (e.g. 'Notion-Version: 2022-06-28')."),
 			),
 			mcp.WithBoolean("read_only",
-				mcp.Description("Expose reading tools only (databases: no execute; http: no request; youtrack-rest: no write and no admin tools; ssh: no upload, exec limited to allow_commands or the built-in list of reading commands; supabase: no deploy, delete, migrations_apply or secret writes, SQL on the read-only endpoint; nylas: reading and searching only — no archive/delete/move, no drafts, no sending, no delete_grant or api_request; bunq: no create_draft_payment, no api_request). Default false."),
+				mcp.Description("Expose reading tools only (databases: no execute; http: no request; youtrack-rest: no write and no admin tools; ssh: no upload, exec limited to allow_commands or the built-in list of reading commands; supabase: no deploy, delete, migrations_apply or secret writes, SQL on the read-only endpoint; nylas: reading and searching only — no archive/delete/move, no drafts, no sending, no delete_grant or api_request; bunq: no create_draft_payment, no api_request; hetzner-cloud: list, get, actions, metrics, pricing, record sets, zonefile and api_get only). Default false."),
 			),
 			mcp.WithString("protected_fields",
 				mcp.Description("youtrack-rest: fields this connection never writes, one per line as 'Project:Field' or 'Field' (e.g. 'P:Sprint priority')."),
@@ -164,7 +164,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 			mcp.WithBoolean("allow_lifecycle",
 				mcp.Description("hetzner-cloud: allow the operations that cost money or destroy data or availability — creating servers, volumes, IPs and load balancers, every delete, resize, change of type, rebuild, hard power cut, snapshots and backups, zone import (default false; not together with read_only)")),
 			mcp.WithString("protected_resources",
-				mcp.Description("hetzner-cloud: resources never changed, acted on or deleted through the connection — one per line, \"name\", \"kind:name\" or a pattern with *, e.g. server:prod-*")),
+				mcp.Description("hetzner-cloud: resources never changed, acted on or deleted through the connection — a list of strings or one per line, \"name\", \"kind:name\" or a pattern with *, e.g. server:prod-*")),
 			mcp.WithString("grant_id",
 				mcp.Description("nylas: id of the connected mailbox (grant). Alternatively set user to the mailbox address and mux looks the grant up. Both empty: application mode — the key serves every grant of the application, the mail tools take a mailbox argument, and the administration tools (grants, connectors, webhooks, api_get/api_request) appear."),
 			),
@@ -678,8 +678,12 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 	if _, ok := args["allow_lifecycle"]; ok {
 		conn.AllowLifecycle = req.GetBool("allow_lifecycle", false)
 	}
-	if v := req.GetString("protected_resources", ""); v != "" {
-		conn.ProtectedResources = config.ParseLines(v)
+	if v, ok := args["protected_resources"]; ok && v != nil {
+		list, err := config.ParseLinesOrList(v)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid protected_resources: %v", err)), nil
+		}
+		conn.ProtectedResources = list
 	}
 	if err := config.ValidateHetznerCloud(conn); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil

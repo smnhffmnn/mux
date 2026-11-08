@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-// HetznerCloudDefaultURL is the Cloud API host. A field so a test server
-// can stand in; a real project is always behind this host.
+// HetznerCloudDefaultURL is the Cloud API host. The url field lets a test
+// server stand in; a real project is always behind this host.
 const HetznerCloudDefaultURL = "https://api.hetzner.cloud"
 
 // HetznerCloudFields are the config keys that only the hetzner-cloud type
@@ -88,7 +88,7 @@ func ParseResourceGuards(entries []string) ([]ResourceGuard, error) {
 			return nil, fmt.Errorf("entry %q: unknown kind %q (one of %s)", e, kind, strings.Join(HetznerCloudKinds, ", "))
 		}
 		if _, err := path.Match(pattern, ""); err != nil {
-			return nil, fmt.Errorf("entry %q: bad pattern: %v", e, err)
+			return nil, fmt.Errorf("entry %q: bad pattern: %w", e, err)
 		}
 		out = append(out, ResourceGuard{Kind: kind, Pattern: strings.ToLower(pattern)})
 	}

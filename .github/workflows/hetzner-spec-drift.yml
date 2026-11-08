@@ -26,6 +26,9 @@ on:
     - cron: "52 6 * * 1" # Mondays 06:52 UTC
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   drift:
     runs-on: ubuntu-latest
