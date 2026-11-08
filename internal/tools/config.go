@@ -161,6 +161,10 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 			mcp.WithString("region",
 				mcp.Description("nylas: data-residency region of the Nylas application, 'us' (default) or 'eu'."),
 			),
+			mcp.WithBoolean("allow_lifecycle",
+				mcp.Description("hetzner-cloud: allow the operations that cost money or destroy data or availability — creating servers, volumes, IPs and load balancers, every delete, resize, change of type, rebuild, hard power cut, snapshots and backups, zone import (default false; not together with read_only)")),
+			mcp.WithString("protected_resources",
+				mcp.Description("hetzner-cloud: resources never changed, acted on or deleted through the connection — one per line, \"name\", \"kind:name\" or a pattern with *, e.g. server:prod-*")),
 			mcp.WithString("grant_id",
 				mcp.Description("nylas: id of the connected mailbox (grant). Alternatively set user to the mailbox address and mux looks the grant up. Both empty: application mode — the key serves every grant of the application, the mail tools take a mailbox argument, and the administration tools (grants, connectors, webhooks, api_get/api_request) appear."),
 			),
@@ -384,6 +388,14 @@ func (ct *ConfigTools) handleConnectionList(_ context.Context, _ mcp.CallToolReq
 		}
 		if c.Type == config.TypeSupabase && c.ProjectRef != "" {
 			entry["project_ref"] = c.ProjectRef
+		}
+		if c.Type == config.TypeHetznerCloud {
+			if c.AllowLifecycle {
+				entry["allow_lifecycle"] = true
+			}
+			if len(c.ProtectedResources) > 0 {
+				entry["protected_resources"] = c.ProtectedResources
+			}
 		}
 		if c.Type == config.TypeBunq {
 			if config.BunqSandbox(c) {

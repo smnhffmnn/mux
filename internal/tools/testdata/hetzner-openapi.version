@@ -1,4 +1,4 @@
-source: /home/agent/projects/context/var/hetzner-research/spec/cloud.spec.json
+source: https://docs.hetzner.cloud/cloud.spec.json
 fetched: 2026-11-08
 sha256: b52b06bc2f8dfccb
 openapi: 3.1.2, info.version 1.0.0

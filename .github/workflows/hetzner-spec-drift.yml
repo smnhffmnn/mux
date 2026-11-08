@@ -41,7 +41,7 @@ jobs:
         run: curl -fsSL --max-time 120 https://docs.hetzner.cloud/cloud.spec.json -o /tmp/hetzner-openapi.json
 
       - name: Check the registry against the live document
-        run: HETZNER_OPENAPI=/tmp/hetzner-openapi.json go test -tags notray ./internal/tools -run 'TestHetznerCloud_Spec' -count=1 -v
+        run: HETZNER_OPENAPI=/tmp/hetzner-openapi.json go test -tags notray ./internal/tools -run 'TestHetznerCloud_' -count=1 -v
 
       # Also after a failed spec test — that is when the report matters.
       - name: Report what changed since the vendored snapshot

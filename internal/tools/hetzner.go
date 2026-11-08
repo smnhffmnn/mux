@@ -1056,17 +1056,6 @@ func (h *HetznerCloud) protect(ctx context.Context, res *hcResource, id string, 
 	return nil
 }
 
-// protected reports whether a name is covered by the guards, for callers
-// that already hold the object.
-func (h *HetznerCloud) protected(kind, name string) bool {
-	for _, g := range h.guards {
-		if g.Matches(kind, name) {
-			return true
-		}
-	}
-	return false
-}
-
 // --- Actions ---
 
 // hcSplitActions takes the actions out of a response — action, actions,

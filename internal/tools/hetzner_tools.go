@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1592,7 +1591,6 @@ type HetznerCloudInfo struct {
 	Zones           int
 	RateRemaining   int
 	RateLimit       int
-	ReadOnlyToken   bool // unknown from reads; kept false
 	CollectionsRead []string
 }
 
@@ -1620,14 +1618,4 @@ func (h *HetznerCloud) Verify(ctx context.Context) (*HetznerCloudInfo, error) {
 	info.RateRemaining, info.RateLimit = h.rateRemaining, h.rateLimit
 	h.mu.Unlock()
 	return info, nil
-}
-
-// hcSortedKeys is a small helper for deterministic output in messages.
-func hcSortedKeys(m map[string]any) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
