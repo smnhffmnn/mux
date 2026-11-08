@@ -655,6 +655,23 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 	if err := config.ValidateBunq(conn); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	// hetzner-cloud-only fields: a boolean switch has no empty value to
+	// ignore, so its mere presence on another type is an error (same rule
+	// as the mail fields above).
+	for _, key := range config.HetznerCloudFields {
+		if _, ok := args[key]; ok && typ != config.TypeHetznerCloud {
+			return mcp.NewToolResultError(fmt.Sprintf("%s applies to type %q only, not %q", key, config.TypeHetznerCloud, typ)), nil
+		}
+	}
+	if _, ok := args["allow_lifecycle"]; ok {
+		conn.AllowLifecycle = req.GetBool("allow_lifecycle", false)
+	}
+	if v := req.GetString("protected_resources", ""); v != "" {
+		conn.ProtectedResources = config.ParseLines(v)
+	}
+	if err := config.ValidateHetznerCloud(conn); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	config.ApplyConnectionDefaults(&conn)
 	// A key stored before the connection was added (secret_set first,
@@ -673,6 +690,9 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 	msg := fmt.Sprintf("connection %q (%s) created", name, typ)
 	if typ == config.TypeSupabase && conn.Token == "" {
 		msg += fmt.Sprintf(". Next: store the access token with secret_set %q; the connection registers once the token is there.", name+"-token")
+	}
+	if typ == config.TypeHetznerCloud && conn.Token == "" {
+		msg += fmt.Sprintf(". Next: store the project's API token with secret_set %q; the connection registers once the token is there.", name+"-token")
 	}
 	if typ == config.TypeBunq && conn.Token == "" {
 		msg += fmt.Sprintf(". Next: store the API key with secret_set %q; the connection registers once the key is there and does bunq's installation, device and session itself on first use (the RSA key and the API context land in the secret store as %q and %q).", name+"-token", name+"-private-key", name+"-api-context")

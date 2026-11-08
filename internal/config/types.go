@@ -145,6 +145,12 @@ var AllTypes = []TypeDef{
 		{Key: "url", Label: "API URL", Placeholder: "https://api.bunq.com (default) | https://public-api.sandbox.bunq.com"},
 		{Key: "token", Label: "API Key", Placeholder: "bunq app → Settings → Developers → API keys", Secret: true},
 	}},
+	{Type: TypeHetznerCloud, Label: "Hetzner Cloud", Fields: []TypeField{
+		{Key: "token", Label: "API Token", Placeholder: "Hetzner Console → project → Security → API Tokens; Read or Read & Write — one token per project", Secret: true},
+		{Key: "url", Label: "API URL", Placeholder: "https://api.hetzner.cloud (default)"},
+		{Key: "allow_lifecycle", Label: "Allow lifecycle operations (cost money or destroy data: create, resize, rebuild, power off, delete)", Checkbox: true},
+		{Key: "protected_resources", Label: "Protected resources (optional)", Placeholder: "One per line, \"name\", \"kind:name\" or a pattern with * — never changed, acted on or deleted through this connection, e.g. server:prod-* or my-cell-01", Multiline: true},
+	}},
 	{Type: TypeGit, Label: "Git Credential", Fields: []TypeField{
 		{Key: "host", Label: "Git Host", Placeholder: "gitlab.com"},
 		{Key: "user", Label: "Username", Placeholder: "oauth2"},

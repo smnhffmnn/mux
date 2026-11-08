@@ -209,6 +209,15 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		if err == nil {
 			toolDefs = bq.Tools()
 		}
+	case config.TypeHetznerCloud:
+		// The write tools depend on read_only, so they are removed before
+		// every registration (same rule as bunq).
+		s.DeleteTools(hetznerCloudConditionalToolNames(conn.Name)...)
+		var hc *HetznerCloud
+		hc, err = NewHetznerCloud(conn, dialer)
+		if err == nil {
+			toolDefs = hc.Tools()
+		}
 	case config.TypeGit:
 		// Passive connection type — no MCP tools.
 		// Used by the git credential helper (mux git-credential) to look up
@@ -291,6 +300,8 @@ func DefaultInstructions(conn config.Connection) string {
 		return DefaultSupabaseInstructions
 	case config.TypeBunq:
 		return BunqInstructions(conn)
+	case config.TypeHetznerCloud:
+		return HetznerCloudInstructions(conn)
 	default:
 		return ""
 	}

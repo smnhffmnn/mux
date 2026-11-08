@@ -201,6 +201,19 @@ type Connection struct {
 	Region  string `toml:"region,omitempty" json:"region,omitempty"`
 	GrantID string `toml:"grant_id,omitempty" json:"grantId,omitempty"`
 
+	// Hetzner Cloud connection type (TypeHetznerCloud): one project behind
+	// the Cloud API, the token is Token / {name}-token, URL defaults to
+	// https://api.hetzner.cloud. AllowLifecycle admits the operations that
+	// cost money or destroy data or availability — creating billed resources,
+	// every delete, resize, change of type, rebuild, hard power cut, backups
+	// and snapshots, zone import; without it a writable connection changes
+	// labels, names, DNS records, firewall rules, attachments and the like.
+	// ProtectedResources lists resources ("name", "kind:name", patterns with
+	// *) the connection never changes, acts on or deletes, whatever the other
+	// switches say. Both enforced in code, like the field guards above.
+	AllowLifecycle     bool     `toml:"allow_lifecycle,omitempty" json:"allowLifecycle,omitempty"`
+	ProtectedResources []string `toml:"protected_resources,omitempty" json:"protectedResources,omitempty"`
+
 	// SSH connection type (TypeSSH). Auth selects the key source: "key"
 	// (default — the secret {name}-private-key or key_file) or "agent" (the
 	// user's ssh-agent, no key in mux). HostKey pins the server's public key;
@@ -258,6 +271,9 @@ func (c *Connection) Enabled() bool {
 	case c.Type == TypeBunq:
 		// The URL has a default; the API key is what a connection needs. The
 		// RSA key and the API context are created on first use.
+		return c.Token != ""
+	case c.Type == TypeHetznerCloud:
+		// The URL has a default; the project token is what a connection needs.
 		return c.Token != ""
 	case c.Type == TypeSSH:
 		// With auth = "agent" the key lives in the user's ssh-agent, so no
@@ -919,6 +935,10 @@ func ApplyConnectionDefaults(c *Connection) {
 	case TypeBunq:
 		if c.URL == "" {
 			c.URL = BunqProductionURL
+		}
+	case TypeHetznerCloud:
+		if c.URL == "" {
+			c.URL = HetznerCloudDefaultURL
 		}
 	}
 }

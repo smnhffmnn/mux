@@ -680,6 +680,67 @@ The endpoints the type calls and the fields it decodes are listed in a registry 
 
 **Versions.** bunq signals no API version to a client: the path stays `/v1` (bunq: no version 2 planned, fields are added without a bump and removed only after a deprecation notice), the document's `info.version` reads `1.0` in every revision, and responses carry no version, deprecation or sunset header. Two things move: the **tag of the bunq/doc repository** (the document is regenerated per tag; `1.27.17.56` of 2025-04-17 at the time of writing, with `swagger.json` unchanged since — while the API itself kept moving: the idempotency header, the `CustomerStatement` wrapper and the deprecations below are not in it), recorded with the snapshot in `testdata/bunq-openapi.version` and compared by the report; and the **deprecations in the titles of bunq's API reference** (`[deprecated since YYYYMMDD]`), which `scripts/bunq-deprecations.sh` reads from `https://doc.bunq.com/sitemap.md`, filters to the resources the type uses and compares with the vendored `testdata/bunq-deprecations.txt` — a new one fails the drift job until it has been read (`--update` rewrites the list). The `bunq API drift` workflow runs both weekly and, because the document describes neither the response wrappers nor the fields a listing really carries, runs the type against the sandbox end to end (`go test -tags notray,live ./internal/tools -run TestBunqLive` — the sandbox hands out the test user, no secret needed): that live test pins the wrappers, the draft listing's shape, the refusal texts the session renewal relies on, and that `api_request` refuses the acceptance of a draft.
 
+### Hetzner Cloud
+
+One [Hetzner Cloud](https://www.hetzner.com/cloud) project behind the [Cloud API](https://docs.hetzner.cloud/reference/cloud): servers, images, ISOs, volumes, networks, firewalls, Floating and Primary IPs, Load Balancers, certificates, placement groups, SSH keys, locations, server types with prices and availability, the price list, actions and metrics — and the **DNS zones with their record sets** that the API carries since Hetzner DNS moved into the Cloud Console. Everything the `hcloud` CLI does against the Cloud API is reachable (Storage Boxes are not: they live behind a different API host).
+
+The API is regular — every resource has a collection, an item, actions under `/{collection}/{id}/actions/{name}`, the same pagination and the same asynchronous Action — so the type describes the resources in a **registry** and offers a small set of tools that take the resource kind as an argument: `list`, `get`, `create`, `update`, `delete`, `action`, next to the DNS record tools, the action and metrics readers, `pricing` and a confined pass-through. The tool descriptions are generated from the registry, so what a tool says it takes is what the spec tests check against Hetzner's OpenAPI document. Ids may be given as the id or the name.
+
+**Three guards, in code.** `read_only` keeps the reading tools only. **`allow_lifecycle`** (default off) admits the operations that cost money or destroy data or availability: creating billed resources (servers, volumes, Floating and Primary IPs, Load Balancers), every `delete`, `resize`, `change_type`, `rebuild`, the hard `poweroff` and `reset`, `create_image`, `enable_backup`/`disable_backup`, `delete_subnet`, converting a backup into a snapshot, and `import_zonefile` (it replaces every record set of a zone). Without it a writing connection still changes labels, names, reverse DNS, firewall rules, routes, attachments, protection, DNS records (record sets are plain writes — the DNS connection's job) and creates the free resources (networks, firewalls, SSH keys, placement groups, certificates, zones). **`protected_resources`** lists resources the connection never changes, acts on or deletes, whatever the other switches say: entries `name`, `kind:name` or a pattern with `*` (`server:prod-*`, `my-cell-01`), matched against the resource's name; record sets of a protected zone are covered with it. A protected resource addressed by a numeric id is read once to learn its name before the refusal. The pass-through `api_request` is classified by method and path against the same registry and refused where a tool would be; a write the registry does not know is admitted only with `allow_lifecycle`. The guards cover the resource a call addresses — an operation on another resource that references a protected one (attaching a volume to it, applying a firewall to it) is not covered; Hetzner's own `protection` (delete, rebuild, change) is the layer under that and is set with the `change_protection` action.
+
+**Required fields**: `name`, `type`
+
+**Optional fields**: `url` (default `https://api.hetzner.cloud`; the host only, the type appends `/v1`), `read_only` (default: false), `allow_lifecycle` (default: false; not together with `read_only`), `protected_resources` (list), `tunnel`, `instructions`
+
+**Secrets**: `{name}-token` in secret store — an API token of the project (Hetzner Console → project → Security → API Tokens; permission Read, or Read & Write for a writing connection). Tokens are per project: a second project is a second connection.
+
+```toml
+[[connections]]
+name = "hetzner-dns"
+type = "hetzner-cloud"
+# the project that holds the DNS zones: records are plain writes, zones are created
+# without lifecycle; deleting a zone or importing a zone file would need allow_lifecycle
+instructions = "Zones example.com and example.dev. Point names with set_records."
+
+[[connections]]
+name = "hetzner-cells"
+type = "hetzner-cloud"
+read_only = true
+protected_resources = ["server:cell-*", "volume:cell-*", "firewall:cell-*"]
+# switch read_only off and allow_lifecycle on for the moment a new host is created
+```
+
+**MCP tools exposed**:
+
+| Tool | Description |
+|------|-------------|
+| `{name}_list` | Resources of one kind as compact rows (id, name, status, type, location, IPs, labels, protection …) — `resource` is one of `server`, `image`, `iso`, `volume`, `network`, `firewall`, `floating_ip`, `primary_ip`, `load_balancer`, `load_balancer_type`, `certificate`, `placement_group`, `ssh_key`, `location`, `server_type`, `zone`. Filters: `name` (exact), `label_selector`, `sort` (comma-separated, `field:desc`), `filters` (the resource's own, e.g. `{"status": "running"}`, `{"type": ["snapshot", "backup"]}`, `include_deprecated`, `architecture`, `mode`); `page`/`per_page` (max 50) or `all` (up to 2000 rows); `full` returns the objects as the API sends them. Unknown filters are refused with the list of the resource's filters. |
+| `{name}_get` | One resource as the API returns it, by id or name. A `server_type` carries prices and availability per location (`locations[].deprecation`, `prices[]`), a `zone` its nameservers and delegation status. |
+| `{name}_list_actions` | Actions (command, status, progress, started, finished, resources, error): of a resource (`resource` + `id`), of a kind (`resource`), or by `ids`. `status`, `sort`, `page`, `per_page`. |
+| `{name}_get_action` | One action by id. |
+| `{name}_wait_action` | Poll actions (`ids`) until none is running, up to `timeout` seconds (default 60, max 600) — for a create, delete or action that returned a running action. |
+| `{name}_metrics` | Time series of a `server` (`cpu`, `disk`, `network`) or `load_balancer` (`open_connections`, `connections_per_second`, `requests_per_second`, `bandwidth`) between `start` and `end` (RFC 3339), optional `step`. |
+| `{name}_pricing` | The price list: currency, VAT rate, IPs, images, volumes, backup surcharge, server and load balancer types per location. `server_types` (names) and `location` narrow it. |
+| `{name}_list_rrsets` | Record sets of a zone (name, type, ttl, records, labels, protection) with `name`, `type`, `label_selector`, `sort`, paging or `all`. |
+| `{name}_get_rrset` | One record set by `zone`, `name` (relative, `@` for the apex) and `type`. |
+| `{name}_zonefile` | The zone as a BIND zone file, generated by Hetzner. |
+| `{name}_api_get` | Raw GET on any `/v1/…` path including the query string (network members, new API surface); `output_file` saves the response. |
+| `{name}_create` | *Not with `read_only`.* Create a resource from a JSON `body`; the description lists the fields per kind. Servers, volumes, Floating and Primary IPs and Load Balancers need `allow_lifecycle`; networks, firewalls, certificates, placement groups, SSH keys and zones do not. Returns the object, the actions (waited for by default, `wait`/`timeout`) and extras such as `root_password`. |
+| `{name}_update` | *Not with `read_only`.* PUT on a resource: `name`, `labels` (replace the set), `description`, `auto_delete`, `expose_routes_to_vswitch` per kind; converting an image's `type` to `snapshot` needs `allow_lifecycle`. |
+| `{name}_delete` | *Needs `allow_lifecycle`.* Delete a resource; servers, load balancers and zones answer with an action that is waited for, the rest with 204. |
+| `{name}_action` | *Not with `read_only`.* Run an action (`resource`, `id`, `action`, `params`) and wait for it; the description lists every action per kind with its body and marks the lifecycle ones (†). Required params are checked before the request. |
+| `{name}_set_records` | *Not with `read_only`.* Set the records of a record set in one step: creates it when the zone has none of that `name` and `type`, otherwise replaces the records (`set_records`) and, when `ttl` differs, changes the TTL. Records are values or `{value, comment}`. |
+| `{name}_create_rrset` · `{name}_update_rrset` · `{name}_delete_rrset` | *Not with `read_only`.* Create a record set (`records`, `ttl`, `labels`), update its `labels` (PUT), delete it — plain writes. |
+| `{name}_rrset_action` | *Not with `read_only`.* `set_records`, `add_records`, `remove_records`, `update_records` (comments), `change_ttl`, `change_protection` on a record set. |
+| `{name}_import_zonefile` | *Needs `allow_lifecycle`.* Replace every record set of a zone with a BIND zone file; change-protected sets make the import fail. |
+| `{name}_api_request` | *Not with `read_only`.* Raw POST, PUT or DELETE with a JSON body, classified against the registry: a delete, a create of a billed resource, a lifecycle action and any unknown write need `allow_lifecycle`; a protected resource is refused. Actions are not waited for. |
+
+**Actions and waiting.** Changes are asynchronous: the API answers with an `action` (or `actions`, plus `next_actions` on a server or volume create) whose status moves from `running` to `success` or `error`. The writing tools wait by default, polling `GET /actions?id=…` — after one, one, two, two, three and then every five seconds — up to `timeout` (default 60 s, max 600 s), and return the final actions; a wait that runs out returns the running ids with a note for `wait_action`. An action that ended in `error` makes the result an error result with the API's error inside.
+
+**Names, paging, limits.** Names are unique per project, so every `id` argument takes a name too (zones take it in the path, the rest is looked up with the collection's `name` filter). Lists page with `page`/`per_page` (the API's cap is 50) and report `total_entries` and `next_page`; `all` follows up to 40 pages. Results above 256 KiB go to a blob with the first part inline. The project's budget is 3600 requests per hour (one refills per second); results carry a note below 360 remaining, a 429 is reported with the time the budget is full again and never retried; a `conflict` (409) and a gateway failure (502, 504) are retried once. Hetzner's errors come through with status, code, message and details (`invalid_input` names the field), plus a hint for `protected`, `locked`, `unauthorized`, `forbidden` and `deprecated_api_endpoint`.
+
+**Drift.** The registry is the contract: `scripts/hetzner-openapi-snapshot.sh` vendors Hetzner's [OpenAPI document](https://docs.hetzner.cloud/cloud.spec.json) (prose, examples and code samples stripped) under `internal/tools/testdata/hetzner-openapi.json`, and the spec tests (`TestHetznerCloud_Spec*`) hold the type against it in both directions — every path, method, query parameter, body field, summary field, filter value and record type the type names must be in the document and must not be deprecated, and every non-deprecated operation of the document must be reachable through the registry (178 endpoints against 190 operations, 12 of them deprecated, at the time of writing). The `Hetzner Cloud API drift` workflow runs the same tests against the live document every Monday and prints `scripts/hetzner-openapi-report.sh` (paths added or removed, methods changed, operations newly deprecated): a rename or removal fails there before it fails a user, new API surface shows up as "not built yet" (the coverage test only logs it against the live document), and a deprecation is read before Hetzner answers `410 deprecated_api_endpoint`. The document carries no version that moves (`info.version` stays `1.0.0`); the snapshot records the sha256 of the normalized document and the fetch date in `hetzner-openapi.version`.
+
 ### Meilisearch
 
 Connects to a Meilisearch instance and exposes hybrid search (keyword + semantic) over an index. Useful for knowledge bases with vector embeddings configured.

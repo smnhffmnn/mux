@@ -213,4 +213,9 @@ type SaveConnectionRequest struct {
 	// nylas connection type. FromName and AllowSend above are shared with imap.
 	Region  string `json:"region,omitempty"`
 	GrantID string `json:"grantId,omitempty"`
+
+	// hetzner-cloud connection type. The checkbox is always sent by the
+	// form; ProtectedResources is newline-separated.
+	AllowLifecycle     bool   `json:"allowLifecycle,omitempty"`
+	ProtectedResources string `json:"protectedResources,omitempty"`
 }
