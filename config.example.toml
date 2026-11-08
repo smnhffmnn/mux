@@ -207,6 +207,17 @@ read_only = true
 # read_only = false                             # true: reading and searching only (no archive/delete/move, drafts, sending, delete_grant, api_request)
 # API key stored as secret (key: "mail-hub-token") — the application's key, or an IAM key bound to the application
 
+# bunq: a bank account behind the bunq public API — accounts, payments, events, draft payments, statements.
+# mux does bunq's way in itself (RSA key, installation, device, session) and keeps what it creates as
+# secrets "bank-private-key" and "bank-api-context". Money leaves an account only as a draft the owner
+# accepts in the bunq app; the direct payment endpoints are not part of the type.
+# [[connections]]
+# name = "bank"
+# type = "bunq"
+# url = "https://api.bunq.com"                  # default; https://public-api.sandbox.bunq.com for the sandbox
+# read_only = true                              # reading tools only: no create_draft_payment, no api_request
+# API key stored as secret (key: "bank-token") — bunq app → Settings → Developers → API keys; bound to the IP it is first used from
+
 # --- Tunnels ---
 # Connections can reference tunnels by name to route traffic through WireGuard or SSH.
 

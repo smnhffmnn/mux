@@ -133,9 +133,9 @@ All fields use **camelCase** JSON keys.
 | `user` | string | databases | Database username |
 | `password` | string | no | Database password. If omitted, mux checks the secret store for `{name}-password`. |
 | `database` | string | no | Database name (ClickHouse defaults to `"default"`) |
-| `readOnly` | boolean | no | Reading tools only (default: false). What that means per type is in [connections.md](connections.md); for nylas: no archive/delete/move, no drafts, no sending, no `delete_grant`, no `api_request` — refused together with `allowSend`. |
+| `readOnly` | boolean | no | Reading tools only (default: false). What that means per type is in [connections.md](connections.md); for nylas: no archive/delete/move, no drafts, no sending, no `delete_grant`, no `api_request` — refused together with `allowSend`; for bunq: no `create_draft_payment`, no `api_request`. |
 | `secure` | boolean | no | TLS for ClickHouse HTTP (default: false) |
-| `url` | string | proxy/http/api | Endpoint URL |
+| `url` | string | proxy/http/api | Endpoint URL. bunq: `https://api.bunq.com` (default) or the sandbox host. |
 | `token` | string | no | API key or Bearer token. If omitted, mux checks the secret store for `{name}-token`. |
 | `oauth` | boolean | no | Use OAuth 2.0 + PKCE for proxy connections (default: false). The `sentry`, `notion`, `asana-mcp`, and `higgsfield` types force `oauth: true` regardless of the JSON value — these proxy types only support OAuth. |
 | `scopes` | string | no | OAuth scopes. Used by `microsoft-graph` and OAuth proxy types (e.g. `higgsfield` defaults to `openid email offline_access`). |
@@ -149,7 +149,7 @@ All fields use **camelCase** JSON keys.
 | `hostKey` | string | no | ssh: the server's public key to pin (`"ssh-ed25519 AAAA…"`). Recommended for provisioned hosts — the server knows its machines, and no `known_hosts` has to be managed on the client. |
 | `allowCommands` | string[] | no | ssh: commands the connection may run, entries as leading tokens (`"systemctl status"`) |
 | `denyCommands` | string[] | no | ssh: commands it never runs, same form, wildcards `*`/`?` |
-| `privateKey` | string | no | ssh: the private key (PEM). If omitted, mux checks the secret store for `{name}-private-key`. |
+| `privateKey` | string | no | ssh: the private key (PEM). If omitted, mux checks the secret store for `{name}-private-key`. bunq: the RSA key the connection signs with; if omitted, mux checks the secret store and generates one there on first use. |
 | `passphrase` | string | no | ssh: passphrase of an encrypted `privateKey`. If omitted, mux checks the secret store for `{name}-private-key-passphrase`. |
 | `smtpHost` | string | no | imap: SMTP submission server for sending; signs in with `user` and `password` |
 | `smtpPort` | integer | no | imap: SMTP port (default 587 with STARTTLS; 465 is implicit TLS) |

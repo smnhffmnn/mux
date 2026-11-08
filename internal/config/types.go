@@ -141,6 +141,10 @@ var AllTypes = []TypeDef{
 		{Key: "from_name", Label: "Sender Name", Placeholder: "Jane Doe (optional)"},
 		{Key: "allow_send", Label: "Allow sending", Checkbox: true},
 	}},
+	{Type: TypeBunq, Label: "bunq", Fields: []TypeField{
+		{Key: "url", Label: "API URL", Placeholder: "https://api.bunq.com (default) | https://public-api.sandbox.bunq.com"},
+		{Key: "token", Label: "API Key", Placeholder: "bunq app → Settings → Developers → API keys", Secret: true},
+	}},
 	{Type: TypeGit, Label: "Git Credential", Fields: []TypeField{
 		{Key: "host", Label: "Git Host", Placeholder: "gitlab.com"},
 		{Key: "user", Label: "Username", Placeholder: "oauth2"},

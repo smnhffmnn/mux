@@ -1,0 +1,76 @@
+name: bunq API drift
+
+# The bunq connection type is a hand-written adapter over the bunq public
+# API. Its endpoints and the fields it decodes are listed in a registry
+# (internal/tools/bunq.go) and checked against bunq's published OpenAPI
+# document by the spec tests. CI runs them against the vendored snapshot;
+# this workflow runs them against the live document every week, so an
+# upstream rename or removal fails here before it fails a user, and new API
+# surface shows up in the report as "not built yet".
+#
+# bunq itself signals no version: the path stays /v1, info.version stays
+# "1.0", responses carry no version header. The marker that moves is the tag
+# of github.com/bunq/doc; the report prints the snapshot's tag against the
+# live one, and a separate step reads the "[deprecated …]" titles of bunq's
+# API reference, because deprecations are announced there and nowhere in
+# the document.
+#
+# The second job exercises the type against the bunq sandbox — the whole way
+# in (installation, device, session), reads, a draft payment, a statement
+# export, a renewed session — and pins what the document does not describe
+# (response wrappers, the fields a listing carries, the refusal texts the
+# session renewal relies on). It needs no secret: the sandbox hands out a
+# test user on request. The log carries counts and ids of test data only.
+
+on:
+  schedule:
+    - cron: "41 6 * * 1" # Mondays 06:41 UTC
+  workflow_dispatch:
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Fetch the live OpenAPI document
+        id: fetch
+        run: curl -fsSL --max-time 120 https://raw.githubusercontent.com/bunq/doc/develop/swagger.json -o /tmp/bunq-openapi.json
+
+      - name: Check the endpoints and fields mux uses against the live document
+        run: BUNQ_OPENAPI=/tmp/bunq-openapi.json go test -tags notray ./internal/tools -run 'TestBunq_Spec' -count=1 -v
+
+      # Also after a failed spec test — that is when the report matters.
+      - name: Report what changed since the vendored snapshot
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
+        run: scripts/bunq-openapi-report.sh /tmp/bunq-openapi.json internal/tools/testdata/bunq-openapi.json
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
+        with:
+          name: bunq-openapi-live
+          path: /tmp/bunq-openapi.json
+          retention-days: 30
+
+      # bunq versions by prose: deprecations are announced in the titles of
+      # the API reference, not in swagger.json. A new one that names a
+      # resource mux uses fails this step.
+      - name: Check bunq's reference for new deprecations of what mux uses
+        if: ${{ !cancelled() }}
+        run: scripts/bunq-deprecations.sh
+
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Exercise the type against the bunq sandbox
+        run: go test -tags notray,live ./internal/tools -run 'TestBunqLive' -count=1 -v -timeout 10m

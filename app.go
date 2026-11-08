@@ -271,6 +271,14 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 				summary += " · read-only"
 			}
 		}
+	case conn.Type == config.TypeBunq:
+		summary = "bunq"
+		if config.BunqSandbox(conn) {
+			summary += " sandbox"
+		}
+		if conn.ReadOnly {
+			summary += " · read-only"
+		}
 	case conn.Type == config.TypeNylas:
 		if config.NylasApplicationMode(conn) {
 			summary = fmt.Sprintf("Nylas %s · all grants of the application", conn.Region)
@@ -689,6 +697,16 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 			}
 			conn.ProjectRef, conn.URL = next.ProjectRef, next.URL
 		}
+		if conn.Type == config.TypeBunq {
+			// Written as sent: a cleared URL falls back to the production host.
+			next := *conn
+			next.URL = strings.TrimSpace(fields.URL)
+			config.ApplyConnectionDefaults(&next)
+			if err := config.ValidateBunq(next); err != nil {
+				return nil, err
+			}
+			conn.URL = next.URL
+		}
 		if conn.Type == config.TypeNylas {
 			// Written as sent, like the imap fields: a cleared field clears the
 			// value, an unticked checkbox switches sending off.
@@ -1054,6 +1072,8 @@ func (a *App) TestConnection(name string) *TestResult {
 		result = a.testSSH(*conn)
 	case config.TypeSupabase:
 		result = a.testSupabase(*conn)
+	case config.TypeBunq:
+		result = a.testBunq(*conn)
 	case config.TypeMariaDB:
 		result = a.testMariaDB(*conn)
 	case config.TypeClickHouse:
@@ -2347,6 +2367,47 @@ func (a *App) testSupabase(conn config.Connection) testResponse {
 		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Supabase check failed: %v", err)}
 	}
 	msg := fmt.Sprintf("Connected: project %s (%s, %s, %s)", p.Name, p.Ref, p.Region, p.Status)
+	if conn.ReadOnly {
+		msg += " — read-only"
+	}
+	return testResponse{Connection: conn.Name, Connected: true, Message: msg}
+}
+
+// testBunq signs in the way the tools do — key, installation and device on
+// first use, then a session — and lists the accounts, so a key bound to
+// another IP, a revoked key or a context from the wrong host is reported
+// here.
+func (a *App) testBunq(conn config.Connection) testResponse {
+	if conn.Token == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "API key not configured"}
+	}
+	var dialer tools.Dialer
+	if conn.Tunnel != "" {
+		t := a.tm.Get(conn.Tunnel)
+		if t == nil {
+			return tunnelUnavailable(conn)
+		}
+		testLog(conn.Name, "routing through tunnel %q", conn.Tunnel)
+		dialer = t
+	}
+	bq, err := tools.NewBunq(conn, dialer)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: err.Error()}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	testLog(conn.Name, "signing in at %s and listing the accounts", conn.URL)
+	info, err := bq.Verify(ctx)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("bunq check failed: %v", err)}
+	}
+	msg := fmt.Sprintf("Connected: %s (%s %d), %d accounts (%d active)", info.DisplayName, info.UserType, info.UserID, info.Accounts, info.Active)
+	if !info.Expires.IsZero() {
+		msg += fmt.Sprintf(", session until %s", info.Expires.Local().Format("2006-01-02 15:04"))
+	}
+	if info.Sandbox {
+		msg += " — sandbox"
+	}
 	if conn.ReadOnly {
 		msg += " — read-only"
 	}

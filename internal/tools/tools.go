@@ -200,6 +200,15 @@ func RegisterConnection(s *server.MCPServer, conn config.Connection, dialer Dial
 		if err == nil {
 			toolDefs = sb.Tools()
 		}
+	case config.TypeBunq:
+		// The write tools depend on read_only, so they are removed before
+		// every registration (same rule as nylas).
+		s.DeleteTools(bunqConditionalToolNames(conn.Name)...)
+		var bq *Bunq
+		bq, err = NewBunq(conn, dialer)
+		if err == nil {
+			toolDefs = bq.Tools()
+		}
 	case config.TypeGit:
 		// Passive connection type — no MCP tools.
 		// Used by the git credential helper (mux git-credential) to look up
@@ -280,6 +289,8 @@ func DefaultInstructions(conn config.Connection) string {
 		return DefaultSSHInstructions
 	case config.TypeSupabase:
 		return DefaultSupabaseInstructions
+	case config.TypeBunq:
+		return BunqInstructions(conn)
 	default:
 		return ""
 	}

@@ -11,7 +11,7 @@ set -euo pipefail
 live="$1"
 snap="$2"
 root="$(cd "$(dirname "$0")/.." && pwd)"
-norm="$root/scripts/nylas-openapi-normalize.jq"
+norm="$root/scripts/openapi-normalize.jq"
 
 echo "snapshot: $(jq -r '.info.version' "$snap")   live: $(jq -r '.info.version' "$live")"
 echo

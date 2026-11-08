@@ -46,6 +46,7 @@ const (
 	TypeSSH              = "ssh"
 	TypeSupabase         = "supabase"
 	TypeNylas            = "nylas"
+	TypeBunq             = "bunq"
 )
 
 // Connection.Source / Tunnel.Source values. SourceLocal marks entries
