@@ -132,6 +132,10 @@ func newHCFake(t *testing.T) *hcFake {
 				next = page + 1
 			}
 			write(w, 200, map[string]any{"images": out, "meta": map[string]any{"pagination": map[string]any{"page": page, "per_page": perPage, "previous_page": nil, "next_page": next, "last_page": f.imagePages, "total_entries": f.imagePages * perPage}}})
+		case p == "/servers/77" && r.Method == http.MethodGet:
+			write(w, 200, map[string]any{}) // an answer without the item
+		case p == "/servers/77" && r.Method == http.MethodPut:
+			write(w, 200, map[string]any{"server": map[string]any{"id": 77}})
 		case p == "/images/5" && r.Method == http.MethodGet:
 			write(w, 200, map[string]any{"image": map[string]any{"id": 5, "name": nil, "description": "nightly", "type": "backup", "status": "available", "labels": map[string]any{}}})
 		case p == "/images/5" && r.Method == http.MethodPut:
@@ -606,6 +610,22 @@ func TestHetznerCloud_Guards(t *testing.T) {
 		t.Errorf("records of a protected zone by id: %s", resultText(t, res))
 	}
 
+	// A guarded read that answers without the item fails closed.
+	res, _ = h.handleUpdate(ctx, toolRequest(map[string]any{"resource": "server", "id": "77", "body": map[string]any{"name": "x"}}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "answered without a server") || f.count(http.MethodPut, "/v1/servers/77") != 0 {
+		t.Errorf("guard read without item: %s", resultText(t, res))
+	}
+	// An unknown write that names no resource is refused while guards are set,
+	// even with allow_lifecycle.
+	hu := newTestHetznerCloud(t, f, func(c *config.Connection) {
+		c.AllowLifecycle = true
+		c.ProtectedResources = []string{"server:my-cell-*"}
+	})
+	res, _ = hu.handleAPIRequest(ctx, toolRequest(map[string]any{"method": "POST", "path": "/v1/unknown_things", "body": map[string]any{"a": 1}}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "protected_resources") || f.count(http.MethodPost, "/v1/unknown_things") != 0 {
+		t.Errorf("unknown write under guards: %s", resultText(t, res))
+	}
+
 	// Snapshots and backups have no name: an image guard matches their
 	// description.
 	hi := newTestHetznerCloud(t, f, func(c *config.Connection) { c.AllowLifecycle = true; c.ProtectedResources = []string{"image:night*"} })
@@ -756,7 +776,7 @@ func TestHetznerCloud_RecordsAndZones(t *testing.T) {
 		t.Fatalf("failed change_ttl not flagged: %s", resultText(t, res))
 	}
 	out = hcDecode(t, res)
-	if out["replaced"] != "rrset" || len(out["actions"].([]any)) != 1 || !strings.Contains(out["note"].(string), "records were replaced, the TTL was not changed") || !strings.Contains(out["note"].(string), "422") {
+	if out["replaced"] != "rrset" || len(out["actions"].([]any)) != 1 || !strings.Contains(out["note"].(string), "records were replaced") || !strings.Contains(out["note"].(string), "may not have been applied") || !strings.Contains(out["note"].(string), "422") {
 		t.Errorf("failed change_ttl result = %s", resultText(t, res))
 	}
 
@@ -779,6 +799,10 @@ func TestHetznerCloud_RecordsAndZones(t *testing.T) {
 	res, _ = h.handleCreateRRSet(ctx, toolRequest(map[string]any{"zone": "example.com", "name": "www", "type": "A", "records": []any{"1.1.1.1"}}))
 	if !res.IsError || !strings.Contains(resultText(t, res), "uniqueness_error") {
 		t.Errorf("create existing rrset: %s", resultText(t, res))
+	}
+	res, _ = h.handleCreateRRSet(ctx, toolRequest(map[string]any{"zone": "example.com", "name": "mail", "type": "A", "records": []any{"1.1.1.1"}, "ttl": float64(10)}))
+	if !res.IsError || !strings.Contains(resultText(t, res), "between 60 and") {
+		t.Errorf("create_rrset ttl range: %s", resultText(t, res))
 	}
 	res, _ = h.handleRRSetAction(ctx, toolRequest(map[string]any{"zone": "example.com", "name": "www", "type": "A", "action": "add_records", "params": map[string]any{"records": []any{"203.0.113.7"}}}))
 	if res.IsError {
@@ -860,8 +884,26 @@ func TestHetznerCloud_RecordsAndZones(t *testing.T) {
 		t.Errorf("get_action with a string id: %s", resultText(t, res))
 	}
 	res, _ = h.handleWaitAction(ctx, toolRequest(map[string]any{"ids": []any{float64(1001), float64(1001)}}))
-	if res.IsError {
-		t.Errorf("duplicate ids: %s", resultText(t, res))
+	if res.IsError || strings.Count(f.last().Query, "id=1001") != 1 {
+		t.Errorf("duplicate ids: %s / %s", resultText(t, res), f.last().Query)
+	}
+	// A wait whose polling fails says so instead of "still running after …".
+	f.mu.Lock()
+	f.actions[777] = 5
+	f.gateway502["GET /actions"] = 2 // the retry fails too
+	f.mu.Unlock()
+	res, _ = h.handleAction(ctx, toolRequest(map[string]any{"resource": "server", "id": "2", "action": "poweron"}))
+	f.mu.Lock()
+	delete(f.gateway502, "GET /actions")
+	f.mu.Unlock()
+	if note, _ := hcDecode(t, res)["note"].(string); !strings.Contains(note, "waiting for the actions failed") || !strings.Contains(note, "may still be running") || strings.Contains(note, "still running after") {
+		t.Errorf("aborted wait note = %q", note)
+	}
+	if _, timeout := hcWaitArgs(toolRequest(map[string]any{"timeout": 1e12})); timeout != hcWaitMax {
+		t.Errorf("timeout clamp = %s", timeout)
+	}
+	if _, timeout := hcWaitArgs(toolRequest(map[string]any{"timeout": -5.0})); timeout != hcWaitDefault {
+		t.Errorf("negative timeout = %s", timeout)
 	}
 
 	// A zone id that would change the path's shape is refused by the generic
@@ -1145,15 +1187,19 @@ func TestHetznerCloud_ErrorsAndRetry(t *testing.T) {
 		t.Errorf("GET after 502: %s / %d attempts", resultText(t, res), f.count(http.MethodGet, "/v1/locations"))
 	}
 	res, _ = h.handleCreate(ctx, toolRequest(map[string]any{"resource": "volume", "body": map[string]any{"name": "v", "size": 10, "location": "fsn1"}}))
-	if !res.IsError || !strings.Contains(resultText(t, res), "502") || f.count(http.MethodPost, "/v1/volumes") != 1 {
+	if !res.IsError || !strings.Contains(resultText(t, res), "502") || !strings.Contains(resultText(t, res), "may have gone through") || f.count(http.MethodPost, "/v1/volumes") != 1 {
 		t.Errorf("POST after 502: %s / %d attempts", resultText(t, res), f.count(http.MethodPost, "/v1/volumes"))
 	}
 	f.mu.Lock()
 	f.dropOnce["POST /ssh_keys"] = true
 	f.mu.Unlock()
 	res, _ = h.handleCreate(ctx, toolRequest(map[string]any{"resource": "ssh_key", "body": map[string]any{"name": "k2", "public_key": "ssh-ed25519 AAAA"}}))
-	if !res.IsError || !strings.Contains(resultText(t, res), "request failed") || f.count(http.MethodPost, "/v1/ssh_keys") != 1 {
+	if !res.IsError || !strings.Contains(resultText(t, res), "request failed") || !strings.Contains(resultText(t, res), "may have gone through") || f.count(http.MethodPost, "/v1/ssh_keys") != 1 {
 		t.Errorf("POST on a dropped connection: %s / %d attempts", resultText(t, res), f.count(http.MethodPost, "/v1/ssh_keys"))
+	}
+	res, _ = h.handleAPIGet(ctx, toolRequest(map[string]any{"path": "/v1/ratelimited"}))
+	if strings.Contains(resultText(t, res), "may have gone through") {
+		t.Errorf("a GET carries no gone-through hint: %s", resultText(t, res))
 	}
 	if !hcRetryNetError(http.MethodGet, fmt.Errorf("reset")) || hcRetryNetError(http.MethodPost, fmt.Errorf("reset")) || hcRetryNetError(http.MethodDelete, fmt.Errorf("reset")) {
 		t.Error("transport retries are for GET and PUT only")

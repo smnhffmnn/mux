@@ -1529,7 +1529,7 @@ func (h *HetznerCloud) handleSetRecords(ctx context.Context, req mcp.CallToolReq
 				actions = append(actions, more...)
 			}
 			if ttlErr != nil {
-				extra["note"] = "the records were replaced, the TTL was not changed: " + ttlErr.Error()
+				extra["note"] = "the records were replaced; the TTL change failed and may not have been applied — read the record set (get_rrset) before repeating it: " + ttlErr.Error()
 				res, rerr := h.actionResult(ctx, actions, extra, wait, timeout)
 				if res != nil {
 					res.IsError = true
@@ -1555,6 +1555,9 @@ func (h *HetznerCloud) handleCreateRRSet(ctx context.Context, req mcp.CallToolRe
 	}
 	body := map[string]any{"name": name, "type": typ, "records": records}
 	if ttl, ok := req.GetArguments()["ttl"].(float64); ok {
+		if ttl < hcTTLMin || ttl > hcTTLMax || ttl != float64(int64(ttl)) {
+			return hcErr(fmt.Errorf("ttl must be a whole number of seconds between %d and %d", hcTTLMin, hcTTLMax))
+		}
 		body["ttl"] = int(ttl)
 	}
 	if labels, ok := req.GetArguments()["labels"].(map[string]any); ok && len(labels) > 0 {
@@ -1729,6 +1732,11 @@ func (h *HetznerCloud) handleAPIRequest(ctx context.Context, req mcp.CallToolReq
 	if !target.Known {
 		if err := h.permit(hcLifecycle, target.What); err != nil {
 			return hcErr(fmt.Errorf("%s is not in this build's registry of the API; %w", target.What, err))
+		}
+		if len(h.guards) > 0 && (target.Res == nil || target.ID == "") {
+			// A write mux cannot place on a resource cannot be held against
+			// the protected list — with guards set, it is refused.
+			return hcErr(fmt.Errorf("%s is not in this build's registry of the API and names no resource mux can check against protected_resources — refused on a connection with protected resources; use the tools or an exact /v1/{collection}/{id}… path", target.What))
 		}
 	} else if err := h.permit(target.Class, target.What); err != nil {
 		return hcErr(err)

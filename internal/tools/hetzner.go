@@ -667,6 +667,7 @@ type hcAPIError struct {
 	Message string
 	Details json.RawMessage
 	Reset   time.Time // when the request budget recovers, on rate_limit_exceeded
+	Hint    string    // what to do next, when the status alone does not say
 }
 
 func (e *hcAPIError) Error() string {
@@ -701,15 +702,23 @@ func (e *hcAPIError) Error() string {
 	case "forbidden":
 		b.WriteString(" (the token lacks the permission — a Read token cannot write)")
 	}
+	if e.Hint != "" {
+		b.WriteString(" (" + e.Hint + ")")
+	}
 	return b.String()
 }
 
 // hcResponse is one answer of the API.
 type hcResponse struct {
+	Method string
 	Status int
 	Header http.Header
 	Body   []byte
 }
+
+// hcMaybeDone is the hint a POST or DELETE carries when the answer was lost
+// or came from a gateway: the request may have reached Hetzner.
+const hcMaybeDone = "the request may have gone through — read the resource or list_actions before repeating it"
 
 // do sends one request under /v1 with the connection's token and reads the
 // body. A conflict (409: the resource changed during the request, the API
@@ -755,6 +764,9 @@ func (h *HetznerCloud) do(ctx context.Context, method, path string, query url.Va
 					continue
 				}
 			}
+			if !hcIdempotent(method) && ctx.Err() == nil {
+				return nil, fmt.Errorf("request failed: %w (%s)", err, hcMaybeDone)
+			}
 			return nil, fmt.Errorf("request failed: %w", err)
 		}
 		data, err := io.ReadAll(io.LimitReader(resp.Body, hcMaxBody+1))
@@ -771,7 +783,7 @@ func (h *HetznerCloud) do(ctx context.Context, method, path string, query url.Va
 				continue
 			}
 		}
-		return &hcResponse{Status: resp.StatusCode, Header: resp.Header, Body: data}, nil
+		return &hcResponse{Method: method, Status: resp.StatusCode, Header: resp.Header, Body: data}, nil
 	}
 }
 
@@ -894,6 +906,12 @@ func (h *HetznerCloud) errorOf(resp *hcResponse) *hcAPIError {
 	if e.Code == "rate_limit_exceeded" {
 		if ts, err := strconv.ParseInt(resp.Header.Get("RateLimit-Reset"), 10, 64); err == nil {
 			e.Reset = time.Unix(ts, 0)
+		}
+	}
+	switch resp.Status {
+	case http.StatusBadGateway, http.StatusGatewayTimeout:
+		if !hcIdempotent(resp.Method) {
+			e.Hint = hcMaybeDone
 		}
 	}
 	return e
