@@ -49,14 +49,19 @@ type nylasFake struct {
 	deleted      []string
 	pageCap      int  // serve at most this many grants per page, whatever limit asks (0: honour limit)
 	ignoreOffset bool // always serve the first page, as a server that ignored offset would
+
+	// extra are messages beyond the fixture files, listed and served like
+	// them; a test adds the thread it needs.
+	extra []nylasMessage
 }
 
 type nylasFakeRequest struct {
-	Method  string
-	Path    string
-	Query   url.Values
-	Headers http.Header
-	Body    string
+	Method      string
+	Path        string // decoded
+	EscapedPath string // as it came on the wire: an id's "/" arrives as %2F here
+	Query       url.Values
+	Headers     http.Header
+	Body        string
 }
 
 func nylasFixture(t *testing.T, name string) []byte {
@@ -78,7 +83,7 @@ func newNylasFake(t *testing.T) *nylasFake {
 
 func (f *nylasFake) record(r *http.Request) nylasFakeRequest {
 	body, _ := io.ReadAll(r.Body)
-	req := nylasFakeRequest{Method: r.Method, Path: r.URL.Path, Query: r.URL.Query(), Headers: r.Header.Clone(), Body: string(body)}
+	req := nylasFakeRequest{Method: r.Method, Path: r.URL.Path, EscapedPath: r.URL.EscapedPath(), Query: r.URL.Query(), Headers: r.Header.Clone(), Body: string(body)}
 	f.mu.Lock()
 	f.requests = append(f.requests, req)
 	f.mu.Unlock()
@@ -106,23 +111,29 @@ var googleMessages = []nylasMessage{
 		From: []nylasAddress{{Email: "jane@example.com", Name: "Jane Doe"}}, To: []nylasAddress{{Email: "shop@example.net"}}},
 }
 
+// fixtureMessages decodes the messages of a list fixture.
+func fixtureMessages(t *testing.T, name string) []nylasMessage {
+	t.Helper()
+	var env struct {
+		Data []nylasMessage `json:"data"`
+	}
+	if err := json.Unmarshal(nylasFixture(t, name), &env); err != nil {
+		t.Fatal(err)
+	}
+	return env.Data
+}
+
 // messages returns the fixture messages of both threads (and the Gmail
-// thread when the grant plays Google).
+// thread when the grant plays Google), plus extra.
 func (f *nylasFake) messages(t *testing.T, google bool) []nylasMessage {
 	var all []nylasMessage
 	for _, name := range []string{"messages_t1.json", "messages_t2.json"} {
-		var env struct {
-			Data []nylasMessage `json:"data"`
-		}
-		if err := json.Unmarshal(nylasFixture(t, name), &env); err != nil {
-			t.Fatal(err)
-		}
-		all = append(all, env.Data...)
+		all = append(all, fixtureMessages(t, name)...)
 	}
 	if google {
 		all = append(all, googleMessages...)
 	}
-	return all
+	return append(all, f.extra...)
 }
 
 // serveGrants answers GET /v3/grants: the configured list paged by limit and
@@ -326,7 +337,11 @@ func (f *nylasFake) serve(t *testing.T) http.HandlerFunc {
 			}
 			writeJSON(w, 200, nylasFixture(t, "message_sent.json"))
 		case strings.HasPrefix(rest, "/messages/"):
-			id, _ := url.PathUnescape(strings.TrimPrefix(rest, "/messages/"))
+			// The id is the last segment of the path as it came on the wire,
+			// as a server routes: a "/" inside an id must have arrived as
+			// %2F — a raw one is a path separator and finds nothing.
+			esc := r.URL.EscapedPath()
+			id, _ := url.PathUnescape(esc[strings.LastIndex(esc, "/")+1:])
 			var found *nylasMessage
 			for _, m := range f.messages(t, google) {
 				if m.ID == id {
@@ -345,7 +360,13 @@ func (f *nylasFake) serve(t *testing.T) http.HandlerFunc {
 				writeJSON(w, 200, map[string]any{"request_id": "x"})
 			}
 		case strings.HasPrefix(rest, "/attachments/"):
-			att := strings.TrimPrefix(rest, "/attachments/")
+			// The attachment id is one segment of the path as it came on the
+			// wire, "download" the one after it, whatever the id decodes to.
+			segs := strings.Split(strings.TrimPrefix(r.URL.EscapedPath(), "/"), "/") // v3 grants {gid} attachments {id} [download]
+			att, _ := url.PathUnescape(segs[4])
+			if len(segs) > 5 && segs[5] == "download" {
+				att += "/download"
+			}
 			if req.Query.Get("message_id") == "" {
 				writeJSON(w, 400, map[string]any{"request_id": "x", "error": map[string]any{"type": "api.invalid_request_error", "message": "message_id is required"}})
 				return
@@ -1092,10 +1113,107 @@ func TestNylas_Errors(t *testing.T) {
 	if _, err := ny.callHeaders(context.Background(), "folders", map[string]string{"grant_id": "grant-1"}, nil, map[string]string{"X-Other": "1"}, nil); err == nil || !strings.Contains(err.Error(), "does not take header") {
 		t.Errorf("unregistered header: %v", err)
 	}
-	for _, bad := range []string{"", ".", "..", "a/b", "a?b"} {
+	for _, bad := range []string{"", ".", ".."} {
 		if _, err := ny.call(context.Background(), "message", map[string]string{"grant_id": "grant-1", "message_id": bad}, nil, nil); err == nil || !strings.Contains(err.Error(), "not a valid id") {
 			t.Errorf("id %q accepted: %v", bad, err)
 		}
+	}
+	// Every other id is one percent-encoded segment on the wire — an IMAP
+	// grant's message id is an RFC 822 Message-ID and may hold "/", "?", "#".
+	for id, want := range map[string]string{
+		"a/b": "/messages/a%2Fb",
+		"a?b": "/messages/a%3Fb",
+		"a#b": "/messages/a%23b",
+		"<build/ci/check-suites/CS_0001/42@example.net>": "/messages/%3Cbuild%2Fci%2Fcheck-suites%2FCS_0001%2F42@example.net%3E",
+	} {
+		resp, err := ny.call(context.Background(), "message", map[string]string{"grant_id": "grant-1", "message_id": id}, nil, nil)
+		if err != nil {
+			t.Errorf("id %q refused: %v", id, err)
+			continue
+		}
+		resp.Body.Close()
+		reqs := f.recorded(http.MethodGet, "")
+		if last := reqs[len(reqs)-1]; !strings.HasSuffix(last.EscapedPath, want) || last.Query.Encode() != "" {
+			t.Errorf("id %q went out as %s?%s, want …%s", id, last.EscapedPath, last.Query.Encode(), want)
+		}
+	}
+	// The same for the other ids that fill a path segment.
+	for _, c := range []struct {
+		key, param, want string
+		query            url.Values
+	}{
+		{"attachment", "attachment_id", "/attachments/a%2Fb", url.Values{"message_id": {"m"}}},
+		{"attachment.download", "attachment_id", "/attachments/a%2Fb/download", url.Values{"message_id": {"m"}}},
+		{"draft.delete", "draft_id", "/drafts/a%2Fb", nil},
+	} {
+		resp, err := ny.call(context.Background(), c.key, map[string]string{"grant_id": "grant-1", c.param: "a/b"}, c.query, nil)
+		if err != nil {
+			t.Errorf("%s with %s a/b refused: %v", c.key, c.param, err)
+			continue
+		}
+		resp.Body.Close()
+		reqs := f.recorded("", "")
+		if last := reqs[len(reqs)-1]; !strings.HasSuffix(last.EscapedPath, c.want) || last.Query.Encode() != c.query.Encode() {
+			t.Errorf("%s with %s a/b went out as %s?%s, want …%s", c.key, c.param, last.EscapedPath, last.Query.Encode(), c.want)
+		}
+	}
+}
+
+// TestNylas_IMAPMessageIDs: on an IMAP grant the message id is the RFC 822
+// Message-ID, and CI notifications carry "/" in it. The id travels as one
+// percent-encoded path segment, so every tool with {message_id} in the path
+// reaches the message (MUX-56).
+func TestNylas_IMAPMessageIDs(t *testing.T) {
+	f := newNylasFake(t)
+	f.extra = fixtureMessages(t, "messages_imap_id.json")
+	ny := newTestNylas(t, f, "grant-1", "", false)
+	ctx := context.Background()
+	const id = "<build/ci/check-suites/CS_0001/42@example.net>"
+	const seg = "/messages/%3Cbuild%2Fci%2Fcheck-suites%2FCS_0001%2F42@example.net%3E"
+
+	res, _ := ny.handleListAttachments(ctx, toolRequest(map[string]any{"message_id": id}))
+	if res.IsError {
+		t.Fatalf("list_attachments: %s", resultText(t, res))
+	}
+	gets := f.recorded(http.MethodGet, "")
+	if last := gets[len(gets)-1]; !strings.HasSuffix(last.EscapedPath, seg) {
+		t.Errorf("list_attachments read %s, want …%s", last.EscapedPath, seg)
+	}
+
+	// The conversation is read through the thread_id query, not the path.
+	res, _ = ny.handleGetConversation(ctx, toolRequest(map[string]any{"conversation_id": id}))
+	if res.IsError {
+		t.Fatalf("get_conversation: %s", resultText(t, res))
+	}
+	var msgs []nylasMessageFull
+	decodeResult(t, resultText(t, res), &msgs)
+	if len(msgs) != 1 || msgs[0].ID != id {
+		t.Errorf("get_conversation = %+v", msgs)
+	}
+
+	res, _ = ny.handleArchiveConversation(ctx, toolRequest(map[string]any{"conversation_id": id}))
+	if res.IsError {
+		t.Fatalf("archive: %s", resultText(t, res))
+	}
+	puts := f.recorded(http.MethodPut, "")
+	if len(puts) != 1 || !strings.HasSuffix(puts[0].EscapedPath, seg) || !strings.Contains(puts[0].Body, `"folders":["v0:grant-1:INBOX.Archive"]`) {
+		t.Errorf("archive PUTs = %+v", puts)
+	}
+	if text := resultText(t, res); !strings.Contains(text, `"archived": 1`) {
+		t.Errorf("archive result: %s", text)
+	}
+
+	// The fake does not move a message on PUT, so the inbox still holds it.
+	res, _ = ny.handleDeleteConversation(ctx, toolRequest(map[string]any{"conversation_id": id}))
+	if res.IsError {
+		t.Fatalf("delete: %s", resultText(t, res))
+	}
+	dels := f.recorded(http.MethodDelete, "")
+	if len(dels) != 1 || !strings.HasSuffix(dels[0].EscapedPath, seg) {
+		t.Errorf("delete requests = %+v", dels)
+	}
+	if text := resultText(t, res); !strings.Contains(text, `"deleted": 1`) {
+		t.Errorf("delete result: %s", text)
 	}
 }
 

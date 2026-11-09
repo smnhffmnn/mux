@@ -346,8 +346,12 @@ func (n *Nylas) callHeaders(ctx context.Context, key string, pathParams map[stri
 	path := ep.Path
 	for k, v := range pathParams {
 		// Ids come from the API, but they travel through an agent before they
-		// come back: a value that would change the path's shape is refused.
-		if v == "" || v == "." || v == ".." || strings.ContainsAny(v, "/?#") {
+		// come back. Each fills one segment of the path, percent-encoded, so
+		// no byte of it can change the path's shape: on an IMAP grant the
+		// message id is the RFC 822 Message-ID, which may hold "/", "?" or
+		// "#" (CI notifications do). Only a value that is no segment at all
+		// is refused.
+		if v == "" || v == "." || v == ".." {
 			return nil, fmt.Errorf("nylas: %s %q is not a valid id", k, v)
 		}
 		path = strings.ReplaceAll(path, "{"+k+"}", url.PathEscape(v))
@@ -373,6 +377,9 @@ func (n *Nylas) callHeaders(ctx context.Context, key string, pathParams map[stri
 			return nil, fmt.Errorf("nylas: endpoint %q does not take header %q", key, k)
 		}
 	}
+	// net/url keeps the encoded path as written where it matters: a %2F
+	// inside an id stays a %2F on the wire (URL.RawPath, read back by
+	// EscapedPath) instead of becoming a path separator.
 	u := n.baseURL + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
