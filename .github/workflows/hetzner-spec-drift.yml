@@ -1,0 +1,59 @@
+name: Hetzner Cloud API drift
+
+# The hetzner-cloud connection type is a hand-written adapter over the
+# Hetzner Cloud API. Its resources, actions, query parameters and the fields
+# it documents are listed in a registry (internal/tools/hetzner.go) and
+# checked against Hetzner's published OpenAPI document by the spec tests —
+# in both directions: what mux names must be in the document, and every
+# operation of the document must be reachable through the registry. CI runs
+# them against the vendored snapshot; this workflow runs them against the
+# live document every week, so an upstream rename or removal fails here
+# before it fails a user, new API surface shows up as "not built yet", and a
+# new deprecation is read before Hetzner removes the endpoint.
+#
+# The document carries no version that moves (info.version stays 1.0.0);
+# the report compares the sha256 of the normalized document and lists the
+# structural differences. Against the live document the coverage test only
+# logs what is missing — new surface is not a failure of mux — unless
+# HETZNER_COVERAGE=strict.
+#
+# There is no live job: a run against a real project needs a token, and the
+# read-only live test (go test -tags 'notray live' -run TestHetznerCloudLive)
+# is for a developer's machine with HETZNER_LIVE_TOKEN set.
+
+on:
+  schedule:
+    - cron: "52 6 * * 1" # Mondays 06:52 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Fetch the live OpenAPI document
+        id: fetch
+        run: curl -fsSL --max-time 120 https://docs.hetzner.cloud/cloud.spec.json -o /tmp/hetzner-openapi.json
+
+      - name: Check the registry against the live document
+        run: HETZNER_OPENAPI=/tmp/hetzner-openapi.json go test -tags notray ./internal/tools -run 'TestHetznerCloud_' -count=1 -v
+
+      # Also after a failed spec test — that is when the report matters.
+      - name: Report what changed since the vendored snapshot
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
+        run: scripts/hetzner-openapi-report.sh /tmp/hetzner-openapi.json internal/tools/testdata/hetzner-openapi.json
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
+        with:
+          name: hetzner-openapi-live
+          path: /tmp/hetzner-openapi.json
+          retention-days: 30

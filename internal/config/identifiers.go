@@ -47,6 +47,7 @@ const (
 	TypeSupabase         = "supabase"
 	TypeNylas            = "nylas"
 	TypeBunq             = "bunq"
+	TypeHetznerCloud     = "hetzner-cloud"
 )
 
 // Connection.Source / Tunnel.Source values. SourceLocal marks entries

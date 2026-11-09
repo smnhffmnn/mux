@@ -834,6 +834,22 @@ export class SaveConnectionRequest {
              */
             this["grantId"] = undefined;
         }
+        if (/** @type {any} */(false)) {
+            /**
+             * hetzner-cloud connection type. The checkbox is always sent by the
+             * form; ProtectedResources is newline-separated.
+             * @member
+             * @type {boolean | undefined}
+             */
+            this["allowLifecycle"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string | undefined}
+             */
+            this["protectedResources"] = undefined;
+        }
 
         Object.assign(this, $$source);
     }

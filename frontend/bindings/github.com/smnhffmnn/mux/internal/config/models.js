@@ -319,6 +319,30 @@ export class Connection {
              */
             this["denyCommands"] = undefined;
         }
+        if (/** @type {any} */(false)) {
+            /**
+             * Hetzner Cloud connection type (TypeHetznerCloud): one project behind
+             * the Cloud API, the token is Token / {name}-token, URL defaults to
+             * https://api.hetzner.cloud. AllowLifecycle admits the operations that
+             * cost money or destroy data or availability — creating billed resources,
+             * every delete, resize, change of type, rebuild, hard power cut, backups
+             * and snapshots, zone import; without it a writable connection changes
+             * labels, names, DNS records, firewall rules, attachments and the like.
+             * ProtectedResources lists resources ("name", "kind:name", patterns with
+             * *) the connection never changes, acts on or deletes, whatever the other
+             * switches say. Both enforced in code, like the field guards above.
+             * @member
+             * @type {boolean | undefined}
+             */
+            this["allowLifecycle"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * @member
+             * @type {string[] | undefined}
+             */
+            this["protectedResources"] = undefined;
+        }
 
         Object.assign(this, $$source);
     }
@@ -334,6 +358,7 @@ export class Connection {
         const $$createField23_0 = $$createType1;
         const $$createField32_0 = $$createType1;
         const $$createField33_0 = $$createType1;
+        const $$createField35_0 = $$createType1;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("headers" in $$parsedSource) {
             $$parsedSource["headers"] = $$createField21_0($$parsedSource["headers"]);
@@ -349,6 +374,9 @@ export class Connection {
         }
         if ("denyCommands" in $$parsedSource) {
             $$parsedSource["denyCommands"] = $$createField33_0($$parsedSource["denyCommands"]);
+        }
+        if ("protectedResources" in $$parsedSource) {
+            $$parsedSource["protectedResources"] = $$createField35_0($$parsedSource["protectedResources"]);
         }
         return new Connection(/** @type {Partial<Connection>} */($$parsedSource));
     }

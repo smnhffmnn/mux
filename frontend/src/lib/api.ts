@@ -201,6 +201,9 @@ export interface SaveConnectionRequest {
   smtpSavesSent?: boolean
   // supabase
   projectRef?: string
+  // hetzner-cloud (the checkbox is always sent; protectedResources is newline-separated)
+  allowLifecycle?: boolean
+  protectedResources?: string
   // nylas (fromName and allowSend are shared with imap)
   region?: string
   grantId?: string

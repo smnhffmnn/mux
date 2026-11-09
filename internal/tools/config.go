@@ -87,7 +87,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description(typeDesc),
 			),
 			mcp.WithString("url",
-				mcp.Description("URL for the connection (required for proxy/http/api types, optional for types with defaults like firecrawl/brave; bunq: https://api.bunq.com by default, https://public-api.sandbox.bunq.com for the sandbox)."),
+				mcp.Description("URL for the connection (required for proxy/http/api types, optional for types with defaults like firecrawl/brave; bunq: https://api.bunq.com by default, https://public-api.sandbox.bunq.com for the sandbox; hetzner-cloud: https://api.hetzner.cloud by default)."),
 			),
 			mcp.WithString("host",
 				mcp.Description("Host (for mariadb, postgresql, clickhouse, imap, meilisearch, ssh)."),
@@ -120,7 +120,7 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 				mcp.Description("Extra HTTP headers sent with every request (http and proxy types), one 'Name: Value' per line (e.g. 'Notion-Version: 2022-06-28')."),
 			),
 			mcp.WithBoolean("read_only",
-				mcp.Description("Expose reading tools only (databases: no execute; http: no request; youtrack-rest: no write and no admin tools; ssh: no upload, exec limited to allow_commands or the built-in list of reading commands; supabase: no deploy, delete, migrations_apply or secret writes, SQL on the read-only endpoint; nylas: reading and searching only — no archive/delete/move, no drafts, no sending, no delete_grant or api_request; bunq: no create_draft_payment, no api_request). Default false."),
+				mcp.Description("Expose reading tools only (databases: no execute; http: no request; youtrack-rest: no write and no admin tools; ssh: no upload, exec limited to allow_commands or the built-in list of reading commands; supabase: no deploy, delete, migrations_apply or secret writes, SQL on the read-only endpoint; nylas: reading and searching only — no archive/delete/move, no drafts, no sending, no delete_grant or api_request; bunq: no create_draft_payment, no api_request; hetzner-cloud: list, get, actions, metrics, pricing, record sets, zonefile and api_get only). Default false."),
 			),
 			mcp.WithString("protected_fields",
 				mcp.Description("youtrack-rest: fields this connection never writes, one per line as 'Project:Field' or 'Field' (e.g. 'P:Sprint priority')."),
@@ -161,6 +161,10 @@ func (ct *ConfigTools) connectionAddTool() ToolDef {
 			mcp.WithString("region",
 				mcp.Description("nylas: data-residency region of the Nylas application, 'us' (default) or 'eu'."),
 			),
+			mcp.WithBoolean("allow_lifecycle",
+				mcp.Description("hetzner-cloud: allow the operations that cost money or destroy data or availability — creating servers, volumes, IPs and load balancers, every delete, resize, change of type, rebuild, hard power cut, snapshots and backups, zone import (default false; not together with read_only)")),
+			mcp.WithString("protected_resources",
+				mcp.Description("hetzner-cloud: resources never changed, acted on or deleted through the connection — a list of strings or one per line, \"name\", \"kind:name\" or a pattern with *, e.g. server:prod-*")),
 			mcp.WithString("grant_id",
 				mcp.Description("nylas: id of the connected mailbox (grant). Alternatively set user to the mailbox address and mux looks the grant up. Both empty: application mode — the key serves every grant of the application, the mail tools take a mailbox argument, and the administration tools (grants, connectors, webhooks, api_get/api_request) appear."),
 			),
@@ -384,6 +388,14 @@ func (ct *ConfigTools) handleConnectionList(_ context.Context, _ mcp.CallToolReq
 		}
 		if c.Type == config.TypeSupabase && c.ProjectRef != "" {
 			entry["project_ref"] = c.ProjectRef
+		}
+		if c.Type == config.TypeHetznerCloud {
+			if c.AllowLifecycle {
+				entry["allow_lifecycle"] = true
+			}
+			if len(c.ProtectedResources) > 0 {
+				entry["protected_resources"] = c.ProtectedResources
+			}
 		}
 		if c.Type == config.TypeBunq {
 			if config.BunqSandbox(c) {
@@ -655,6 +667,27 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 	if err := config.ValidateBunq(conn); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	// hetzner-cloud-only fields: a boolean switch has no empty value to
+	// ignore, so its mere presence on another type is an error (same rule
+	// as the mail fields above).
+	for _, key := range config.HetznerCloudFields {
+		if _, ok := args[key]; ok && typ != config.TypeHetznerCloud {
+			return mcp.NewToolResultError(fmt.Sprintf("%s applies to type %q only, not %q", key, config.TypeHetznerCloud, typ)), nil
+		}
+	}
+	if _, ok := args["allow_lifecycle"]; ok {
+		conn.AllowLifecycle = req.GetBool("allow_lifecycle", false)
+	}
+	if v, ok := args["protected_resources"]; ok && v != nil {
+		list, err := config.ParseLinesOrList(v)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid protected_resources: %v", err)), nil
+		}
+		conn.ProtectedResources = list
+	}
+	if err := config.ValidateHetznerCloud(conn); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	config.ApplyConnectionDefaults(&conn)
 	// A key stored before the connection was added (secret_set first,
@@ -673,6 +706,9 @@ func (ct *ConfigTools) handleConnectionAdd(_ context.Context, req mcp.CallToolRe
 	msg := fmt.Sprintf("connection %q (%s) created", name, typ)
 	if typ == config.TypeSupabase && conn.Token == "" {
 		msg += fmt.Sprintf(". Next: store the access token with secret_set %q; the connection registers once the token is there.", name+"-token")
+	}
+	if typ == config.TypeHetznerCloud && conn.Token == "" {
+		msg += fmt.Sprintf(". Next: store the project's API token with secret_set %q; the connection registers once the token is there.", name+"-token")
 	}
 	if typ == config.TypeBunq && conn.Token == "" {
 		msg += fmt.Sprintf(". Next: store the API key with secret_set %q; the connection registers once the key is there and does bunq's installation, device and session itself on first use (the RSA key and the API context land in the secret store as %q and %q).", name+"-token", name+"-private-key", name+"-api-context")

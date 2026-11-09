@@ -42,6 +42,8 @@
     smtp_saves_sent: 'smtpSavesSent',
     project_ref: 'projectRef',
     grant_id: 'grantId',
+    allow_lifecycle: 'allowLifecycle',
+    protected_resources: 'protectedResources',
   }
 
   async function handleSave() {

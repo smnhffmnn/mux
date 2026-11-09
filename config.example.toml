@@ -218,6 +218,18 @@ read_only = true
 # read_only = true                              # reading tools only: no create_draft_payment, no api_request
 # API key stored as secret (key: "bank-token") — bunq app → Settings → Developers → API keys; bound to the IP it is first used from
 
+# Hetzner Cloud: one project behind the Cloud API — servers, volumes, networks,
+# firewalls, IPs, load balancers, images, server types with prices, DNS zones and
+# record sets. Guards in code: read_only, allow_lifecycle, protected_resources.
+# [[connections]]
+# name = "hetzner-dns"
+# type = "hetzner-cloud"
+# url = "https://api.hetzner.cloud"               # default; the host only, mux appends /v1
+# read_only = false                              # true: reading tools only
+# allow_lifecycle = false                        # true: create billed resources, delete, resize, rebuild, power off, snapshots, zone import
+# protected_resources = ["server:cell-*", "zone:example.com"]   # never changed, acted on or deleted through this connection
+# API token stored as secret (key: "hetzner-dns-token") — Hetzner Console → project → Security → API Tokens
+
 # --- Tunnels ---
 # Connections can reference tunnels by name to route traffic through WireGuard or SSH.
 

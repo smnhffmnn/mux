@@ -279,6 +279,19 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 		if conn.ReadOnly {
 			summary += " · read-only"
 		}
+	case conn.Type == config.TypeHetznerCloud:
+		summary = "Hetzner Cloud"
+		switch {
+		case conn.ReadOnly:
+			summary += " · read-only"
+		case conn.AllowLifecycle:
+			summary += " · lifecycle allowed"
+		default:
+			summary += " · writes without lifecycle"
+		}
+		if len(conn.ProtectedResources) > 0 {
+			summary += fmt.Sprintf(" · %d protected", len(conn.ProtectedResources))
+		}
 	case conn.Type == config.TypeNylas:
 		if config.NylasApplicationMode(conn) {
 			summary = fmt.Sprintf("Nylas %s · all grants of the application", conn.Region)
@@ -371,6 +384,10 @@ func buildConnInfo(conn config.Connection) ConnInfo {
 					fi.Value = conn.Region
 				case "grant_id":
 					fi.Value = conn.GrantID
+				case "allow_lifecycle":
+					fi.Value = checkboxValue(conn.AllowLifecycle)
+				case "protected_resources":
+					fi.Value = config.FormatLines(conn.ProtectedResources)
 				}
 			}
 			if fd.Secret {
@@ -706,6 +723,20 @@ func (a *App) SaveConnection(name string, fields SaveConnectionRequest) (*ConnIn
 				return nil, err
 			}
 			conn.URL = next.URL
+		}
+		if conn.Type == config.TypeHetznerCloud {
+			// Written as sent: an unticked checkbox switches lifecycle
+			// operations off, a cleared list guards nothing, a cleared URL
+			// falls back to the default host.
+			next := *conn
+			next.AllowLifecycle = fields.AllowLifecycle
+			next.ProtectedResources = config.ParseLines(fields.ProtectedResources)
+			next.URL = strings.TrimSpace(fields.URL)
+			config.ApplyConnectionDefaults(&next)
+			if err := config.ValidateHetznerCloud(next); err != nil {
+				return nil, err
+			}
+			conn.AllowLifecycle, conn.ProtectedResources, conn.URL = next.AllowLifecycle, next.ProtectedResources, next.URL
 		}
 		if conn.Type == config.TypeNylas {
 			// Written as sent, like the imap fields: a cleared field clears the
@@ -1074,6 +1105,8 @@ func (a *App) TestConnection(name string) *TestResult {
 		result = a.testSupabase(*conn)
 	case config.TypeBunq:
 		result = a.testBunq(*conn)
+	case config.TypeHetznerCloud:
+		result = a.testHetznerCloud(*conn)
 	case config.TypeMariaDB:
 		result = a.testMariaDB(*conn)
 	case config.TypeClickHouse:
@@ -2369,6 +2402,52 @@ func (a *App) testSupabase(conn config.Connection) testResponse {
 	msg := fmt.Sprintf("Connected: project %s (%s, %s, %s)", p.Name, p.Ref, p.Region, p.Status)
 	if conn.ReadOnly {
 		msg += " — read-only"
+	}
+	return testResponse{Connection: conn.Name, Connected: true, Message: msg}
+}
+
+// testHetznerCloud reads the project the way the tools do — one page of
+// servers and one of zones — so a wrong or revoked token is reported here
+// with the API's message; a valid token of another project answers with that
+// project's counts, which is how the projects are told apart.
+func (a *App) testHetznerCloud(conn config.Connection) testResponse {
+	if conn.Token == "" {
+		return testResponse{Connection: conn.Name, Connected: false, Message: "API token not configured"}
+	}
+	var dialer tools.Dialer
+	if conn.Tunnel != "" {
+		t := a.tm.Get(conn.Tunnel)
+		if t == nil {
+			return tunnelUnavailable(conn)
+		}
+		testLog(conn.Name, "routing through tunnel %q", conn.Tunnel)
+		dialer = t
+	}
+	hc, err := tools.NewHetznerCloud(conn, dialer)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: err.Error()}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	testLog(conn.Name, "GET /v1/servers and /v1/zones at %s", conn.URL)
+	info, err := hc.Verify(ctx)
+	if err != nil {
+		return testResponse{Connection: conn.Name, Connected: false, Message: fmt.Sprintf("Hetzner Cloud check failed: %v", err)}
+	}
+	msg := fmt.Sprintf("Connected: project with %d servers and %d DNS zones", info.Servers, info.Zones)
+	switch {
+	case conn.ReadOnly:
+		msg += " — read-only"
+	case conn.AllowLifecycle:
+		msg += " — lifecycle operations allowed"
+	default:
+		msg += " — writes without lifecycle operations"
+	}
+	if len(conn.ProtectedResources) > 0 {
+		msg += fmt.Sprintf(", %d protected", len(conn.ProtectedResources))
+	}
+	if info.RateLimit > 0 {
+		msg += fmt.Sprintf(" (%d of %d requests left this hour)", info.RateRemaining, info.RateLimit)
 	}
 	return testResponse{Connection: conn.Name, Connected: true, Message: msg}
 }
