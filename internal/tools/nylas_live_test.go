@@ -16,6 +16,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"os"
 	"strings"
@@ -179,6 +180,57 @@ func TestNylasLive_Draft(t *testing.T) {
 		t.Fatalf("delete draft %s: %v", draft.DraftID, err)
 	}
 	t.Logf("draft %s deleted", draft.DraftID)
+}
+
+// TestNylasLive_MessageIDPath reads one message whose id holds "/" through
+// GET /v3/grants/{grant}/messages/{id}: the id goes into the path as one
+// percent-encoded segment, and the API must take it that way (MUX-56). On an
+// IMAP grant the ids are RFC 822 Message-IDs; CI notifications carry "/" in
+// them. Skips when the newest messages have none. Nothing is written; the
+// log carries counts and, on failure, the HTTP status — not the id, which
+// names the sender's project.
+func TestNylasLive_MessageIDPath(t *testing.T) {
+	ny := newLiveNylas(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	mb, err := ny.boundMailbox(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := url.Values{}
+	q.Set("limit", "50")
+	var msgs []nylasMessage
+	if _, err := ny.callJSON(ctx, "messages", map[string]string{"grant_id": mb.grantID}, q, nil, &msgs); err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	var withSlash *nylasMessage
+	for i := range msgs {
+		if strings.Contains(msgs[i].ID, "/") {
+			withSlash = &msgs[i]
+			break
+		}
+	}
+	if withSlash == nil {
+		t.Skipf("none of the %d newest messages has a / in its id", len(msgs))
+	}
+	var got nylasMessage
+	if _, err := ny.callJSON(ctx, "message", map[string]string{"grant_id": mb.grantID, "message_id": withSlash.ID}, nil, nil, &got); err != nil {
+		// The error text carries the path with the id; log only what kind
+		// of answer it was.
+		var httpErr *nylasHTTPError
+		if errors.As(err, &httpErr) {
+			kind := ""
+			if httpErr.API != nil {
+				kind = " " + httpErr.API.Type
+			}
+			t.Fatalf("GET message with / in its id (%d characters, %d slashes): HTTP %d%s", len(withSlash.ID), strings.Count(withSlash.ID, "/"), httpErr.Status, kind)
+		}
+		t.Fatalf("GET message with / in its id (%d characters, %d slashes): %T", len(withSlash.ID), strings.Count(withSlash.ID, "/"), err)
+	}
+	if got.ID != withSlash.ID {
+		t.Fatalf("GET message with / in its id returned another message")
+	}
+	t.Logf("message with / in its id (%d slashes) read through the path; %d messages listed", strings.Count(withSlash.ID, "/"), len(msgs))
 }
 
 // TestNylasLive_SendToSelf forwards the newest inbox message to the account's
