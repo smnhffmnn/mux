@@ -128,9 +128,9 @@ type = "microsoft-graph"
 | `{name}_archive_conversation` | Move all inbox messages of a conversation to Archive. Parameter: `conversation_id` (required). |
 | `{name}_delete_conversation` | Delete all inbox messages of a conversation. Parameter: `conversation_id` (required). |
 | `{name}_search_messages` | Search messages across all mail folders using KQL. Parameters: `query` (required), `limit` (optional). |
-| `{name}_create_reply_draft` | Create a reply draft (does NOT send). Parameters: `conversation_id`, `body` (required). |
-| `{name}_create_draft` | Create a new email draft from scratch (does NOT send). Parameters: `to`, `subject`, `body` (required), `cc`, `bcc` (optional). |
-| `{name}_create_forward_draft` | Create a forward draft (does NOT send). Parameters: `conversation_id`, `to` (required), `body`, `cc`, `bcc` (optional). |
+| `{name}_create_reply_draft` | Create a reply draft (does NOT send). Parameters: `conversation_id`, `body` (required), `attachments` (optional, see below). |
+| `{name}_create_draft` | Create a new email draft from scratch (does NOT send). Parameters: `to`, `subject`, `body` (required), `cc`, `bcc`, `attachments` (optional). |
+| `{name}_create_forward_draft` | Create a forward draft (does NOT send). Parameters: `conversation_id`, `to` (required), `body`, `cc`, `bcc`, `attachments` (optional). |
 | `{name}_send_draft` | Send an existing draft (created by `create_draft` / `create_reply_draft` / `create_forward_draft`). Dispatches immediately and moves it to Sent Items. Parameter: `draft_id` (required). |
 | `{name}_list_attachments` | List attachments of a message. Parameter: `message_id` (required). |
 | `{name}_get_attachment` | Get attachment content. A file attachment comes back as JSON with the bytes stored as a [blob](blobs.md) (`blob`, `blobUrl`, `blobRef`); images ≤ 5 MB also as image content; item and reference attachments return their JSON as is. Parameters: `message_id`, `attachment_id` (required). |
@@ -147,6 +147,8 @@ type = "microsoft-graph"
 | `{name}_cal_update_event` | Update fields on an existing event. Parameter: `event_id` (required), plus any of `subject`, `start`, `end`, `time_zone`, `body`, `location`, `attendees`. |
 | `{name}_cal_delete_event` | Delete an event. Parameter: `event_id` (required). For meetings the user organized, this cancels and notifies attendees. |
 | `{name}_cal_get_schedule` | Get free/busy availability for one or more mailboxes. Parameters: `schedules`, `start`, `end` (required), `time_zone`, `interval` (optional, 5–1440 minutes). |
+
+**Attachments on drafts.** The three draft tools take `attachments`: a list of files, each a [blob](blobs.md) the agent uploaded to mux (`blob:<id>`, named on upload with `X-Blob-Name` or `?name=`) or an absolute path where agent and mux share a disk. An entry may be an object `{"file": "blob:<id>", "name": "report.xlsx"}` to attach the file under another name — a blob uploaded without a name needs this; otherwise the blob's name or the path's file name is used. Names must be unique within one call (case-insensitive), and each blob or path may appear once. Graph cannot create a message with files in one request, so the draft is created first and every file becomes one attachment on it: under 3 MB as a `fileAttachment` with the bytes in the request, from 3 MB through an upload session (ranges of 3.75 MB to the pre-authenticated URL Graph hands out), up to a 150 MB cap. Exchange's own message size limit (35 MB by default) applies when the draft is sent, not when it is built. The files are checked before the draft is created — a missing blob, an empty file, a duplicate name, a repeated file or a file over the cap leaves no draft behind. The result lists what was attached (`attachments`: id, name, size, content type, the entry it came from); a file that fails after the draft exists is named in `attachment_errors`, the draft stays with the rest, and the result is an error, so the draft is not sent as is. A throttled attachment write (429, or 503 with a Retry-After) is retried once; an ambiguous gateway error is not, to avoid a duplicate attachment. A blob is deleted once its attachment is on the draft; the blob of a failed file is kept for the retry. `send_draft` is unchanged — it sends the draft with whatever is attached to it.
 
 ### OpenAI
 

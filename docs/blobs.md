@@ -37,7 +37,7 @@ curl -sS http://127.0.0.1:7700/blob/9c01… | tar -xz -C ./restored
 
 Two spellings, both plain strings in the arguments a tool already has:
 
-- **Give a blob:** `blob:<id>` wherever a tool takes a file or directory — `file_path` (http, OpenAI, Recraft, Ideogram requests; SSH upload), `file_paths` (YouTrack attach), `images` (Gemini), `env_file` (Supabase secrets) and `path` (Supabase deploy and migrations, which take a tree). An absolute path is still accepted where agent and mux share a disk.
+- **Give a blob:** `blob:<id>` wherever a tool takes a file or directory — `file_path` (http, OpenAI, Recraft, Ideogram requests; SSH upload), `file_paths` (YouTrack attach), `attachments` (Microsoft Graph drafts — one attachment per file, an upload session over 3 MB), `images` (Gemini), `env_file` (Supabase secrets) and `path` (Supabase deploy and migrations, which take a tree). An absolute path is still accepted where agent and mux share a disk.
 - **Receive a blob:** `output_file = "blob"` (or `output_dir = "blob"`) wherever a tool writes a file — the result then names a blob instead of a path. Without `output_file`, a tool stores as a blob whatever it would otherwise have written to mux's own disk: binary responses (ElevenLabs audio, Gemini images, YouTrack attachments) and Microsoft Graph attachments. A 2xx response longer than the connector's inline limit is no longer cut off in silence: the first bytes come back as the preview they always were, and a marker names the blob holding the whole body (error responses are cut with a note and not stored). Images up to 5 MB also come back as image content, so they can be looked at without a round trip.
 
 The result always says what happened, never the bytes:

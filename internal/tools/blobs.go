@@ -21,7 +21,8 @@ import (
 // spellings carry that in tool arguments:
 //
 //   - blob:<id> where a tool takes a file or directory (file_path,
-//     file_paths, images, env_file, path): the agent uploaded it first;
+//     file_paths, images, env_file, attachments, path): the agent uploaded
+//     it first;
 //   - output_file = "blob" (or output_dir) where a tool writes a file: the
 //     result names a blob the agent fetches instead of a path on mux's disk.
 //
