@@ -87,7 +87,7 @@ func (s *Store) Instructions() string {
 	base := strings.TrimSuffix(s.URL(""), "/blob/")
 	return fmt.Sprintf("Files: mux does not read files from your machine and does not write files to it. "+
 		"To hand a file to a tool, upload it first — curl -sS --data-binary @FILE -H 'Content-Type: TYPE' -H 'X-Blob-Name: NAME' %s/blob — "+
-		"and pass the returned id as blob:<id> wherever a tool takes a file (file_path, file_paths, images, env_file) or a project directory (the Supabase path). "+
+		"and pass the returned id as blob:<id> wherever a tool takes a file (file_path, file_paths, images, env_file, the Microsoft Graph draft attachments) or a project directory (the Supabase path). "+
 		"A tool that needs a directory (supabase function_deploy, migrations_*) takes a tree: "+
 		"tar -C PROJECT_ROOT -cz supabase | curl -sS --data-binary @- -H 'Content-Type: application/gzip' '%s/blob?tree=1'. "+
 		"A result that carries a file names a blob instead of a path: fetch it with curl -sS -o FILE %s/blob/<id> (a tree arrives as tar.gz); choose FILE yourself, the result shows the original name separately. "+

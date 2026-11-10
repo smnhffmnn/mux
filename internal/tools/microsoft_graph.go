@@ -41,7 +41,15 @@ const (
 
 // MicrosoftGraph wraps the Microsoft Graph REST API as MCP tools.
 type MicrosoftGraph struct {
-	client   *http.Client
+	client *http.Client
+	// uploadClient carries the byte ranges of an attachment upload session:
+	// the same transport, no overall timeout — a range is a few MB and the
+	// line may be slow; the transport's ResponseHeaderTimeout still bounds
+	// the wait once a range is written.
+	uploadClient *http.Client
+	// baseURL is the Graph endpoint every request is built on; the constant
+	// in production, a test server in tests.
+	baseURL  string
 	name     string
 	clientID string
 	scopes   string
@@ -81,6 +89,13 @@ func NewMicrosoftGraph(conn config.Connection, dialer Dialer) (*MicrosoftGraph, 
 			Transport: transport,
 			Timeout:   30 * time.Second,
 		},
+		uploadClient: &http.Client{
+			Transport: transport,
+			// The pre-authenticated upload URL is followed as given; a redirect
+			// would replay the range body to another host, so stop at it.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+		baseURL:  graphBaseURL,
 		name:     conn.Name,
 		clientID: conn.ClientID,
 		scopes:   scopes,
@@ -170,31 +185,34 @@ func (mg *MicrosoftGraph) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("create_reply_draft",
-				mcp.WithDescription("Create a reply draft for the latest message in a conversation. Does NOT send."),
+				mcp.WithDescription("Create a reply draft for the latest message in a conversation, optionally with attachments. Does NOT send."),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
 				mcp.WithString("body", mcp.Required(), mcp.Description("Reply body. Can be HTML or plain text (newlines are auto-converted to <br>).")),
+				graphAttachmentsOption(),
 			),
 			Handler: mg.handleCreateReplyDraft,
 		},
 		{
 			Tool: mcp.NewTool("create_draft",
-				mcp.WithDescription("Create a new email draft from scratch. Does NOT send."),
+				mcp.WithDescription("Create a new email draft from scratch, optionally with attachments. Does NOT send."),
 				mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address(es), comma-separated for multiple")),
 				mcp.WithString("subject", mcp.Required(), mcp.Description("Email subject")),
 				mcp.WithString("body", mcp.Required(), mcp.Description("Email body. Can be HTML or plain text (newlines are auto-converted to <br>).")),
 				mcp.WithString("cc", mcp.Description("CC recipient(s), comma-separated (optional)")),
 				mcp.WithString("bcc", mcp.Description("BCC recipient(s), comma-separated (optional)")),
+				graphAttachmentsOption(),
 			),
 			Handler: mg.handleCreateDraft,
 		},
 		{
 			Tool: mcp.NewTool("create_forward_draft",
-				mcp.WithDescription("Create a forward draft for the latest message in a conversation. Does NOT send."),
+				mcp.WithDescription("Create a forward draft for the latest message in a conversation, optionally with attachments. Does NOT send."),
 				mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Conversation ID")),
 				mcp.WithString("to", mcp.Required(), mcp.Description("Recipient email address(es), comma-separated for multiple")),
 				mcp.WithString("body", mcp.Description("Optional comment. Can be HTML or plain text (newlines are auto-converted to <br>).")),
 				mcp.WithString("cc", mcp.Description("CC recipient(s), comma-separated (optional)")),
 				mcp.WithString("bcc", mcp.Description("BCC recipient(s), comma-separated (optional)")),
+				graphAttachmentsOption(),
 			),
 			Handler: mg.handleCreateForwardDraft,
 		},
@@ -629,6 +647,10 @@ func (mg *MicrosoftGraph) handleCreateReplyDraft(ctx context.Context, req mcp.Ca
 	if convID == "" || body == "" {
 		return mcp.NewToolResultError("conversation_id and body are required"), nil
 	}
+	files, err := parseGraphAttachments(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	latest, err := mg.getLatestMessage(ctx, convID)
 	if err != nil {
@@ -651,7 +673,7 @@ func (mg *MicrosoftGraph) handleCreateReplyDraft(ctx context.Context, req mcp.Ca
 		return mcp.NewToolResultError("parse reply draft: " + err.Error()), nil
 	}
 
-	return jsonResult(map[string]any{"draft_id": draft.ID, "reply_to": latest.ID})
+	return mg.draftResult(ctx, map[string]any{"draft_id": draft.ID, "reply_to": latest.ID}, draft.ID, files)
 }
 
 func (mg *MicrosoftGraph) handleCreateDraft(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -665,6 +687,10 @@ func (mg *MicrosoftGraph) handleCreateDraft(ctx context.Context, req mcp.CallToo
 	toRcpts := parseRecipients(to)
 	if len(toRcpts) == 0 {
 		return mcp.NewToolResultError("to must contain at least one valid email address"), nil
+	}
+	files, err := parseGraphAttachments(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	payload := map[string]any{
@@ -697,7 +723,7 @@ func (mg *MicrosoftGraph) handleCreateDraft(ctx context.Context, req mcp.CallToo
 		return mcp.NewToolResultError("parse draft: " + err.Error()), nil
 	}
 
-	return jsonResult(map[string]any{"draft_id": draft.ID, "to": to, "subject": subject})
+	return mg.draftResult(ctx, map[string]any{"draft_id": draft.ID, "to": to, "subject": subject}, draft.ID, files)
 }
 
 func (mg *MicrosoftGraph) handleCreateForwardDraft(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -710,6 +736,16 @@ func (mg *MicrosoftGraph) handleCreateForwardDraft(ctx context.Context, req mcp.
 	comment := ""
 	if v, ok := req.GetArguments()["body"].(string); ok {
 		comment = v
+	}
+	// Recipients and files are checked before anything is created, so a
+	// wrong call leaves no draft behind.
+	toRcpts := parseRecipients(to)
+	if len(toRcpts) == 0 {
+		return mcp.NewToolResultError("to must contain at least one valid email address"), nil
+	}
+	files, err := parseGraphAttachments(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	latest, err := mg.getLatestMessage(ctx, convID)
@@ -735,10 +771,6 @@ func (mg *MicrosoftGraph) handleCreateForwardDraft(ctx context.Context, req mcp.
 	}
 
 	// Set recipients on draft
-	toRcpts := parseRecipients(to)
-	if len(toRcpts) == 0 {
-		return mcp.NewToolResultError("to must contain at least one valid email address"), nil
-	}
 	rcptPayload := map[string]any{
 		"toRecipients": toRcpts,
 	}
@@ -756,7 +788,7 @@ func (mg *MicrosoftGraph) handleCreateForwardDraft(ctx context.Context, req mcp.
 		return mcp.NewToolResultError(fmt.Sprintf("set recipients failed (HTTP %d)", status)), nil
 	}
 
-	return jsonResult(map[string]any{"draft_id": draft.ID, "forward_from": latest.ID, "to": to})
+	return mg.draftResult(ctx, map[string]any{"draft_id": draft.ID, "forward_from": latest.ID, "to": to}, draft.ID, files)
 }
 
 func (mg *MicrosoftGraph) handleSendDraft(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -856,22 +888,35 @@ func (mg *MicrosoftGraph) refreshAccessToken(ctx context.Context, refreshToken s
 }
 
 func (mg *MicrosoftGraph) doGraph(ctx context.Context, method, path string, body any) ([]byte, int, error) {
+	data, status, _, err := mg.doGraphFull(ctx, nil, method, path, body)
+	return data, status, err
+}
+
+// doGraphFull is doGraph with the response headers (for callers that read
+// Retry-After or Location) and a choice of client: nil uses the default one
+// with its 30 s per-request timeout; the attachment writes pass uploadClient,
+// which has no overall deadline because a few-MB body on a slow line needs
+// more than 30 s.
+func (mg *MicrosoftGraph) doGraphFull(ctx context.Context, client *http.Client, method, path string, body any) ([]byte, int, http.Header, error) {
+	if client == nil {
+		client = mg.client
+	}
 	if err := mg.ensureAccessToken(ctx); err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 
 	var reqBody io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return nil, 0, fmt.Errorf("marshal request: %w", err)
+			return nil, 0, nil, fmt.Errorf("marshal request: %w", err)
 		}
 		reqBody = bytes.NewReader(b)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, graphBaseURL+path, reqBody)
+	req, err := http.NewRequestWithContext(ctx, method, mg.baseURL+path, reqBody)
 	if err != nil {
-		return nil, 0, fmt.Errorf("create request: %w", err)
+		return nil, 0, nil, fmt.Errorf("create request: %w", err)
 	}
 
 	mg.mu.Lock()
@@ -884,18 +929,18 @@ func (mg *MicrosoftGraph) doGraph(ctx context.Context, method, path string, body
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := mg.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("request failed: %w", err)
+		return nil, 0, nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, graphMaxBody))
 	if err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("read response: %w", err)
+		return nil, resp.StatusCode, resp.Header, fmt.Errorf("read response: %w", err)
 	}
 
-	return data, resp.StatusCode, nil
+	return data, resp.StatusCode, resp.Header, nil
 }
 
 // --- Conversation helpers ---
@@ -971,7 +1016,7 @@ func (mg *MicrosoftGraph) collectMessages(ctx context.Context, path, convID stri
 		}
 
 		if resp.NextLink != "" {
-			after, ok := strings.CutPrefix(resp.NextLink, graphBaseURL)
+			after, ok := strings.CutPrefix(resp.NextLink, mg.baseURL)
 			if !ok {
 				break
 			}

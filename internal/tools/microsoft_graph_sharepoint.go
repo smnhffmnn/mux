@@ -124,7 +124,7 @@ func (mg *MicrosoftGraph) handleSPListItems(ctx context.Context, req mcp.CallToo
 
 	// Pagination: use page_token directly if provided
 	if pageToken, ok := req.GetArguments()["page_token"].(string); ok && pageToken != "" {
-		after, ok := strings.CutPrefix(pageToken, graphBaseURL)
+		after, ok := strings.CutPrefix(pageToken, mg.baseURL)
 		if !ok {
 			return mcp.NewToolResultError("invalid page_token — must be a full Graph API URL"), nil
 		}
@@ -370,7 +370,7 @@ func (mg *MicrosoftGraph) doGraphReport(ctx context.Context, path string) ([]byt
 		return nil, 0, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, graphBaseURL+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mg.baseURL+path, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("create request: %w", err)
 	}
