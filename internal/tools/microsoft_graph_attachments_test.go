@@ -312,7 +312,10 @@ func TestGraphCreateDraftAttachmentsInlineAndSession(t *testing.T) {
 	small := []byte("hello,world\n1,2\n")
 	smallBlob := putBlob(t, store, "data.csv", "text/csv", small)
 	large := bytes.Repeat([]byte("0123456789abcdef"), (8<<20)/16) // 8 MiB → three ranges
-	largeBlob := putBlob(t, store, "video.bin", "application/octet-stream", large)
+	// A declared type, so the assertion does not depend on the machine's mime
+	// table: an undeclared (or octet-stream) blob is typed by extension, and a
+	// runner without /etc/mime.types knows no .bin.
+	largeBlob := putBlob(t, store, "video.bin", "video/mp4", large)
 	dir := t.TempDir()
 	pathFile := filepath.Join(dir, "notes.txt")
 	if err := os.WriteFile(pathFile, []byte("from a path"), 0o600); err != nil {
@@ -345,7 +348,7 @@ func TestGraphCreateDraftAttachmentsInlineAndSession(t *testing.T) {
 	if a := byName["data.csv"]; a.ID != "att-inline-1" || a.Size != int64(len(small)) || a.ContentType != "text/csv" || a.File != blob.Ref(smallBlob.ID) {
 		t.Errorf("small: %+v", a)
 	}
-	if a := byName["Recording 2026-11-09.bin"]; a.ID != "att-session-s1" || a.Size != int64(len(large)) || a.File != blob.Ref(largeBlob.ID) {
+	if a := byName["Recording 2026-11-09.bin"]; a.ID != "att-session-s1" || a.Size != int64(len(large)) || a.ContentType != "video/mp4" || a.File != blob.Ref(largeBlob.ID) {
 		t.Errorf("large: %+v", a)
 	}
 	if a := byName["renamed.txt"]; a.ID != "att-inline-2" || a.ContentType != "text/plain; charset=utf-8" || a.File != pathFile {
@@ -363,8 +366,13 @@ func TestGraphCreateDraftAttachmentsInlineAndSession(t *testing.T) {
 	// three ranges in order, under 4 MB each, without Authorization, with
 	// Content-Range and octet-stream; the bytes arrived whole.
 	s := g.sessions["s1"]
-	if s == nil || s.item["attachmentType"] != "file" || s.item["name"] != "Recording 2026-11-09.bin" || s.item["size"] != float64(len(large)) || s.item["contentType"] != "application/octet-stream" {
-		t.Fatalf("session item: %+v", s)
+	if s == nil {
+		t.Fatal("no upload session was opened")
+	}
+	// Print the item only — the session also holds the 8 MiB buffer, and a
+	// failure message of that size is dropped by CI's log.
+	if s.item["attachmentType"] != "file" || s.item["name"] != "Recording 2026-11-09.bin" || s.item["size"] != float64(len(large)) || s.item["contentType"] != "video/mp4" {
+		t.Fatalf("session item: %+v", s.item)
 	}
 	if len(s.puts) != 3 {
 		t.Fatalf("ranges: %d, want 3: %+v", len(s.puts), s.puts)
