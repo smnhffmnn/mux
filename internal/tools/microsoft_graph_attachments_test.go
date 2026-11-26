@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -36,8 +37,21 @@ type fakeGraph struct {
 	cancels  int
 	// received answers GET /me/messages/{message}/attachments/{attachment},
 	// keyed "message/attachment": the JSON Graph returns for an attachment
-	// of a received mail.
-	received map[string]map[string]any
+	// of a received mail, without its content. receivedContent holds the
+	// bytes /$value serves for it; metaQueries records the query string of
+	// every description request.
+	received        map[string]map[string]any
+	receivedContent map[string][]byte
+	metaQueries     []string
+	valueStatus     int  // non-zero: /$value answers this status instead of the bytes
+	valueBreaksOff  bool // /$value announces the full length, sends half and drops the connection
+	valueRedirect   bool // /$value answers 302 to /download/{key}, which serves the bytes
+	valueStalls     bool // /$value sends the first half and then nothing, until the client gives up
+	// redirectHost, when set, is the host name the redirect points at (the
+	// same listener under another name); downloadHeaders records what the
+	// download URL was sent.
+	redirectHost    string
+	downloadHeaders http.Header
 
 	failInline    map[string]int // name → HTTP status to answer on POST /attachments
 	noLocation    bool           // the completing PUT answers 201 without Location
@@ -78,7 +92,7 @@ type fakeAttachment struct {
 
 func newFakeGraph(t *testing.T) *fakeGraph {
 	t.Helper()
-	g := &fakeGraph{sessions: map[string]*fakeSession{}, attached: map[string][]fakeAttachment{}, failInline: map[string]int{}, received: map[string]map[string]any{}}
+	g := &fakeGraph{sessions: map[string]*fakeSession{}, attached: map[string][]fakeAttachment{}, failInline: map[string]int{}, received: map[string]map[string]any{}, receivedContent: map[string][]byte{}}
 	g.srv = httptest.NewTLSServer(http.HandlerFunc(g.serve))
 	t.Cleanup(g.srv.Close)
 	return g
@@ -86,12 +100,13 @@ func newFakeGraph(t *testing.T) *fakeGraph {
 
 func (g *fakeGraph) client() *MicrosoftGraph {
 	return &MicrosoftGraph{
-		client:       g.srv.Client(),
-		uploadClient: g.srv.Client(),
-		baseURL:      g.srv.URL + "/v1.0",
-		name:         "test",
-		accessToken:  "test-token",
-		tokenExpiry:  time.Now().Add(time.Hour),
+		client:         g.srv.Client(),
+		uploadClient:   g.srv.Client(),
+		downloadClient: g.srv.Client(),
+		baseURL:        g.srv.URL + "/v1.0",
+		name:           "test",
+		accessToken:    "test-token",
+		tokenExpiry:    time.Now().Add(time.Hour),
 	}
 }
 
@@ -107,6 +122,17 @@ func (g *fakeGraph) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasPrefix(p, "/upload/"):
 		g.serveUpload(w, r, strings.TrimPrefix(p, "/upload/"))
+		return
+	case strings.HasPrefix(p, "/download/"):
+		// The target of a redirected /$value. The fake redirects within its
+		// own host, so the token travels along; what counts is that the
+		// bytes arrive through the redirect.
+		g.mu.Lock()
+		content := g.receivedContent[strings.TrimPrefix(p, "/download/")]
+		g.downloadHeaders = r.Header.Clone()
+		g.mu.Unlock()
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Write(content)
 		return
 	case !strings.HasPrefix(p, "/v1.0/"):
 		http.Error(w, "unknown path "+p, http.StatusNotFound)
@@ -133,9 +159,53 @@ func (g *fakeGraph) serve(w http.ResponseWriter, r *http.Request) {
 		graphFakeJSON(w, 201, map[string]any{"id": "fwd1"})
 	case r.Method == http.MethodPatch && strings.HasPrefix(p, "/me/messages/"):
 		graphFakeJSON(w, 200, map[string]any{"id": strings.TrimPrefix(p, "/me/messages/")})
+	case r.Method == http.MethodGet && strings.HasPrefix(p, "/me/messages/") && strings.HasSuffix(p, "/$value"):
+		key := strings.Replace(strings.TrimSuffix(strings.TrimPrefix(p, "/me/messages/"), "/$value"), "/attachments/", "/", 1)
+		g.mu.Lock()
+		content, ok := g.receivedContent[key]
+		status, breaksOff, redirect, stalls, redirectHost := g.valueStatus, g.valueBreaksOff, g.valueRedirect, g.valueStalls, g.redirectHost
+		g.mu.Unlock()
+		switch {
+		case status != 0:
+			graphFakeJSON(w, status, map[string]any{"error": map[string]any{"code": "ErrorInternalServerError", "message": "no content for you"}})
+		case !ok:
+			// What Graph answers for an attachment that is not a file.
+			graphFakeJSON(w, 405, map[string]any{"error": map[string]any{"code": "ErrorInvalidRequest", "message": "no raw content for " + key}})
+		case redirect:
+			target := "/download/" + key
+			if redirectHost != "" {
+				_, port, _ := net.SplitHostPort(r.Host)
+				target = "https://" + net.JoinHostPort(redirectHost, port) + target
+			}
+			http.Redirect(w, r, target, http.StatusFound)
+		case stalls:
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", fmt.Sprint(len(content)))
+			w.Write(content[:len(content)/2])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			<-r.Context().Done()
+		case breaksOff:
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", fmt.Sprint(len(content)))
+			w.Write(content[:len(content)/2])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					conn.Close()
+				}
+			}
+		default:
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Write(content)
+		}
 	case r.Method == http.MethodGet && strings.HasPrefix(p, "/me/messages/") && strings.Contains(p, "/attachments/"):
 		key := strings.Replace(strings.TrimPrefix(p, "/me/messages/"), "/attachments/", "/", 1)
 		g.mu.Lock()
+		g.metaQueries = append(g.metaQueries, r.URL.RawQuery)
 		att, ok := g.received[key]
 		g.mu.Unlock()
 		if !ok {
@@ -789,6 +859,21 @@ func TestNewMicrosoftGraphWiresClients(t *testing.T) {
 	}
 	if mg.uploadClient == nil {
 		t.Fatal("uploadClient is nil")
+	}
+	if mg.downloadClient == nil {
+		t.Fatal("downloadClient is nil")
+	}
+	if mg.downloadClient.Timeout != 0 {
+		t.Errorf("downloadClient.Timeout = %s, want 0 (a large attachment on a slow line takes as long as it takes; the handler ends a transfer that stalls)", mg.downloadClient.Timeout)
+	}
+	if mg.downloadClient == mg.client {
+		t.Error("downloadClient must be a separate client from the default one, which gives a whole request 30 s")
+	}
+	if mg.downloadClient.Transport != mg.client.Transport {
+		t.Error("downloadClient must share the transport of the default client — the dialer of a tunnel lives there")
+	}
+	if mg.downloadClient.CheckRedirect == nil {
+		t.Error("downloadClient must carry the redirect policy that drops the Referer")
 	}
 	if mg.uploadClient.Timeout != 0 {
 		t.Errorf("uploadClient.Timeout = %s, want 0 (a range on a slow line needs no overall deadline)", mg.uploadClient.Timeout)

@@ -2,14 +2,21 @@ package tools
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/smnhffmnn/mux/internal/blob"
 )
 
 // get_attachment against the fake Graph: where the bytes of a received
@@ -33,14 +40,26 @@ func (g *fakeGraph) receive(msg, att, name, contentType string, content []byte) 
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.received[msg+"/"+att] = map[string]any{
-		"@odata.type":  "#microsoft.graph.fileAttachment",
-		"id":           att,
-		"name":         name,
-		"contentType":  contentType,
-		"size":         len(content) + 180, // Graph's size counts more than the content
-		"isInline":     false,
-		"contentBytes": base64.StdEncoding.EncodeToString(content),
+		"@odata.type": "#microsoft.graph.fileAttachment",
+		"id":          att,
+		"name":        name,
+		"contentType": contentType,
+		"size":        len(content) + 180, // Graph's size counts more than the content
 	}
+	g.receivedContent[msg+"/"+att] = content
+}
+
+// valueFetches counts the requests for raw attachment content.
+func (g *fakeGraph) valueFetches() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n := 0
+	for _, r := range g.requests {
+		if strings.HasPrefix(r, "GET /v1.0/me/messages/") && strings.HasSuffix(r, "/$value") {
+			n++
+		}
+	}
+	return n
 }
 
 // attachmentFetches counts the requests for single attachments.
@@ -298,4 +317,386 @@ func TestGraphGetAttachmentDeclaresOutputFile(t *testing.T) {
 		return
 	}
 	t.Fatal("get_attachment not among the tools")
+}
+
+// The content comes from /$value as a stream, so the size of an attachment
+// is no longer bounded by a JSON answer held in memory: 20 MiB to a path,
+// where the limit used to be about 6 MB.
+func TestGraphGetAttachmentLargeFileToPath(t *testing.T) {
+	useTestBlobStore(t)
+	SetBlobStore(nil)
+	g := newFakeGraph(t)
+	mg := g.client()
+	content := attachmentBytes(20 << 20)
+	g.receive("m1", "big", "Board deck.pptx", pptxType, content)
+
+	dest := filepath.Join(t.TempDir(), "Board deck.pptx")
+	res := getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "big", "output_file": dest})
+	text := resultText(t, res)
+	if res.IsError {
+		t.Fatalf("save failed:\n%s", text)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("file differs: %d bytes on disk, %d sent, err %v", len(got), len(content), err)
+	}
+	if out := decodeAttachmentResult(t, text); out["bytesWritten"] != float64(len(content)) {
+		t.Errorf("bytesWritten = %v, want %d", out["bytesWritten"], len(content))
+	}
+	// The description is asked for without the content, the content once.
+	g.mu.Lock()
+	queries := append([]string(nil), g.metaQueries...)
+	g.mu.Unlock()
+	if len(queries) != 1 || !strings.Contains(queries[0], "select=id,name,size,contentType") || strings.Contains(queries[0], "contentBytes") {
+		t.Errorf("description requests = %q, want one with $select and without contentBytes", queries)
+	}
+	if n := g.valueFetches(); n != 1 {
+		t.Errorf("content fetched %d times, want once", n)
+	}
+}
+
+func TestGraphGetAttachmentLargeFileToBlob(t *testing.T) {
+	store := useTestBlobStore(t)
+	g := newFakeGraph(t)
+	mg := g.client()
+	content := attachmentBytes(10 << 20)
+	g.receive("m1", "big", "export.zip", "application/zip", content)
+	// An image too large to look at inline is a blob like any other file.
+	photo := append([]byte("\x89PNG\r\n\x1a\n"), attachmentBytes(6<<20)...)
+	g.receive("m1", "photo", "scan.png", "image/png", photo)
+
+	res := getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "big"})
+	out := decodeAttachmentResult(t, resultText(t, res))
+	id, _ := out["blob"].(string)
+	if res.IsError || id == "" || !bytes.Equal(readBlob(t, store, id), content) {
+		t.Fatalf("a large attachment must arrive whole in a blob: error=%v blob=%q", res.IsError, id)
+	}
+
+	res = getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "photo"})
+	if res.IsError || len(res.Content) != 1 {
+		t.Fatalf("a 6 MiB image is text plus blob, no image content: error=%v, %d parts", res.IsError, len(res.Content))
+	}
+	out = decodeAttachmentResult(t, resultText(t, res))
+	if id, _ := out["blob"].(string); id == "" || !bytes.Equal(readBlob(t, store, id), photo) {
+		t.Fatalf("the image blob does not hold the bytes")
+	}
+}
+
+// Inline base64 has a limit of its own: the bytes go through the response.
+// Too large is refused and names the way out — before the download when
+// Graph's size is far over the limit, on the bytes read otherwise.
+func TestGraphGetAttachmentInlineLimit(t *testing.T) {
+	useTestBlobStore(t)
+	SetBlobStore(nil)
+	g := newFakeGraph(t)
+	mg := g.client()
+	g.receive("m1", "big", "Board deck.pptx", pptxType, attachmentBytes(13<<20))
+	atLimit := attachmentBytes(graphInlineAttachmentMax)
+	g.receive("m1", "fits", "fits.bin", "application/octet-stream", atLimit)
+	// The content is one byte over the limit and Graph's size not far over:
+	// the figure alone does not refuse it, the bytes read do.
+	g.receive("m1", "edge", "edge.bin", "application/octet-stream", attachmentBytes(graphInlineAttachmentMax+1))
+	// Graph's size overstates the content: an attachment whose bytes fit is
+	// not refused because its reported size does not.
+	g.receive("m1", "overstated", "export.csv", "text/csv", attachmentBytes(5<<20))
+	g.mu.Lock()
+	g.received["m1/overstated"]["size"] = 7 << 20
+	g.mu.Unlock()
+
+	res := getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "big"})
+	if text := resultText(t, res); !res.IsError || !strings.Contains(text, "output_file") || !strings.Contains(text, "too large to return inline") {
+		t.Fatalf("want the inline-limit error naming output_file, got:\n%.300s", text)
+	}
+	if n := g.valueFetches(); n != 0 {
+		t.Errorf("a refusal on Graph's size must not download the content (%d fetches)", n)
+	}
+
+	res = getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "fits"})
+	if res.IsError {
+		t.Fatalf("an attachment at the limit must come back inline:\n%.300s", resultText(t, res))
+	}
+	if out := decodeAttachmentResult(t, resultText(t, res)); out["contentBytes"] != base64.StdEncoding.EncodeToString(atLimit) {
+		t.Errorf("the inline bytes differ")
+	}
+
+	before := g.valueFetches()
+	res = getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "edge"})
+	if text := resultText(t, res); !res.IsError || !strings.Contains(text, "too large to return inline") {
+		t.Fatalf("one byte over the limit must be refused, got:\n%.300s", text)
+	}
+	if n := g.valueFetches() - before; n != 1 {
+		t.Errorf("close to the limit the bytes decide, so the content is fetched once (%d fetches)", n)
+	}
+
+	res = getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "overstated"})
+	if res.IsError {
+		t.Fatalf("content under the limit must come back inline whatever size Graph reports:\n%.300s", resultText(t, res))
+	}
+}
+
+// A download that fails leaves nothing behind: no half file that would
+// block the retry, no blob holding half an attachment.
+func TestGraphGetAttachmentFailedDownloadLeavesNothing(t *testing.T) {
+	store := useTestBlobStore(t)
+	g := newFakeGraph(t)
+	mg := g.client()
+	g.receive("m1", "a1", "deck.pptx", pptxType, attachmentBytes(2<<20))
+	dir := t.TempDir()
+
+	t.Run("stream breaks off", func(t *testing.T) {
+		g.mu.Lock()
+		g.valueBreaksOff = true
+		g.mu.Unlock()
+		defer func() { g.mu.Lock(); g.valueBreaksOff = false; g.mu.Unlock() }()
+
+		dest := filepath.Join(dir, "broken.pptx")
+		res := getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "a1", "output_file": dest})
+		// The error names the line, not the disk the bytes were going to,
+		// and says that the call can be repeated.
+		if text := resultText(t, res); !res.IsError || !strings.Contains(text, "the transfer broke off after") || !strings.Contains(text, "nothing was saved") {
+			t.Fatalf("half an attachment must be an error that says what happened:\n%s", text)
+		}
+		if _, err := os.Stat(dest); err == nil {
+			t.Errorf("the half-written file was left behind")
+		}
+		res = getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "a1"})
+		if !res.IsError {
+			t.Fatalf("half an attachment must not become a blob:\n%s", resultText(t, res))
+		}
+		if n := len(store.List()); n != 0 {
+			t.Errorf("store holds %d blobs after a failed download", n)
+		}
+	})
+
+	t.Run("Graph refuses the content", func(t *testing.T) {
+		g.mu.Lock()
+		g.valueStatus = http.StatusServiceUnavailable
+		g.mu.Unlock()
+		defer func() { g.mu.Lock(); g.valueStatus = 0; g.mu.Unlock() }()
+
+		dest := filepath.Join(dir, "refused.pptx")
+		res := getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "a1", "output_file": dest})
+		if text := resultText(t, res); !res.IsError || !strings.Contains(text, "HTTP 503") {
+			t.Fatalf("want the Graph status in the error, got:\n%s", text)
+		}
+		if _, err := os.Stat(dest); err == nil {
+			t.Errorf("a file was written although Graph sent no content")
+		}
+	})
+
+	// After both failures the same path works: nothing blocked it.
+	dest := filepath.Join(dir, "broken.pptx")
+	if res := getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "a1", "output_file": dest}); res.IsError {
+		t.Fatalf("the retry failed:\n%s", resultText(t, res))
+	}
+}
+
+// A redirect on the content request has not been seen from Graph for mail
+// attachments, but the client follows one, so the bytes have to arrive
+// through it.
+func TestGraphGetAttachmentFollowsRedirect(t *testing.T) {
+	useTestBlobStore(t)
+	g := newFakeGraph(t)
+	mg := g.client()
+	content := attachmentBytes(4096)
+	g.receive("m1", "a1", "invoice.pdf", "application/pdf", content)
+	g.mu.Lock()
+	g.valueRedirect = true
+	g.mu.Unlock()
+
+	dest := filepath.Join(t.TempDir(), "invoice.pdf")
+	res := getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "a1", "output_file": dest})
+	if res.IsError {
+		t.Fatalf("save through a redirect failed:\n%s", resultText(t, res))
+	}
+	if got, _ := os.ReadFile(dest); !bytes.Equal(got, content) {
+		t.Fatalf("file content differs after the redirect")
+	}
+}
+
+// A description without @odata.type is taken for a file; one that turns out
+// to have no raw content fails with Graph's answer instead of an empty file.
+func TestGraphGetAttachmentWithoutTypeAnnotation(t *testing.T) {
+	useTestBlobStore(t)
+	g := newFakeGraph(t)
+	mg := g.client()
+	content := attachmentBytes(1000)
+	g.receive("m1", "a1", "notes.txt", "text/plain", content)
+	g.mu.Lock()
+	delete(g.received["m1/a1"], "@odata.type")
+	g.received["m1/link"] = map[string]any{"id": "link", "name": "Plan.docx", "size": 0}
+	g.mu.Unlock()
+
+	dest := filepath.Join(t.TempDir(), "notes.txt")
+	res := getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "a1", "output_file": dest})
+	if res.IsError {
+		t.Fatalf("an untyped file attachment must be saved:\n%s", resultText(t, res))
+	}
+	if got, _ := os.ReadFile(dest); !bytes.Equal(got, content) {
+		t.Fatalf("file content differs")
+	}
+
+	noFile := filepath.Join(t.TempDir(), "Plan.docx")
+	res = getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "link", "output_file": noFile})
+	if text := resultText(t, res); !res.IsError || !strings.Contains(text, "HTTP 405") {
+		t.Fatalf("want Graph's refusal for an attachment without raw content, got:\n%s", text)
+	}
+	if _, err := os.Stat(noFile); err == nil {
+		t.Errorf("an empty file was written for an attachment without content")
+	}
+}
+
+// A redirect to another host gets neither the token nor the Graph URL: Go
+// drops Authorization when the host changes, the redirect policy removes
+// the Referer. The other host here is the same listener under the second
+// name its test certificate carries.
+func TestGraphGetAttachmentRedirectToAnotherHost(t *testing.T) {
+	useTestBlobStore(t)
+	g := newFakeGraph(t)
+	mg := g.client()
+	content := attachmentBytes(4096)
+	g.receive("m1", "a1", "invoice.pdf", "application/pdf", content)
+	g.mu.Lock()
+	g.valueRedirect, g.redirectHost = true, "example.com"
+	g.mu.Unlock()
+
+	tr := g.srv.Client().Transport.(*http.Transport).Clone()
+	addr := g.srv.Listener.Addr().String()
+	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}
+	mg.downloadClient = &http.Client{Transport: tr, CheckRedirect: graphDownloadRedirect}
+
+	dest := filepath.Join(t.TempDir(), "invoice.pdf")
+	res := getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "a1", "output_file": dest})
+	if res.IsError {
+		t.Fatalf("save through a redirect failed:\n%s", resultText(t, res))
+	}
+	if got, _ := os.ReadFile(dest); !bytes.Equal(got, content) {
+		t.Fatalf("file content differs after the redirect")
+	}
+	g.mu.Lock()
+	h := g.downloadHeaders
+	g.mu.Unlock()
+	if h == nil {
+		t.Fatal("the download URL was never requested")
+	}
+	if v := h.Get("Authorization"); v != "" {
+		t.Errorf("the token went to the other host: %q", v)
+	}
+	if v := h.Get("Referer"); v != "" {
+		t.Errorf("the Graph URL went to the other host as Referer: %q", v)
+	}
+}
+
+// A download that goes silent is given up, with nothing left behind — it
+// does not hold the call for as long as the peer keeps the connection.
+func TestGraphGetAttachmentStalledDownload(t *testing.T) {
+	useTestBlobStore(t)
+	prev := graphDownloadIdle
+	graphDownloadIdle = 200 * time.Millisecond
+	t.Cleanup(func() { graphDownloadIdle = prev })
+	g := newFakeGraph(t)
+	mg := g.client()
+	g.receive("m1", "a1", "deck.pptx", pptxType, attachmentBytes(1<<20))
+	g.mu.Lock()
+	g.valueStalls = true
+	g.mu.Unlock()
+
+	dest := filepath.Join(t.TempDir(), "deck.pptx")
+	start := time.Now()
+	res := getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "a1", "output_file": dest})
+	if text := resultText(t, res); !res.IsError || !strings.Contains(text, "no data from Graph for") || !strings.Contains(text, "nothing was saved") {
+		t.Fatalf("want the stall error, got:\n%s", text)
+	}
+	if took := time.Since(start); took > 10*time.Second {
+		t.Errorf("giving up took %s", took)
+	}
+	if _, err := os.Stat(dest); err == nil {
+		t.Errorf("the half-written file was left behind")
+	}
+}
+
+// The blob store has a cap per blob. Far over it, the attachment is refused
+// before the download; over it by less, the stream stops at the cap. Both
+// name the path as the way out and leave no blob.
+func TestGraphGetAttachmentBlobCap(t *testing.T) {
+	useTestBlobStore(t)
+	store, err := blob.Open(filepath.Join(t.TempDir(), "small"), blob.Options{BaseURL: "http://127.0.0.1:7700", MaxBlob: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetBlobStore(store)
+	g := newFakeGraph(t)
+	mg := g.client()
+	g.receive("m1", "huge", "video.mp4", "video/mp4", attachmentBytes(3<<20))
+	g.receive("m1", "over", "export.zip", "application/zip", attachmentBytes(1<<20+4096))
+
+	res := getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "huge"})
+	if text := resultText(t, res); !res.IsError || !strings.Contains(text, "too large for a blob") || !strings.Contains(text, "output_file") {
+		t.Fatalf("want the refusal naming output_file, got:\n%s", text)
+	}
+	if n := g.valueFetches(); n != 0 {
+		t.Errorf("far over the cap nothing is downloaded (%d fetches)", n)
+	}
+
+	res = getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "over"})
+	if text := resultText(t, res); !res.IsError || !strings.Contains(text, "blob too large") || !strings.Contains(text, "output_file") {
+		t.Fatalf("want the cap error naming output_file, got:\n%s", text)
+	}
+	if n := len(store.List()); n != 0 {
+		t.Errorf("store holds %d blobs after a refused attachment", n)
+	}
+}
+
+// An empty image is a blob and nothing to look at: no image part with no
+// bytes in it.
+func TestGraphGetAttachmentEmptyImage(t *testing.T) {
+	useTestBlobStore(t)
+	g := newFakeGraph(t)
+	mg := g.client()
+	g.receive("m1", "empty", "pixel.png", "image/png", nil)
+
+	for _, args := range []map[string]any{
+		{"message_id": "m1", "attachment_id": "empty"},
+		{"message_id": "m1", "attachment_id": "empty", "output_file": "blob"},
+	} {
+		res := getAttachment(t, mg, args)
+		if res.IsError || len(res.Content) != 1 {
+			t.Fatalf("an empty image must come back as text only: error=%v, %d parts\n%s", res.IsError, len(res.Content), resultText(t, res))
+		}
+	}
+}
+
+// An untyped description whose content request Graph refuses (405, as for a
+// reference attachment) returns its JSON when no file was asked for — what a
+// typed one does.
+func TestGraphGetAttachmentUntypedWithoutContent(t *testing.T) {
+	useTestBlobStore(t)
+	g := newFakeGraph(t)
+	mg := g.client()
+	g.mu.Lock()
+	g.received["m1/link"] = map[string]any{"id": "link", "name": "Plan.docx", "size": 0}
+	g.mu.Unlock()
+
+	res := getAttachment(t, mg, map[string]any{"message_id": "m1", "attachment_id": "link"})
+	if res.IsError {
+		t.Fatalf("want the JSON of the attachment, got an error:\n%s", resultText(t, res))
+	}
+	if out := decodeAttachmentResult(t, resultText(t, res)); out["name"] != "Plan.docx" || out["id"] != "link" {
+		t.Errorf("result does not describe the attachment: %v", out)
+	}
+}
+
+func TestGraphDownloadFailure(t *testing.T) {
+	// A local failure stays what it is.
+	if got := graphDownloadFailure(t.Context(), &graphDownloadBody{}, errors.New("write file: disk full")); got != "write file: disk full" {
+		t.Errorf("a local error must pass through, got %q", got)
+	}
+	// A deadline of the caller is not reported as a stall.
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	if got := graphDownloadFailure(ctx, nil, errors.New("download attachment: context deadline exceeded")); strings.Contains(got, "no data from Graph") {
+		t.Errorf("the caller's deadline must not read as a stall, got %q", got)
+	}
 }
