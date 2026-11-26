@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -47,6 +48,13 @@ type MicrosoftGraph struct {
 	// line may be slow; the transport's ResponseHeaderTimeout still bounds
 	// the wait once a range is written.
 	uploadClient *http.Client
+	// downloadClient streams attachment content: the same transport, no
+	// overall timeout — the handler ends a transfer that stalls. Redirects
+	// are followed (graphDownloadRedirect): Go itself drops the
+	// Authorization header once the host is neither the first one nor a
+	// subdomain of it, and the policy removes the Referer, which would hand
+	// the Graph URL with its message and attachment ids to the target.
+	downloadClient *http.Client
 	// baseURL is the Graph endpoint every request is built on; the constant
 	// in production, a test server in tests.
 	baseURL  string
@@ -95,10 +103,11 @@ func NewMicrosoftGraph(conn config.Connection, dialer Dialer) (*MicrosoftGraph, 
 			// would replay the range body to another host, so stop at it.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-		baseURL:  graphBaseURL,
-		name:     conn.Name,
-		clientID: conn.ClientID,
-		scopes:   scopes,
+		downloadClient: &http.Client{Transport: transport, CheckRedirect: graphDownloadRedirect},
+		baseURL:        graphBaseURL,
+		name:           conn.Name,
+		clientID:       conn.ClientID,
+		scopes:         scopes,
 	}
 
 	// Try to eagerly refresh token from keychain
@@ -232,10 +241,10 @@ func (mg *MicrosoftGraph) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("get_attachment",
-				mcp.WithDescription("Get the content of a specific attachment. A file attachment (#microsoft.graph.fileAttachment) comes back as JSON with the bytes stored as a blob you fetch from mux (fields blob, blobUrl, blobRef); images up to 5 MB also as image content to look at. With output_file the bytes go to that path instead — the way to hand a file to an agent that shares a folder with the machine running mux but cannot reach mux's loopback listener. Item and reference attachments return their JSON as is; output_file is an error for them. Attachments over ~6 MB cannot be fetched, with or without output_file (mux reads Graph's JSON answer, which is capped at 8 MB). A stdio instance without a blob store returns contentBytes as base64 unless output_file names a path."),
+				mcp.WithDescription("Get the content of a specific attachment. A file attachment (#microsoft.graph.fileAttachment) comes back as JSON with the bytes stored as a blob you fetch from mux (fields blob, blobUrl, blobRef); images up to 5 MB also as image content to look at. With output_file the bytes go to that path instead — the way to hand a file to an agent that shares a folder with the machine running mux but cannot reach mux's loopback listener. Item and reference attachments return their JSON as is; output_file is an error for them. The content is streamed, so a path takes an attachment of any size the mailbox delivers and a blob one up to the store's per-blob cap (256 MiB unless configured otherwise); a download that delivers nothing for a minute is given up. A file at a path is complete only once the call has returned. A stdio instance without a blob store returns contentBytes as base64 unless output_file names a path — up to 6 MiB; a larger attachment needs output_file with a path there."),
 				mcp.WithString("message_id", mcp.Required(), mcp.Description("Message ID")),
 				mcp.WithString("attachment_id", mcp.Required(), mcp.Description("Attachment ID from list_attachments")),
-				mcp.WithString("output_file", mcp.Description("Save the file attachment instead of returning its bytes: an absolute path on the machine running mux (on Windows with a drive letter, C:\\…; ~/ expands to the home directory) — it must not exist, missing directories are created — or \"blob\" for a blob you fetch from mux. From a sandbox, give the shared folder's path on that machine, not where the folder is mounted for you; the path in the result is the machine's too. A stdio instance without its HTTP listener has no blob store; there a path keeps the bytes out of the response.")),
+				mcp.WithString("output_file", mcp.Description("Save the file attachment instead of returning its bytes: an absolute path on the machine running mux (on Windows with a drive letter, C:\\…; ~/ expands to the home directory) — it must not exist, missing directories are created — or \"blob\" for a blob you fetch from mux. From a sandbox, give the shared folder's path on that machine, not where the folder is mounted for you; the path in the result is the machine's too. A stdio instance without its HTTP listener has no blob store; there a path keeps the bytes out of the response, and is the only way for an attachment over 6 MiB.")),
 			),
 			Handler: mg.handleGetAttachment,
 		},
@@ -1286,75 +1295,82 @@ func (mg *MicrosoftGraph) handleGetAttachment(ctx context.Context, req mcp.CallT
 		}
 	}
 
-	// No $select — contentBytes is on the derived fileAttachment type, not the base attachment type.
-	data, status, err := mg.doGraph(ctx, http.MethodGet, "/me/messages/"+url.PathEscape(msgID)+"/attachments/"+url.PathEscape(attID), nil)
+	// The description first, without the bytes: $select keeps contentBytes
+	// (a property of the derived fileAttachment type) out of the answer, so
+	// this request is small whatever the attachment weighs.
+	attPath := "/me/messages/" + url.PathEscape(msgID) + "/attachments/" + url.PathEscape(attID)
+	data, status, err := mg.doGraph(ctx, http.MethodGet, attPath+"?$select=id,name,size,contentType", nil)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if status != http.StatusOK {
 		return mcp.NewToolResultError(fmt.Sprintf("Graph API error (HTTP %d): %s", status, string(data))), nil
 	}
-	if len(data) >= graphMaxBody {
-		return mcp.NewToolResultError("attachment too large to retrieve (response exceeded size limit)"), nil
-	}
-
-	var att struct {
-		ODataType    string `json:"@odata.type"`
-		ID           string `json:"id"`
-		Name         string `json:"name"`
-		Size         int    `json:"size"`
-		ContentType  string `json:"contentType"`
-		ContentBytes string `json:"contentBytes"`
-	}
+	var att graphAttachmentMeta
 	if err := json.Unmarshal(data, &att); err != nil {
 		return mcp.NewToolResultError("parse attachment: " + err.Error()), nil
 	}
 
-	if outputFile != "" {
-		// Only a file attachment has bytes to save. An item attachment (an
-		// attached mail or event) and a reference attachment (a link) do not;
-		// ignoring output_file and answering with their JSON would leave the
-		// caller looking for a file that was never written.
-		if !strings.EqualFold(att.ODataType, graphFileAttachmentType) {
-			kind := att.ODataType
-			if kind == "" {
-				kind = "(none given)"
-			}
-			return mcp.NewToolResultError(fmt.Sprintf("attachment %q (%s) has type %s, not %s — it has no file content to save; call get_attachment without output_file to read its JSON", att.Name, att.ID, kind, graphFileAttachmentType)), nil
+	// An item attachment (an attached mail or event) and a reference
+	// attachment (a link) have no file content. Their description goes
+	// through as before; with output_file that would leave the caller
+	// looking for a file that was never written, so it is an error. A
+	// description without a type is taken for a file; Graph has been seen
+	// to send the type with $select, so this is the cautious reading of an
+	// answer that should not occur.
+	if att.ODataType != "" && !strings.EqualFold(att.ODataType, graphFileAttachmentType) {
+		if outputFile != "" {
+			return mcp.NewToolResultError(fmt.Sprintf("attachment %q (%s) has type %s, not %s — it has no file content to save; call get_attachment without output_file to read its JSON", att.Name, att.ID, att.ODataType, graphFileAttachmentType)), nil
 		}
-	} else if att.ContentBytes == "" || blobStore == nil {
-		// An item or reference attachment carries no bytes, and a stdio
-		// instance has no store to hand them to: the JSON goes through as
-		// before, base64 included where there is any — with a pointer to
-		// output_file, the way out of the response for the bytes.
-		if att.ContentBytes == "" {
+		return jsonResult(att)
+	}
+
+	toPath := outputFile != "" && !wantsBlobOutput(outputFile)
+	inline := !toPath && blobStore == nil
+	if !toPath && !inline && int64(att.Size) > graphSizeCertainlyOver*blobStore.MaxBlob() {
+		// Refused before the download rather than after a few hundred MB.
+		return mcp.NewToolResultError(fmt.Sprintf("attachment %q is too large for a blob (the store takes %d bytes per blob, Graph reports a size of %d) — pass output_file with an absolute path on the machine running mux instead", att.Name, blobStore.MaxBlob(), att.Size)), nil
+	}
+	if inline && int64(att.Size) > graphSizeCertainlyOver*graphInlineAttachmentMax {
+		// Refused before the download: the bytes would have to go through
+		// the response, and the model's context, as base64. Graph's size
+		// only decides when it is far over; closer to the limit the bytes
+		// read below do.
+		return mcp.NewToolResultError(graphInlineTooLarge(att)), nil
+	}
+
+	// The bytes, raw: /$value streams the file itself, so nothing is held as
+	// base64 in a JSON answer, and a path or a blob takes whatever arrives.
+	// There is no deadline for the whole transfer — a large file on a slow
+	// line is fine — but one for silence: a peer that stops sending ends
+	// the call after graphDownloadIdle instead of holding it forever.
+	dlCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	watchdog := time.AfterFunc(graphDownloadIdle, func() { cancel(errGraphDownloadStalled) })
+	defer watchdog.Stop()
+	resp, err := mg.openGraph(dlCtx, attPath+"/$value")
+	if err != nil {
+		return mcp.NewToolResultError(graphDownloadFailure(dlCtx, nil, fmt.Errorf("download attachment: %w", err))), nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		if att.ODataType == "" && outputFile == "" && resp.StatusCode == http.StatusMethodNotAllowed {
+			// An untyped description that turns out to have no raw content
+			// (Graph answers 405 for a reference attachment): its JSON, as
+			// for a typed one.
 			return jsonResult(att)
 		}
-		// A struct, not a map: json sorts map keys, which would put a
-		// megabyte of base64 ahead of the name and the note — and a client
-		// that shortens a long result keeps only the start.
-		return jsonResult(struct {
-			ODataType    string `json:"@odata.type"`
-			ID           string `json:"id"`
-			Name         string `json:"name"`
-			Size         int    `json:"size"`
-			ContentType  string `json:"contentType"`
-			Note         string `json:"note"`
-			ContentBytes string `json:"contentBytes"`
-		}{att.ODataType, att.ID, att.Name, att.Size, att.ContentType,
-			"No blob store (this mux serves stdio without its HTTP listener), so the bytes follow inline as base64. Pass output_file with an absolute path on the machine running mux to save the file there instead.",
-			att.ContentBytes})
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		return mcp.NewToolResultError(fmt.Sprintf("download attachment: Graph API error (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(errBody)))), nil
 	}
+	watchdog.Reset(graphDownloadIdle)
+	body := &graphDownloadBody{r: resp.Body, alive: func() { watchdog.Reset(graphDownloadIdle) }}
 
-	content, err := base64.StdEncoding.DecodeString(att.ContentBytes)
-	if err != nil {
-		return mcp.NewToolResultError("decode attachment: " + err.Error()), nil
-	}
-
-	if outputFile != "" && !wantsBlobOutput(outputFile) {
-		path, n, err := writeOutputFile(outputFile, bytes.NewReader(content))
+	switch {
+	case toPath:
+		path, n, err := writeOutputFile(outputFile, body)
 		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
+			return mcp.NewToolResultError(graphDownloadFailure(dlCtx, body, err)), nil
 		}
 		// The same JSON shape as the blob answer, with the path in place of
 		// the blob. size is Graph's figure (it counts more than the content);
@@ -1370,11 +1386,49 @@ func (mg *MicrosoftGraph) handleGetAttachment(ctx context.Context, req mcp.CallT
 			"note":         fmt.Sprintf("Saved to %s on the machine running mux (%d bytes).", path, n),
 		}, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
+
+	case inline:
+		content, err := io.ReadAll(io.LimitReader(body, graphInlineAttachmentMax+1))
+		if err != nil {
+			return mcp.NewToolResultError(graphDownloadFailure(dlCtx, body, fmt.Errorf("read attachment: %w", err))), nil
+		}
+		if int64(len(content)) > graphInlineAttachmentMax {
+			return mcp.NewToolResultError(graphInlineTooLarge(att)), nil
+		}
+		// A struct, not a map: json sorts map keys, which would put a
+		// megabyte of base64 ahead of the name and the note — and a client
+		// that shortens a long result keeps only the start.
+		return jsonResult(struct {
+			ODataType    string `json:"@odata.type"`
+			ID           string `json:"id"`
+			Name         string `json:"name"`
+			Size         int    `json:"size"`
+			ContentType  string `json:"contentType"`
+			Note         string `json:"note"`
+			ContentBytes string `json:"contentBytes"`
+		}{att.ODataType, att.ID, att.Name, att.Size, att.ContentType,
+			"No blob store (this mux serves stdio without its HTTP listener), so the bytes follow inline as base64. Pass output_file with an absolute path on the machine running mux to save the file there instead.",
+			base64.StdEncoding.EncodeToString(content)})
 	}
 
-	info, err := storeBytesAsBlob(content, blob.Meta{Name: att.Name, ContentType: att.ContentType, Source: "microsoft-graph"})
+	// A blob. An image small enough to look at is read first, so it can go
+	// into the result as image content as well; whatever was read is put in
+	// front of the rest of the stream again.
+	var head []byte
+	meta := blob.Meta{Name: att.Name, ContentType: att.ContentType, Source: "microsoft-graph"}
+	isImage := strings.HasPrefix(att.ContentType, "image/") && !strings.Contains(att.ContentType, "svg")
+	if isImage && int64(att.Size) <= graphSizeCertainlyOver*blobInlineImageMax {
+		head, err = io.ReadAll(io.LimitReader(body, blobInlineImageMax+1))
+		if err != nil {
+			return mcp.NewToolResultError(graphDownloadFailure(dlCtx, body, fmt.Errorf("read attachment: %w", err))), nil
+		}
+	}
+	info, err := blobStore.Put(io.MultiReader(bytes.NewReader(head), body), meta)
 	if err != nil {
-		return mcp.NewToolResultError("store attachment: " + err.Error()), nil
+		if errors.Is(err, blob.ErrTooLarge) {
+			return mcp.NewToolResultError(fmt.Sprintf("store attachment: %v — pass output_file with an absolute path on the machine running mux instead", err)), nil
+		}
+		return mcp.NewToolResultError(graphDownloadFailure(dlCtx, body, fmt.Errorf("store attachment: %w", err))), nil
 	}
 	// The same JSON shape as before, with the bytes replaced by the blob.
 	out := map[string]any{
@@ -1390,10 +1444,130 @@ func (mg *MicrosoftGraph) handleGetAttachment(ctx context.Context, req mcp.CallT
 		"note":        blobReference(info),
 	}
 	data, _ = json.MarshalIndent(out, "", "  ")
-	if strings.HasPrefix(att.ContentType, "image/") && !strings.Contains(att.ContentType, "svg") {
-		return imageBlobResult(string(data), content, att.ContentType, nil), nil
+	// The whole image was read up front, and there is something to show: an
+	// empty attachment gets no image part — a client may refuse one.
+	if isImage && len(head) > 0 && info.Size == int64(len(head)) {
+		return imageBlobResult(string(data), head, att.ContentType, nil), nil
 	}
 	return mcp.NewToolResultText(string(data)), nil
+}
+
+// graphAttachmentMeta is what Graph says about an attachment without its
+// content. ContentBytes stays in the shape — always empty here — because
+// the JSON of an item or reference attachment has carried the field since
+// the tool exists.
+type graphAttachmentMeta struct {
+	ODataType    string `json:"@odata.type"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Size         int    `json:"size"`
+	ContentType  string `json:"contentType"`
+	ContentBytes string `json:"contentBytes"`
+}
+
+const (
+	// graphInlineAttachmentMax is the most a stdio instance without a blob
+	// store returns inline as base64 — about what the JSON answer used to
+	// carry before the content was streamed. Everything larger needs
+	// output_file: the bytes would go through the model's context.
+	graphInlineAttachmentMax = 6 << 20
+	// graphSizeCertainlyOver is the factor by which Graph's size has to
+	// exceed a limit before the limit is applied on that figure alone.
+	// Graph's size is not the content's: it counts the attachment as the
+	// mailbox stores it and has been seen 8 KB above the bytes /$value
+	// delivers for a small file (a CSV of 47,088 bytes reported as 55,183)
+	// and a few hundred bytes above for others.
+	graphSizeCertainlyOver = 2
+)
+
+// graphDownloadIdle is how long an attachment download may deliver nothing
+// — from the request to the first byte, and between bytes — before it is
+// given up. A variable so that a test does not wait a minute.
+var graphDownloadIdle = 60 * time.Second
+
+// errGraphDownloadStalled is the cancel cause of a download given up for
+// silence.
+var errGraphDownloadStalled = errors.New("attachment download stalled")
+
+// graphDownloadBody is the content stream of an attachment download. It
+// tells the watchdog about every byte that arrives and remembers how far
+// the stream got and what ended it, so a failure can be reported as what it
+// was — the line, not the disk the bytes were going to.
+type graphDownloadBody struct {
+	r     io.Reader
+	alive func()
+	n     int64
+	err   error // the first read error that is not io.EOF
+}
+
+func (b *graphDownloadBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if n > 0 {
+		b.n += int64(n)
+		b.alive()
+	}
+	if err != nil && err != io.EOF && b.err == nil {
+		b.err = err
+	}
+	return n, err
+}
+
+func graphInlineTooLarge(att graphAttachmentMeta) string {
+	return fmt.Sprintf("attachment %q is too large to return inline as base64: more than %d bytes (Graph reports a size of %d), and this mux has no blob store (it serves stdio without its HTTP listener) — pass output_file with an absolute path on the machine running mux to save the file there", att.Name, int64(graphInlineAttachmentMax), att.Size)
+}
+
+// graphDownloadFailure renders the error of a download that did not
+// complete. A stall and a stream that broke off are named as such, with the
+// note that nothing was kept; anything else (the destination exists, the
+// disk is full) is the caller's error as it is. body is nil before the
+// stream was opened.
+func graphDownloadFailure(ctx context.Context, body *graphDownloadBody, err error) string {
+	var got int64
+	if body != nil {
+		got = body.n
+	}
+	switch {
+	case errors.Is(context.Cause(ctx), errGraphDownloadStalled):
+		return fmt.Sprintf("download attachment: no data from Graph for %s, given up after %d bytes — nothing was saved, the call can be repeated", graphDownloadIdle, got)
+	case body != nil && body.err != nil:
+		return fmt.Sprintf("download attachment: the transfer broke off after %d bytes (%v) — nothing was saved, the call can be repeated", got, body.err)
+	}
+	return err.Error()
+}
+
+// graphDownloadRedirect is the redirect policy of downloadClient: follow, as
+// Go's default does (at most ten hops), but without the Referer Go would
+// add — it carries the Graph URL of the attachment.
+func graphDownloadRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	req.Header.Del("Referer")
+	return nil
+}
+
+// openGraph sends an authenticated GET and hands back the response with its
+// body unread — for content that is streamed to a file or a blob rather
+// than held in memory. It goes through downloadClient, which has no overall
+// timeout; the caller ends the transfer through ctx and closes the body.
+func (mg *MicrosoftGraph) openGraph(ctx context.Context, path string) (*http.Response, error) {
+	if err := mg.ensureAccessToken(ctx); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mg.baseURL+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	mg.mu.Lock()
+	token := mg.accessToken
+	mg.mu.Unlock()
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := mg.downloadClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	return resp, nil
 }
 
 // --- Recipient helpers ---
