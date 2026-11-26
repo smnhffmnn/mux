@@ -57,6 +57,10 @@ const (
 	graphUploadRange = 12 * 320 * 1024
 	// graphUploadBodyMax bounds what is read of a session's answers.
 	graphUploadBodyMax = 64 << 10
+	// graphFileAttachmentType is the @odata.type of an attachment that is a
+	// file — the only kind with bytes (contentBytes); item attachments are
+	// attached mails or events, reference attachments are links.
+	graphFileAttachmentType = "#microsoft.graph.fileAttachment"
 )
 
 // graphAttachmentFile is one validated entry of the attachments argument.
@@ -369,7 +373,7 @@ func (mg *MicrosoftGraph) attachInline(ctx context.Context, draftID string, f gr
 		return "", fmt.Errorf("%s changed while attaching: %d bytes now, %d when checked", f.name, len(content), f.size)
 	}
 	payload := map[string]any{
-		"@odata.type":  "#microsoft.graph.fileAttachment",
+		"@odata.type":  graphFileAttachmentType,
 		"name":         f.name,
 		"contentType":  f.contentType,
 		"contentBytes": base64.StdEncoding.EncodeToString(content),

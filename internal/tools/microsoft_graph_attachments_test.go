@@ -34,6 +34,10 @@ type fakeGraph struct {
 	sessions map[string]*fakeSession // by token
 	attached map[string][]fakeAttachment
 	cancels  int
+	// received answers GET /me/messages/{message}/attachments/{attachment},
+	// keyed "message/attachment": the JSON Graph returns for an attachment
+	// of a received mail.
+	received map[string]map[string]any
 
 	failInline    map[string]int // name → HTTP status to answer on POST /attachments
 	noLocation    bool           // the completing PUT answers 201 without Location
@@ -74,7 +78,7 @@ type fakeAttachment struct {
 
 func newFakeGraph(t *testing.T) *fakeGraph {
 	t.Helper()
-	g := &fakeGraph{sessions: map[string]*fakeSession{}, attached: map[string][]fakeAttachment{}, failInline: map[string]int{}}
+	g := &fakeGraph{sessions: map[string]*fakeSession{}, attached: map[string][]fakeAttachment{}, failInline: map[string]int{}, received: map[string]map[string]any{}}
 	g.srv = httptest.NewTLSServer(http.HandlerFunc(g.serve))
 	t.Cleanup(g.srv.Close)
 	return g
@@ -129,6 +133,16 @@ func (g *fakeGraph) serve(w http.ResponseWriter, r *http.Request) {
 		graphFakeJSON(w, 201, map[string]any{"id": "fwd1"})
 	case r.Method == http.MethodPatch && strings.HasPrefix(p, "/me/messages/"):
 		graphFakeJSON(w, 200, map[string]any{"id": strings.TrimPrefix(p, "/me/messages/")})
+	case r.Method == http.MethodGet && strings.HasPrefix(p, "/me/messages/") && strings.Contains(p, "/attachments/"):
+		key := strings.Replace(strings.TrimPrefix(p, "/me/messages/"), "/attachments/", "/", 1)
+		g.mu.Lock()
+		att, ok := g.received[key]
+		g.mu.Unlock()
+		if !ok {
+			graphFakeJSON(w, 404, map[string]any{"error": map[string]any{"code": "ErrorItemNotFound", "message": "no attachment " + key}})
+			return
+		}
+		graphFakeJSON(w, 200, att)
 	case r.Method == http.MethodGet && strings.HasSuffix(p, "/attachments"):
 		draft := strings.TrimSuffix(strings.TrimPrefix(p, "/me/messages/"), "/attachments")
 		g.mu.Lock()

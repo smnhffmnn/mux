@@ -114,6 +114,8 @@ mux writes its diagnostics to `$XDG_STATE_HOME/mux/mux.log` (default `~/.local/s
 
 The file is rotated at startup once it exceeds 5 MB; one previous generation is kept as `mux.log.1`.
 
+A file a tool writes to the disk of the machine running mux — `output_file` with a path, or the output directory of a stdio instance — leaves one line: `[output] wrote "<path>" (<n> bytes)`. The agent chooses these paths, and the content may come from outside (a mail attachment, a download); the log is where the owner of the machine sees afterwards what landed where. SSH downloads are in the SSH audit lines; files written under `output_dir` (Gemini, Supabase `function_get`) are not logged yet.
+
 The desktop app shows the active log path under **About**, with an *Open Folder* button. Connection tests (the **Test** button) log every step — tunnel resolution, target endpoint, HTTP status — at a level of detail normal operation doesn't produce, which makes the log the first place to look when a connection misbehaves.
 
 ## Secrets

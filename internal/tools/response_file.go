@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"mime"
 	"net/http"
 	"os"
@@ -22,8 +23,9 @@ import (
 // expensive to reproduce — a paid generation must not be thrown away because
 // the destination was unusable all along.
 //
-// The same checks run again in saveResponseToFile, which is the authority:
-// O_EXCL there decides the race, this is only the early exit.
+// The same checks run again in writeOutputFile (through saveResponseToFile,
+// or called directly with bytes a tool already holds), which is the
+// authority: O_EXCL there decides the race, this is only the early exit.
 func validateOutputFile(outputFile string) (string, error) {
 	if wantsBlobOutput(outputFile) {
 		if blobStore == nil {
@@ -72,32 +74,58 @@ func saveResponseToFileNamed(resp *http.Response, contentType, outputFile, note,
 	if wantsBlobOutput(outputFile) {
 		return storeResponseAsBlob(resp, contentType, name, "output_file", note, false)
 	}
-	outputFile = config.ExpandHome(outputFile)
-	clean := filepath.Clean(outputFile)
+	clean, n, err := writeOutputFile(outputFile, resp.Body)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(responseFileResult(resp, contentType, clean, n, note)), nil
+}
+
+// writeOutputFile writes src to a new file at outputFile — an absolute path
+// (~ expanded) that must not exist yet; missing directories are created. It
+// returns the cleaned path and the bytes written. The errors are the
+// messages tool results carry.
+//
+// Safety as for saveResponseToFile: O_EXCL refuses to overwrite and decides
+// the race with validateOutputFile's early check; it is not a sandbox. A
+// half-written file is removed, so a retry is not blocked by O_EXCL.
+func writeOutputFile(outputFile string, src io.Reader) (string, int64, error) {
+	expanded := config.ExpandHome(outputFile)
+	clean := filepath.Clean(expanded)
 	if !filepath.IsAbs(clean) {
-		return mcp.NewToolResultError(fmt.Sprintf("output_file must be an absolute path: %s", outputFile)), nil
+		return "", 0, fmt.Errorf("output_file must be an absolute path: %s", expanded)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(clean), 0o755); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("create directory: %v", err)), nil
+		return "", 0, fmt.Errorf("create directory: %w", err)
 	}
 
 	f, err := os.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
-			return mcp.NewToolResultError(fmt.Sprintf("output_file already exists (refusing to overwrite): %s", clean)), nil
+			return "", 0, fmt.Errorf("output_file already exists (refusing to overwrite): %s", clean)
 		}
-		return mcp.NewToolResultError(fmt.Sprintf("create file: %v", err)), nil
+		return "", 0, fmt.Errorf("create file: %w", err)
 	}
 
-	n, err := writeAndClose(f, resp.Body)
+	n, err := writeAndClose(f, src)
 	if err != nil {
-		// A half-written file would block every retry on O_EXCL.
 		os.Remove(clean)
-		return mcp.NewToolResultError(fmt.Sprintf("write file: %v", err)), nil
+		return "", 0, fmt.Errorf("write file: %w", err)
 	}
+	logFileWritten(clean, n)
+	return clean, n, nil
+}
 
-	return mcp.NewToolResultText(responseFileResult(resp, contentType, clean, n, note)), nil
+// logFileWritten records in mux's log that a tool left a file on the disk of
+// the machine running mux — at a path a tool argument named, or in the
+// output directory of a stdio instance. An agent decides these paths, and
+// what it writes may come from outside (a mail attachment, a download); the
+// line is what lets the owner of the machine see afterwards what landed
+// where. The path is quoted: it is free-form and must not be able to forge
+// a further log line.
+func logFileWritten(path string, n int64) {
+	log.Printf("[output] wrote %q (%d bytes)", path, n)
 }
 
 // saveResponseToGeneratedFile streams an HTTP response body to a fresh file in
@@ -134,6 +162,7 @@ func saveResponseToGeneratedFile(resp *http.Response, contentType, dir, pattern 
 		}
 		return mcp.NewToolResultText(fmt.Sprintf("HTTP %d %s\n\nEmpty response body, nothing written", resp.StatusCode, resp.Status)), nil
 	}
+	logFileWritten(name, n)
 
 	return mcp.NewToolResultText(responseFileResult(resp, contentType, name, n,
 		"No output_file given and no blob store (stdio instance) — written to the mux output directory. Pass output_file to choose the destination.")), nil
