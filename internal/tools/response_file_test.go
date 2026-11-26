@@ -2,10 +2,13 @@ package tools
 
 import (
 	"bytes"
+	"errors"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -120,5 +123,87 @@ func TestBinaryResponseExt(t *testing.T) {
 			t.Errorf("binaryResponseExt(%q) = (%q, %v), want (%q, %v)",
 				tc.contentType, ext, binary, tc.wantExt, tc.wantBinary)
 		}
+	}
+}
+
+// captureLog collects what the standard logger writes during the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev, flags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prev)
+		log.SetFlags(flags)
+	})
+	return &buf
+}
+
+// failingReader yields some bytes and then an error, like a body that breaks
+// off mid-transfer.
+type failingReader struct{ sent bool }
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		return copy(p, "partial"), nil
+	}
+	return 0, errors.New("connection reset")
+}
+
+func TestWriteOutputFile(t *testing.T) {
+	logged := captureLog(t)
+	dir := t.TempDir()
+
+	// A new file in a directory that does not exist yet, and one log line
+	// naming where it went.
+	dest := filepath.Join(dir, "new", "report.pdf")
+	path, n, err := writeOutputFile(dest, strings.NewReader("content"))
+	if err != nil || path != dest || n != 7 {
+		t.Fatalf("writeOutputFile = %q, %d, %v", path, n, err)
+	}
+	if got, _ := os.ReadFile(dest); string(got) != "content" {
+		t.Fatalf("file holds %q", got)
+	}
+	if want := "[output] wrote " + strconv.Quote(dest) + " (7 bytes)\n"; logged.String() != want {
+		t.Errorf("log = %q, want %q", logged.String(), want)
+	}
+
+	// The write itself refuses an existing file — the early check in
+	// validateOutputFile may be seconds old by now.
+	logged.Reset()
+	if _, _, err := writeOutputFile(dest, strings.NewReader("other")); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("an existing file must be refused, got %v", err)
+	}
+	if got, _ := os.ReadFile(dest); string(got) != "content" {
+		t.Errorf("the existing file was changed: %q", got)
+	}
+
+	// A source that breaks off leaves no half-written file behind, so a
+	// retry with the same path is not blocked.
+	broken := filepath.Join(dir, "broken.bin")
+	if _, _, err := writeOutputFile(broken, &failingReader{}); err == nil || !strings.Contains(err.Error(), "write file") {
+		t.Fatalf("a failing source must be an error, got %v", err)
+	}
+	if _, err := os.Stat(broken); err == nil {
+		t.Errorf("the half-written file was left behind")
+	}
+
+	if _, _, err := writeOutputFile("relative.txt", strings.NewReader("x")); err == nil || !strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("a relative path must be refused, got %v", err)
+	}
+	if logged.Len() != 0 {
+		t.Errorf("nothing was written, yet the log says: %q", logged.String())
+	}
+}
+
+// A path is free-form text from a tool argument: a line break in it must not
+// start a log line of its own.
+func TestLogFileWrittenQuotesThePath(t *testing.T) {
+	logged := captureLog(t)
+	logFileWritten("/tmp/a\n[output] wrote \"/etc/passwd\" (1 bytes)", 3)
+	if got := logged.String(); strings.Count(got, "\n") != 1 || !strings.Contains(got, `\n`) {
+		t.Errorf("the path must stay on one line, escaped: %q", got)
 	}
 }

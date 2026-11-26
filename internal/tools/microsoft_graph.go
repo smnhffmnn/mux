@@ -232,9 +232,10 @@ func (mg *MicrosoftGraph) Tools() []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("get_attachment",
-				mcp.WithDescription("Get the content of a specific attachment. File attachments (#microsoft.graph.fileAttachment) come back as JSON with the bytes stored as a blob you fetch from mux (fields blob, blobUrl, blobRef); images up to 5 MB also as image content to look at. Item and reference attachments return their JSON as is. Attachments over ~6 MB exceed the response limit. (A stdio instance without a blob store returns contentBytes as base64.)"),
+				mcp.WithDescription("Get the content of a specific attachment. A file attachment (#microsoft.graph.fileAttachment) comes back as JSON with the bytes stored as a blob you fetch from mux (fields blob, blobUrl, blobRef); images up to 5 MB also as image content to look at. With output_file the bytes go to that path instead — the way to hand a file to an agent that shares a folder with the machine running mux but cannot reach mux's loopback listener. Item and reference attachments return their JSON as is; output_file is an error for them. Attachments over ~6 MB cannot be fetched, with or without output_file (mux reads Graph's JSON answer, which is capped at 8 MB). A stdio instance without a blob store returns contentBytes as base64 unless output_file names a path."),
 				mcp.WithString("message_id", mcp.Required(), mcp.Description("Message ID")),
 				mcp.WithString("attachment_id", mcp.Required(), mcp.Description("Attachment ID from list_attachments")),
+				mcp.WithString("output_file", mcp.Description("Save the file attachment instead of returning its bytes: an absolute path on the machine running mux (on Windows with a drive letter, C:\\…; ~/ expands to the home directory) — it must not exist, missing directories are created — or \"blob\" for a blob you fetch from mux. From a sandbox, give the shared folder's path on that machine, not where the folder is mounted for you; the path in the result is the machine's too. A stdio instance without its HTTP listener has no blob store; there a path keeps the bytes out of the response.")),
 			),
 			Handler: mg.handleGetAttachment,
 		},
@@ -1275,6 +1276,15 @@ func (mg *MicrosoftGraph) handleGetAttachment(ctx context.Context, req mcp.CallT
 	if msgID == "" || attID == "" {
 		return mcp.NewToolResultError("message_id and attachment_id are required"), nil
 	}
+	// Checked before the download: a destination that cannot be used (not
+	// absolute, already there, "blob" without a store) fails without a round
+	// trip. writeOutputFile's O_EXCL stays the authority.
+	outputFile := strings.TrimSpace(req.GetString("output_file", ""))
+	if outputFile != "" {
+		if _, err := validateOutputFile(outputFile); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+	}
 
 	// No $select — contentBytes is on the derived fileAttachment type, not the base attachment type.
 	data, status, err := mg.doGraph(ctx, http.MethodGet, "/me/messages/"+url.PathEscape(msgID)+"/attachments/"+url.PathEscape(attID), nil)
@@ -1299,16 +1309,69 @@ func (mg *MicrosoftGraph) handleGetAttachment(ctx context.Context, req mcp.CallT
 	if err := json.Unmarshal(data, &att); err != nil {
 		return mcp.NewToolResultError("parse attachment: " + err.Error()), nil
 	}
-	if att.ContentBytes == "" || blobStore == nil {
+
+	if outputFile != "" {
+		// Only a file attachment has bytes to save. An item attachment (an
+		// attached mail or event) and a reference attachment (a link) do not;
+		// ignoring output_file and answering with their JSON would leave the
+		// caller looking for a file that was never written.
+		if !strings.EqualFold(att.ODataType, graphFileAttachmentType) {
+			kind := att.ODataType
+			if kind == "" {
+				kind = "(none given)"
+			}
+			return mcp.NewToolResultError(fmt.Sprintf("attachment %q (%s) has type %s, not %s — it has no file content to save; call get_attachment without output_file to read its JSON", att.Name, att.ID, kind, graphFileAttachmentType)), nil
+		}
+	} else if att.ContentBytes == "" || blobStore == nil {
 		// An item or reference attachment carries no bytes, and a stdio
 		// instance has no store to hand them to: the JSON goes through as
-		// before, base64 included where there is any.
-		return jsonResult(att)
+		// before, base64 included where there is any — with a pointer to
+		// output_file, the way out of the response for the bytes.
+		if att.ContentBytes == "" {
+			return jsonResult(att)
+		}
+		// A struct, not a map: json sorts map keys, which would put a
+		// megabyte of base64 ahead of the name and the note — and a client
+		// that shortens a long result keeps only the start.
+		return jsonResult(struct {
+			ODataType    string `json:"@odata.type"`
+			ID           string `json:"id"`
+			Name         string `json:"name"`
+			Size         int    `json:"size"`
+			ContentType  string `json:"contentType"`
+			Note         string `json:"note"`
+			ContentBytes string `json:"contentBytes"`
+		}{att.ODataType, att.ID, att.Name, att.Size, att.ContentType,
+			"No blob store (this mux serves stdio without its HTTP listener), so the bytes follow inline as base64. Pass output_file with an absolute path on the machine running mux to save the file there instead.",
+			att.ContentBytes})
 	}
+
 	content, err := base64.StdEncoding.DecodeString(att.ContentBytes)
 	if err != nil {
 		return mcp.NewToolResultError("decode attachment: " + err.Error()), nil
 	}
+
+	if outputFile != "" && !wantsBlobOutput(outputFile) {
+		path, n, err := writeOutputFile(outputFile, bytes.NewReader(content))
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		// The same JSON shape as the blob answer, with the path in place of
+		// the blob. size is Graph's figure (it counts more than the content);
+		// bytesWritten is what landed on disk.
+		data, _ = json.MarshalIndent(map[string]any{
+			"@odata.type":  att.ODataType,
+			"id":           att.ID,
+			"name":         att.Name,
+			"size":         att.Size,
+			"contentType":  att.ContentType,
+			"path":         path,
+			"bytesWritten": n,
+			"note":         fmt.Sprintf("Saved to %s on the machine running mux (%d bytes).", path, n),
+		}, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	}
+
 	info, err := storeBytesAsBlob(content, blob.Meta{Name: att.Name, ContentType: att.ContentType, Source: "microsoft-graph"})
 	if err != nil {
 		return mcp.NewToolResultError("store attachment: " + err.Error()), nil

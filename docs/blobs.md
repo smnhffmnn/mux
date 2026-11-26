@@ -4,7 +4,7 @@ mux does not read files from the agent's machine and does not write files to it.
 
 The reason is the topology. On a laptop, agent and mux share a disk, and a path in a tool call is enough. In a container — an agent host, a CI job, a sibling service — mux has its own file system, and a path from the agent names nothing there (`path not found: … (resolved on the machine running mux)`). Mounting the agent's directories into the mux container would make mux a service that reads other people's disks, which is not what a gateway is. The blob store is what Composio does with S3 staging and what n8n Cloud does by taking files from other services only: bytes reach the service through an interface, never through a path.
 
-Where agent and mux do share a disk, absolute paths keep working as before. The blob store is the way that works everywhere.
+Where agent and mux do share a disk, absolute paths keep working as before. The blob store is the way that works wherever the agent reaches mux's listener; an agent in a sandbox that does not is covered under [Sandboxed clients](#sandboxed-clients).
 
 ## Routes
 
@@ -67,6 +67,10 @@ The archive's top level is the project root the tool sees. For Supabase that mea
 ## What stays on the agent's side
 
 mux has no helper for the agent's shell; `curl` and `tar` are enough, and the MCP server instructions carry the commands. Where mux and the agent share a disk, nothing needs to change.
+
+## Sandboxed clients
+
+Some desktop clients run their agent in a sandbox — a virtual machine with its own loopback and an egress allowlist — while the client itself starts mux on the host over stdio. Such an agent cannot reach mux's loopback listener, so a blob URL names nothing it can fetch, and a stdio mux without a listener has no blob store in the first place (see [Configuration](#configuration)). What the two share is a folder the user has mounted into the sandbox. Tools that write files take `output_file` (`output_dir` where they write several) with an absolute path inside that folder — the host's path, not the mount point inside the sandbox — and the agent opens the file under its own mount point. Without it a stdio instance writes binary results into its own output directory under the config directory, which the sandbox does not see; and where a tool returns bytes inline as base64 (Microsoft Graph and Nylas attachments), they go through the model's context, which works for small files only. mux writes wherever the path points, with its own rights — the shared folder is a convention, not a limit; every file written this way is named in [mux's log](configuration.md#logs).
 
 ## Configuration
 
